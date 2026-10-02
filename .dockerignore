@@ -11,3 +11,6 @@ dist
 mise.local.toml
 *.pem
 .claude
+# local dev SQLite file (DATA_DIR=./data outside Docker) — CI/Fly always
+# start the real app against a fresh /data, never this
+data

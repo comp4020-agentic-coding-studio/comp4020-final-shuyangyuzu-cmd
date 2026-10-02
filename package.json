@@ -4,12 +4,14 @@
   "type": "module",
   "scripts": {
     "prepare": "git rev-parse --git-dir >/dev/null 2>&1 && git config core.hooksPath .githooks || true",
+    "dev": "DATA_DIR=./data node src/server.ts",
     "typecheck": "tsc --noEmit",
     "check": "pnpm typecheck && pnpm test",
     "check:evidence": "node scripts/check-evidence.ts",
     "test": "vitest run"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
     "@types/jsdom": "^30.0.0",
     "@types/node": "^24.0.0",
     "jsdom": "^30.1.0",
@@ -18,5 +20,11 @@
   },
   "engines": {
     "pnpm": ">=11"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.3",
+    "better-sqlite3": "^13.0.3",
+    "hono": "^4.13.12",
+    "marked": "^18.0.14"
   }
 }

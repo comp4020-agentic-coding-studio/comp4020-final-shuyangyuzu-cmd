@@ -1,0 +1,31 @@
+/* Placeholder styling — the real table view's visuals land in a later
+   phase alongside the client UI. */
+:root {
+  color-scheme: light dark;
+  --bg: #0b1021;
+  --fg: #f4f4f8;
+  --accent: #e8b339;
+}
+
+body {
+  margin: 0;
+  padding: 2rem;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: system-ui, sans-serif;
+  line-height: 1.5;
+}
+
+main {
+  max-width: 40rem;
+  margin: 0 auto;
+}
+
+a {
+  color: var(--accent);
+}
+
+.readme {
+  max-width: 48rem;
+  margin: 0 auto;
+}
