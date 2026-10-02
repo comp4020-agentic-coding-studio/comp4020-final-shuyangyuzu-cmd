@@ -123,8 +123,8 @@ stated plainly in the UI, not silently papered over).
       rejection and duplicate-request safety are already covered by
       spec/turn-engine.test.ts and spec/rooms.test.ts.) A real
       `flyctl deploy` restart check is part of phase 9.
-- [ ] 9. Deploy, verify live spec (`/`, `/readme/`, a full room lifecycle
-      against the deployed app).
+- [x] 9. Deploy, verify live spec (`/`, `/readme/`, a full room lifecycle
+      against the deployed app, including a redeploy persistence check).
 
 ## Explicitly out of scope this week
 
@@ -200,3 +200,17 @@ the reflection are for, and they're the student's own writing.)
      stringify it — a general fix, not a one-off patch, since every
      other boolean attribute in the app had the same latent bug.
   `pnpm check` stayed green (23/23) throughout.
+- 2026-10-03: deployed the real app to `comp4020-final-shuyangyuzu-cmd.fly.dev`
+  (replacing the placeholder, same Fly app/volume from before), then
+  drove a full room lifecycle against the *live* URL: create, join,
+  start, a complete round of real turns, rejoin, and a wrong-secret
+  rejection — all over HTTPS, not localhost. Then redeployed a second
+  time (no code change) specifically to check the volume survives a
+  real deploy, not just a process restart: the redeploy log said
+  "Updating existing machines" (not "Creating a... volume"), same
+  machine id both times, and the room created before the second deploy
+  was still there, byte-for-byte, afterwards — including a tie at
+  casino 1 (two players placed 2 dice each) correctly paying out
+  nothing, independently reconfirming the settlement rule on the live
+  deployment, not just in the test suite. Repo stayed private; no
+  `/ship` run.
