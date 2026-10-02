@@ -1,31 +1,200 @@
-/* Placeholder styling — the real table view's visuals land in a later
-   phase alongside the client UI. */
+/* Functional, not finished: crit 8's spec explicitly defers visual
+   polish, and the visual identity itself (product decision 5 in
+   PLAN.md) is the student's own design call, not this MVP's. This is a
+   plain, readable, accessible baseline to build on top of. */
+
 :root {
   color-scheme: light dark;
   --bg: #0b1021;
+  --panel: #161c33;
   --fg: #f4f4f8;
+  --muted: #a7acc4;
   --accent: #e8b339;
+  --border: #2a3356;
+}
+
+* {
+  box-sizing: border-box;
 }
 
 body {
   margin: 0;
-  padding: 2rem;
+  padding: 1.25rem;
   background: var(--bg);
   color: var(--fg);
   font-family: system-ui, sans-serif;
   line-height: 1.5;
 }
 
-main {
-  max-width: 40rem;
-  margin: 0 auto;
+h1,
+h2,
+h3 {
+  margin: 0 0 0.5rem;
 }
 
 a {
   color: var(--accent);
 }
 
+main,
+.entry,
+.table,
+.readme {
+  max-width: 40rem;
+  margin: 0 auto;
+}
+
 .readme {
   max-width: 48rem;
-  margin: 0 auto;
+}
+
+.note {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 1rem;
+}
+
+input,
+button {
+  font-size: 1rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.375rem;
+  border: 1px solid var(--border);
+}
+
+input {
+  background: var(--bg);
+  color: var(--fg);
+}
+
+button {
+  background: var(--accent);
+  color: #1a1206;
+  border: none;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.colors {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.color-swatch,
+.swatch {
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  padding: 0;
+  display: inline-block;
+}
+
+.swatch {
+  width: 0.9rem;
+  height: 0.9rem;
+  margin-right: 0.4rem;
+  vertical-align: middle;
+}
+
+.color-swatch.selected {
+  border-color: var(--fg);
+}
+
+.color-swatch.red,
+.swatch.red {
+  background: #d1495b;
+}
+.color-swatch.blue,
+.swatch.blue {
+  background: #3a86ff;
+}
+.color-swatch.green,
+.swatch.green {
+  background: #2a9d8f;
+}
+.color-swatch.yellow,
+.swatch.yellow {
+  background: #e9c46a;
+}
+
+.error {
+  color: #ff8a8a;
+}
+
+.players {
+  list-style: none;
+  padding: 0;
+  margin: 1rem 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.players li {
+  padding: 0.4rem 0.6rem;
+  border-radius: 0.375rem;
+  background: var(--panel);
+}
+
+.players li.current-turn {
+  outline: 2px solid var(--accent);
+}
+
+.casinos {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
+  gap: 0.5rem;
+  margin: 1rem 0;
+}
+
+.casino {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+}
+
+.casino ul {
+  list-style: none;
+  padding: 0;
+  margin: 0.25rem 0 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.bills {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.value-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.turn-note {
+  color: var(--muted);
+}
+
+.notes {
+  margin-top: 1.5rem;
+  font-size: 0.85rem;
+  color: var(--muted);
 }

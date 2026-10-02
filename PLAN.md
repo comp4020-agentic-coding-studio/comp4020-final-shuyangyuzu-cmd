@@ -111,9 +111,14 @@ stated plainly in the UI, not silently papered over).
 - [x] 6. Public API sanitization: no `session_secret` (never in
       `RoomState` at all, not just stripped at the boundary), no future
       deck order (only `deckSize` is exposed).
-- [ ] 7. Minimal client UI: lobby, table view, roll/place controls,
+- [x] 7. Minimal client UI: lobby, table view, roll/place controls,
       explicit copy on the public-winnings deviation and the
-      browser-storage recovery limit.
+      browser-storage recovery limit. Plain JS/HTML/CSS, no build step,
+      no framework — functional, visual identity intentionally left
+      unfinished (product decision 5, and the crit's own "polish can
+      wait"). Verified in a real headless-Chromium run, not just by
+      reading the code — see the progress log for the two real bugs
+      that caught.
 - [x] 8. Verification: state survives a local process restart. (Wrong-secret
       rejection and duplicate-request safety are already covered by
       spec/turn-engine.test.ts and spec/rooms.test.ts.) A real
@@ -174,3 +179,24 @@ the reflection are for, and they're the student's own writing.)
   Bash wrinkle doing this: `kill -9 <bash PID>` doesn't reach the
   underlying `node.exe` process — had to find and `taskkill //F` the
   real PID via `netstat`/`tasklist`.)
+- 2026-10-03: built the client UI (plain JS, no framework/build step) and
+  verified it by actually driving it in headless Chromium (no
+  project-level run skill existed yet; no `chromium-cli` on this
+  machine either, so set up a throwaway Playwright install outside the
+  repo and wrote a small driver script) — two browser contexts, host +
+  a second player, through create -> join -> start -> several real
+  roll/place turns. Caught two real bugs this way that reading the code
+  hadn't:
+  1. Clicking a color swatch called a full `build()` re-render, which
+     created a brand-new (empty) nickname `<input>` — selecting a color
+     after typing a nickname silently wiped it. Fixed by updating the
+     swatch's `selected` class in place instead of rebuilding the form.
+  2. The "Start game" button was disabled with 1 player but **stayed
+     disabled with 2** — `el()`'s generic attribute setter did
+     `setAttribute("disabled", null)` for the "should be enabled" case,
+     which stringifies to the literal attribute `disabled="null"`,
+     still present and still disabling the button. Fixed `el()` to omit
+     an attribute entirely for `null`/`undefined`/`false` rather than
+     stringify it — a general fix, not a one-off patch, since every
+     other boolean attribute in the app had the same latent bug.
+  `pnpm check` stayed green (23/23) throughout.
