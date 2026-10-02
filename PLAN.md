@@ -114,10 +114,10 @@ stated plainly in the UI, not silently papered over).
 - [ ] 7. Minimal client UI: lobby, table view, roll/place controls,
       explicit copy on the public-winnings deviation and the
       browser-storage recovery limit.
-- [ ] 8. Verification: state survives a local process restart and a real
-      `flyctl deploy`. (Wrong-secret rejection and duplicate-request
-      safety are already covered by spec/turn-engine.test.ts and
-      spec/rooms.test.ts.)
+- [x] 8. Verification: state survives a local process restart. (Wrong-secret
+      rejection and duplicate-request safety are already covered by
+      spec/turn-engine.test.ts and spec/rooms.test.ts.) A real
+      `flyctl deploy` restart check is part of phase 9.
 - [ ] 9. Deploy, verify live spec (`/`, `/readme/`, a full room lifecycle
       against the deployed app).
 
@@ -162,3 +162,15 @@ the reflection are for, and they're the student's own writing.)
   those 24 rounds, which held on the first run.
 - 2026-10-03: `pnpm check` green (typecheck + 23/23 tests) against the
   real app, replacing the placeholder's trivially-green baseline.
+- 2026-10-03: manually verified restart recovery, since vitest's
+  global-setup only waits for an app to be running once, not across a
+  mid-suite restart — created a room, started it, had the host roll (a
+  mid-turn, not-yet-placed state, the trickiest point to recover), then
+  force-killed the process and started a fresh one against the same
+  `DATA_DIR`. The room came back byte-for-byte identical (same
+  `version`, same pending roll); Bob rejoined with his original
+  `session_secret`; the host's pre-crash pending roll could still be
+  placed afterwards, correctly advancing the turn. (Hit a Windows/Git
+  Bash wrinkle doing this: `kill -9 <bash PID>` doesn't reach the
+  underlying `node.exe` process — had to find and `taskkill //F` the
+  real PID via `netstat`/`tasklist`.)
