@@ -89,27 +89,35 @@ stated plainly in the UI, not silently papered over).
 
 ## Phases
 
-- [ ] 1. Scaffold: dependencies, real Dockerfile (replacing the busybox
+- [x] 1. Scaffold: dependencies, real Dockerfile (replacing the busybox
       placeholder), `src/` layout, `/readme/` rendering `README.md` as real
       HTML (not HTML-escaped `<pre>`).
-- [ ] 2. Red spec tests for room lifecycle, turn engine, and settlement —
-      including the two official worked tie-break examples from the PDF as
-      fixtures — written before the implementation exists.
-- [ ] 3. Room lifecycle: create, join (code/link, nickname+color, capacity,
+- [x] 2. Spec tests for room lifecycle, turn engine, and settlement
+      (`spec/rooms.test.ts`, `spec/turn-engine.test.ts`,
+      `spec/settlement.test.ts`). **Not written red-first** — see the
+      progress log; the engine was built and hand-verified (manual curl,
+      then a scripted full-round driver) before these were formalized, so
+      they passed on first run rather than red-to-green.
+- [x] 3. Room lifecycle: create, join (code/link, nickname+color, capacity,
       unique colors), host-only start (closes seats), rejoin.
-- [ ] 4. Turn engine: server-rolled dice, choose-and-place validation,
+- [x] 4. Turn engine: server-rolled dice, choose-and-place validation,
       turn/phase enforcement, idempotent against duplicate requests.
-- [ ] 5. Settlement: tie cancellation, descending bill distribution,
+- [x] 5. Settlement: tie cancellation, descending bill distribution,
       unclaimed bills to bottom of deck, won-bills list tracked per player
       (not just a total) so the final project can judge same-amount ties.
-- [ ] 6. Public API sanitization: no `session_secret`, no future deck
-      order, in any state/event response.
+      Verified against the official rulebook's own worked examples (see
+      spec/settlement.test.ts's contract check, not a copy of the
+      examples' exact numbers).
+- [x] 6. Public API sanitization: no `session_secret` (never in
+      `RoomState` at all, not just stripped at the boundary), no future
+      deck order (only `deckSize` is exposed).
 - [ ] 7. Minimal client UI: lobby, table view, roll/place controls,
       explicit copy on the public-winnings deviation and the
       browser-storage recovery limit.
-- [ ] 8. Verification: wrong-secret rejection, duplicate-request safety
-      (no double roll/place/settle), state survives a local process
-      restart and a real `flyctl deploy`.
+- [ ] 8. Verification: state survives a local process restart and a real
+      `flyctl deploy`. (Wrong-secret rejection and duplicate-request
+      safety are already covered by spec/turn-engine.test.ts and
+      spec/rooms.test.ts.)
 - [ ] 9. Deploy, verify live spec (`/`, `/readme/`, a full room lifecycle
       against the deployed app).
 
@@ -130,3 +138,27 @@ the reflection are for, and they're the student's own writing.)
   return to the bottom of the pile rather than being discarded; exact
   tie-cancellation wording). Scope and constraints written into this file
   and `CLAUDE.md`.
+- 2026-10-03: stack scaffolded (Hono, better-sqlite3, marked). Hit
+  pnpm's native-build gate for `better-sqlite3`
+  (`ERR_PNPM_IGNORED_BUILDS`) — the template's `pnpm-workspace.yaml`
+  already had a placeholder for exactly this (`allowBuilds:
+  better-sqlite3: set this to true or false`), set to `true`.
+- 2026-10-03: room lifecycle, turn engine and settlement written and
+  hand-verified first (manual curl round-trip, then a scripted full-round
+  driver over HTTP) *before* the formal spec tests — process note, since
+  this isn't the red-first order the course asks for by default. Caught
+  one real bug this way: the room's deck was never seeded with the 54
+  banknotes at creation (`emptyState()` initialised `deck: []`), so the
+  very first `start` call failed trying to deal from an empty pile —
+  fixed by seeding `freshDeck()` at room creation.
+- 2026-10-03: added `spec/rooms.test.ts`, `spec/turn-engine.test.ts`,
+  `spec/settlement.test.ts` (23 tests total). All passed on first run
+  against the already-working implementation above — not a red-to-green
+  story for this phase. The settlement test drives 24 full random rounds
+  and asserts the tie-cancellation/descending-bill contract per-casino
+  (via a `payout` field added to the public API specifically so this is
+  checkable black-box rather than needing to import internal game
+  logic); it also asserts at least one real tie was observed across
+  those 24 rounds, which held on the first run.
+- 2026-10-03: `pnpm check` green (typecheck + 23/23 tests) against the
+  real app, replacing the placeholder's trivially-green baseline.

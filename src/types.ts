@@ -24,6 +24,10 @@ export interface Casino {
   bills: number[];
   /** playerId -> dice placed here this round. Absent/0 entries are equivalent. */
   placements: Record<string, number>;
+  /** Set once this casino settles: playerId -> the single banknote they
+   * won here. Absent for a player who was tied out or ranked below the
+   * last available bill. Undefined entirely before settlement. */
+  payout?: Record<string, number>;
 }
 
 export interface LastRoll {
@@ -70,6 +74,7 @@ export interface PublicCasino {
   value: number;
   bills: number[];
   placements: Record<string, number>;
+  payout?: Record<string, number>;
 }
 
 export interface PublicState {

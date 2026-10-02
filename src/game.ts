@@ -174,8 +174,10 @@ export function settleRound(state: RoomState): RoomState {
   for (const casino of next.casinos) {
     const { payouts, deck: deckAfter } = settleCasino(casino, deck);
     deck = deckAfter;
+    casino.payout = {};
     for (const [playerId, bills] of payouts) {
       next.players[playerId].wonBills.push(...bills);
+      casino.payout[playerId] = bills[0];
     }
     casino.bills = [];
   }

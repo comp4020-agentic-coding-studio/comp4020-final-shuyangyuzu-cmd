@@ -328,7 +328,12 @@ function toPublicState(code: string, hostPlayerId: string, version: number, stat
         moneyTotal: p.wonBills.reduce((sum, b) => sum + b, 0),
       })),
     lastRoll: state.lastRoll,
-    casinos: state.casinos.map((c) => ({ value: c.value, bills: c.bills, placements: c.placements })),
+    casinos: state.casinos.map((c) => ({
+      value: c.value,
+      bills: c.bills,
+      placements: c.placements,
+      payout: c.payout,
+    })),
     deckSize: state.deck.length,
     version,
   };
