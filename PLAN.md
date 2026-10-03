@@ -146,6 +146,85 @@ They're designed and built fresh below, not patched.
   explicit "back to home" button go through the same code path instead of
   the ad hoc `replaceState`-once approach that caused the bug above.
 
+## What was built
+
+Server: `ready` + `joinedAt` on `Player`; `startGame` now requires every
+*currently connected* player ready, host included (`src/game.ts`). New
+`src/presence.ts` (heartbeat table, separate from the versioned state
+blob on purpose — see above), with `isConnected`/`isPastGrace`/
+`pickNextHost` as pure, directly unit-tested functions
+(`spec/presence.test.ts`). A lazy sweep in `src/rooms.ts` applies the
+60-second lobby disconnect grace on every read or action, never on a
+started game. New endpoints: `heartbeat`, `ready`, `leave`, `disband`
+(host-only, requires an explicit `confirm`, lobby-only). Closed rooms
+are a first-class state (`rooms.closed_at`): `GET /state` still answers
+200 with `closed: true` rather than erroring, every mutating endpoint
+refuses with 410 `room_closed` (distinct from 404 `room_not_found`).
+22 new tests; 45/45 passing (`spec/presence.test.ts`,
+`spec/lobby.test.ts`, existing tests updated to ready-up before
+starting since start now requires it).
+
+Client (`public/app.js`, full rewrite): a single `route()` dispatcher on
+the URL + `popstate`, so back/forward and an explicit "back to home"
+button (navigates only, never leaves the room) behave correctly. Home
+offers "return to that room" when a session for one still exists.
+Invite-link copy tries the Clipboard API and falls back to a visible,
+selectable field on any failure, rather than lying "copied!" (the
+reproduced root cause). Join form hides/disables taken colors and shows
+a distinct "room closed" / "already started" message instead of a
+join form where neither would make sense. Lobby adds Ready/
+Cancel-ready (names of who isn't ready, not just "waiting for host"),
+Leave, and host-only Disband with a confirm dialog. A 5-second
+heartbeat loop runs while the page is open; nothing is wired to
+`unload`/`beforeunload`.
+
+**Bug found during verification, not anticipated in the design above:**
+clicking Ready, Start, Roll, or Place only updated the view on the
+*next* poll tick (up to 1.5s later) rather than immediately — fixed by
+having each action's handler force an immediate state refresh
+(`refreshNow()`) right after its own request succeeds, in addition to
+the regular poll.
+
+## Verification
+
+Playwright, driving two real browser contexts (plus a third for the
+two-tab scenario and a fourth at a 390px phone viewport), against a
+second local server instance started with short presence/grace windows
+(`PRESENCE_STALE_MS`/`LOBBY_GRACE_MS`, both env-overridable — see
+`src/presence.ts`) so the time-dependent behavior could be checked for
+real rather than argued from reading the code. All 8 scenarios from the
+feedback, 24 individual checks, all passed:
+
+1. Copy invite link (clipboard permission granted this time) → a second
+   browser opens it and joins directly; the join page read "Join room
+   CODE" / "Join", not "Start a table" / "Create room".
+2. "Back to home" from the join page actually navigates to `/` and
+   renders the home view.
+3. Host: kept Start-game authority across a refresh; the home page
+   offered, and correctly used, "return to that room" after landing on
+   the bare `/`; a real browser Back-button press both changed the URL
+   and re-rendered the table view (confirming `popstate` is wired up,
+   not just that `pushState` was called somewhere).
+4. A non-host leaving dropped them from the host's view immediately; a
+   host leaving transferred Start-game authority to the next player by
+   join order; a confirmed disband closed the room (checked against the
+   API directly, not just the UI).
+5. Three back-to-back refreshes never cost the host's own seat.
+   Actually closing a second player's tab (no unload handler fires —
+   the heartbeat loop just stops) and waiting past the grace period did
+   release their seat.
+6. Start stayed disabled with nobody ready, stayed disabled with only
+   one of two players ready, and enabled only once both (host included)
+   were — then actually started the game.
+7. A second tab for the same browser/identity recognized the existing
+   seat instead of re-joining; closing one of the two tabs while the
+   other stayed open did not cost the seat.
+8. At 390px width: no horizontal overflow, no console errors.
+
+This is the agent's own verification, over an automated browser, not a
+claim that the student has personally retested the deployed app — see
+"Retest steps" below for that.
+
 # Plan — crit 8 (It's alive!)
 
 A multiplayer browser dice game based on the **base game of *Las Vegas*** (Rüdiger
