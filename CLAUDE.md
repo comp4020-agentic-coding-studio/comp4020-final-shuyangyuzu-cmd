@@ -134,6 +134,20 @@ retry, a script, a misclick that somehow skips the client's own confirm
 dialog) must not be able to destroy a room. The client-side confirmation
 dialog is a courtesy; the server's check is the actual control.
 
+## A schema change needs a real migration, not just a wider CREATE TABLE
+
+`CREATE TABLE IF NOT EXISTS` only helps a table that doesn't exist yet.
+Against the real, already-deployed Fly volume, every table from the
+first deploy already exists — adding a column to that `CREATE TABLE`
+statement changes what a *fresh* database looks like and does nothing
+to the one actually running in production. Every new column goes
+through `addColumnIfMissing` (`src/db.ts`), checked with `PRAGMA
+table_info` first. And because every local test defaults to a fresh
+database (`rm -rf data` first), a schema change needs its own test
+built against a database in the *previous* shape by hand — see
+`spec/db-migration.test.ts` — not just the rest of the suite passing,
+which proves nothing about this specific failure mode.
+
 ## Routing goes through one dispatcher
 
 The client has exactly one function (`route()`) that decides what to

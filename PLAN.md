@@ -225,6 +225,34 @@ This is the agent's own verification, over an automated browser, not a
 claim that the student has personally retested the deployed app — see
 "Retest steps" below for that.
 
+## One more bug, found deploying — not caught by any of the above
+
+The first deploy of these fixes 500'd on `start`, `join` (on a closed
+room), and silently dropped the new `closed` field from every state
+response, despite every local test and the entire Playwright run above
+passing cleanly first. Cause: `CREATE TABLE IF NOT EXISTS rooms (...,
+closed_at TEXT, ...)` in `src/db.ts` is a no-op against a `rooms` table
+that **already exists on disk** — it does not retroactively add a
+column a later version introduces. Every local test run always started
+from `rm -rf data` (a fresh database every time), and even the tuned-env
+Playwright server in the section above used a fresh `./data` — so this
+specific failure mode, "a column added after the table already existed
+in production", was never actually exercised until it hit the real,
+already-deployed Fly volume (live since the crit 8 placeholder deploy).
+
+The live 500s against the deployed app were the reproduction. Fixed with
+`addColumnIfMissing` (checks `PRAGMA table_info` before an `ALTER
+TABLE`, rather than relying on `CREATE TABLE IF NOT EXISTS` to cover a
+schema change to a table that already exists), then verified the fix
+properly before redeploying: built a local database by hand in the
+exact pre-`closed_at` shape the first deploy would have left, and
+confirmed opening it with the fixed `openDb` adds the missing column
+and the `presence` table rather than erroring. Added as a permanent
+regression test (`spec/db-migration.test.ts`) rather than a one-off
+manual check, since this is exactly the kind of bug that only a test
+against a *pre-existing* database — not a fresh one — can catch, and
+every other test in this repo starts from a fresh one.
+
 # Plan — crit 8 (It's alive!)
 
 A multiplayer browser dice game based on the **base game of *Las Vegas*** (Rüdiger

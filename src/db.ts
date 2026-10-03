@@ -23,9 +23,6 @@ function migrate(db: Database.Database): void {
       code TEXT UNIQUE NOT NULL,
       host_player_id TEXT NOT NULL,
       created_at TEXT NOT NULL,
-      -- NULL while open. Set once (last player left, or the host
-      -- disbanded it) and never unset — a closed room stays closed.
-      closed_at TEXT,
       state_json TEXT NOT NULL,
       version INTEGER NOT NULL DEFAULT 1
     );
@@ -55,6 +52,21 @@ function migrate(db: Database.Database): void {
       created_at TEXT NOT NULL
     );
   `);
+
+  // Added after the first deploy. "CREATE TABLE IF NOT EXISTS" above is a
+  // no-op against a `rooms` table that already exists on disk — it does
+  // NOT retroactively add a column a later version introduced. Caught
+  // this the hard way: it worked against every fresh local database
+  // (always created from nothing) and broke only against the real,
+  // already-deployed Fly volume. addColumnIfMissing is the general fix —
+  // every future new column goes through it, not a bare ALTER TABLE.
+  addColumnIfMissing(db, "rooms", "closed_at", "TEXT");
+}
+
+function addColumnIfMissing(db: Database.Database, table: string, column: string, type: string): void {
+  const existing = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (existing.some((c) => c.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
 }
 
 export function dbPathFromEnv(): string {
