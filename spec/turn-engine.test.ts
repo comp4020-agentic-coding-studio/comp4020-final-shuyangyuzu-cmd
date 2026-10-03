@@ -4,7 +4,7 @@
 // what the client sends.
 
 import { expect, inject, it } from "vitest";
-import { createRoom, getState, joinRoom, placeDice, playFullRound, rollDice, startGame } from "./helpers.ts";
+import { createRoom, getState, joinRoom, placeDice, playFullRound, readyUpAndStart, rollDice } from "./helpers.ts";
 import type { Session } from "./helpers.ts";
 
 const baseUrl = inject("baseUrl");
@@ -12,7 +12,7 @@ const baseUrl = inject("baseUrl");
 async function startedTwoPlayerRoom(): Promise<{ code: string; host: Session; bob: Session }> {
   const host = await createRoom(baseUrl, "Alice", "red");
   const bob = (await joinRoom(baseUrl, host.code, "Bob", "blue")).body as Session;
-  await startGame(baseUrl, host.code, host);
+  await readyUpAndStart(baseUrl, host.code, host, [host, bob]);
   return { code: host.code, host, bob };
 }
 
@@ -72,7 +72,7 @@ it("conserves dice across a full round: everyone's 8 are always accounted for", 
   const host = await createRoom(baseUrl, "Alice", "red");
   const bob = (await joinRoom(baseUrl, host.code, "Bob", "blue")).body as Session;
   const carl = (await joinRoom(baseUrl, host.code, "Carl", "green")).body as Session;
-  await startGame(baseUrl, host.code, host);
+  await readyUpAndStart(baseUrl, host.code, host, [host, bob, carl]);
 
   const sessions: Record<string, Session> = {
     [host.playerId]: host,

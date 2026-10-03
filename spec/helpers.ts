@@ -53,6 +53,56 @@ export async function startGame(
   return postJson(new URL(`/api/rooms/${code}/start`, baseUrl).toString(), session);
 }
 
+export async function setReady(
+  baseUrl: string,
+  code: string,
+  session: Session,
+  ready: boolean,
+): Promise<{ status: number; body: any }> {
+  return postJson(new URL(`/api/rooms/${code}/ready`, baseUrl).toString(), { ...session, ready });
+}
+
+export async function leaveRoom(
+  baseUrl: string,
+  code: string,
+  session: Session,
+): Promise<{ status: number; body: any }> {
+  return postJson(new URL(`/api/rooms/${code}/leave`, baseUrl).toString(), session);
+}
+
+export async function disbandRoom(
+  baseUrl: string,
+  code: string,
+  session: Session,
+  confirm: boolean,
+): Promise<{ status: number; body: any }> {
+  return postJson(new URL(`/api/rooms/${code}/disband`, baseUrl).toString(), { ...session, confirm });
+}
+
+export async function heartbeat(
+  baseUrl: string,
+  code: string,
+  session: Session,
+): Promise<{ status: number; body: any }> {
+  return postJson(new URL(`/api/rooms/${code}/heartbeat`, baseUrl).toString(), session);
+}
+
+/** Marks every given session ready, then starts the game — the setup
+ * every turn-engine/settlement test needs now that start requires
+ * everyone (host included) to be ready, not just present. */
+export async function readyUpAndStart(
+  baseUrl: string,
+  code: string,
+  host: Session,
+  sessions: readonly Session[],
+): Promise<{ status: number; body: any }> {
+  for (const s of sessions) {
+    const res = await setReady(baseUrl, code, s, true);
+    if (res.status !== 200) throw new Error(`setReady failed: ${JSON.stringify(res.body)}`);
+  }
+  return startGame(baseUrl, code, host);
+}
+
 export async function rollDice(
   baseUrl: string,
   code: string,

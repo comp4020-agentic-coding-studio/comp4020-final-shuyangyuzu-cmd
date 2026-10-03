@@ -16,7 +16,7 @@ const app = new Hono();
 
 app.onError((err, c) => {
   if (err instanceof RoomError) {
-    return c.json({ error: err.code, message: err.message }, err.status as 400 | 403 | 404 | 409);
+    return c.json({ error: err.code, message: err.message }, err.status as 400 | 403 | 404 | 409 | 410);
   }
   console.error(err);
   return c.json({ error: "internal_error", message: "something went wrong" }, 500);
@@ -94,6 +94,36 @@ app.post("/api/rooms/:code/place", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as AuthedBody & { value?: unknown };
   rooms.place(db, code, playerId(body), sessionSecret(body), Number(body.value));
   return c.json(rooms.getPublicState(db, code));
+});
+
+app.post("/api/rooms/:code/heartbeat", async (c) => {
+  const code = c.req.param("code");
+  const body = (await c.req.json().catch(() => ({}))) as AuthedBody;
+  rooms.heartbeat(db, code, playerId(body), sessionSecret(body));
+  // Deliberately minimal — a heartbeat fires every few seconds per
+  // player; it doesn't need to carry the full room state back each time.
+  return c.json({ ok: true });
+});
+
+app.post("/api/rooms/:code/ready", async (c) => {
+  const code = c.req.param("code");
+  const body = (await c.req.json().catch(() => ({}))) as AuthedBody & { ready?: unknown };
+  rooms.setReady(db, code, playerId(body), sessionSecret(body), body.ready === true);
+  return c.json(rooms.getPublicState(db, code));
+});
+
+app.post("/api/rooms/:code/leave", async (c) => {
+  const code = c.req.param("code");
+  const body = (await c.req.json().catch(() => ({}))) as AuthedBody;
+  rooms.leaveRoom(db, code, playerId(body), sessionSecret(body));
+  return c.json({ ok: true });
+});
+
+app.post("/api/rooms/:code/disband", async (c) => {
+  const code = c.req.param("code");
+  const body = (await c.req.json().catch(() => ({}))) as AuthedBody & { confirm?: unknown };
+  rooms.disbandRoom(db, code, playerId(body), sessionSecret(body), body.confirm === true);
+  return c.json({ ok: true });
 });
 
 app.use("/*", serveStatic({ root: "./public", index: "index.html" }));

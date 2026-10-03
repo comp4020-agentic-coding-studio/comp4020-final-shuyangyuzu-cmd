@@ -17,6 +17,13 @@ export interface Player {
    * multi-round version of this app can judge an equal-total tie by who
    * holds more banknotes, per the official rule. */
   wonBills: number[];
+  /** Lobby-only. Defaults false on join; the host must ready up too.
+   * Meaningless once the game has started (left at whatever it was). */
+  ready: boolean;
+  /** When this player joined — the sweep's fallback "last seen" baseline
+   * until their first heartbeat lands, so nobody is swept as stale in the
+   * first few seconds after joining. */
+  joinedAt: string;
 }
 
 export interface Casino {
@@ -55,6 +62,7 @@ export interface Room {
   code: string;
   hostPlayerId: string;
   createdAt: string;
+  closedAt: string | null;
   state: RoomState;
   version: number;
 }
@@ -68,6 +76,10 @@ export interface PublicPlayer {
   diceInHand: number;
   wonBills: number[];
   moneyTotal: number;
+  ready: boolean;
+  /** Derived at read time from how recently a heartbeat landed — never
+   * stored, so it's never stale (CLAUDE.md). */
+  connected: boolean;
 }
 
 export interface PublicCasino {
@@ -80,6 +92,11 @@ export interface PublicCasino {
 export interface PublicState {
   code: string;
   hostPlayerId: string;
+  /** Set once the room has closed (host disbanded it, or its last player
+   * left). The rest of the payload is still whatever it last was —
+   * clients gate on this flag rather than expect a different shape. */
+  closed: boolean;
+  closedAt: string | null;
   phase: Phase;
   turnOrder: string[];
   currentPlayerId: string | null;

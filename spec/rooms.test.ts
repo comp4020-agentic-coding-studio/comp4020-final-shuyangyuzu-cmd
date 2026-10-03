@@ -2,7 +2,8 @@
 // product decisions 1, 2 and 6 in PLAN.md. All black-box, over HTTP.
 
 import { expect, inject, it } from "vitest";
-import { createRoom, getState, joinRoom, rejoin, startGame } from "./helpers.ts";
+import { createRoom, getState, joinRoom, readyUpAndStart, rejoin, startGame } from "./helpers.ts";
+import type { Session } from "./helpers.ts";
 
 const baseUrl = inject("baseUrl");
 
@@ -78,11 +79,11 @@ it("refuses to start with only the host present", async () => {
   expect(res.status).toBe(409);
 });
 
-it("starts the game for the host once a second player has joined", async () => {
+it("starts the game once a second player has joined and everyone is ready", async () => {
   const host = await createRoom(baseUrl, "Alice", "red");
-  await joinRoom(baseUrl, host.code, "Bob", "blue");
+  const bob = (await joinRoom(baseUrl, host.code, "Bob", "blue")).body as Session;
 
-  const res = await startGame(baseUrl, host.code, host);
+  const res = await readyUpAndStart(baseUrl, host.code, host, [host, bob]);
   expect(res.status).toBe(200);
   expect(res.body.phase).toBe("awaiting_roll");
 });
@@ -92,7 +93,7 @@ it("starts the game for the host once a second player has joined", async () => {
 it("closes new joins once the game has started, but allows rejoin", async () => {
   const host = await createRoom(baseUrl, "Alice", "red");
   const bob = await joinRoom(baseUrl, host.code, "Bob", "blue");
-  await startGame(baseUrl, host.code, host);
+  await readyUpAndStart(baseUrl, host.code, host, [host, bob.body as Session]);
 
   const lateJoin = await joinRoom(baseUrl, host.code, "Carl", "green");
   expect(lateJoin.status).toBe(409);

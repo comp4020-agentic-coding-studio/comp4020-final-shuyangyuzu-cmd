@@ -25,13 +25,25 @@ function clone(state: RoomState): RoomState {
   return structuredClone(state);
 }
 
-export function startGame(state: RoomState, rng: Rng): RoomState {
+/** `connectedPlayerIds` comes from presence (src/presence.ts), not from
+ * anything in RoomState — connectivity is never stored, only derived at
+ * the moment it's checked (CLAUDE.md). A disconnected player's `ready`
+ * flag is not enough on its own to count them in: they must currently be
+ * connected too (playtest-round-1 feedback in PLAN.md). */
+export function startGame(state: RoomState, rng: Rng, connectedPlayerIds: ReadonlySet<string>): RoomState {
   if (state.phase !== "lobby") {
     throw new GameError("the game has already started", "already_started");
   }
   const players = Object.values(state.players);
   if (players.length < 2) {
     throw new GameError("at least 2 players are needed to start", "not_enough_players");
+  }
+  const notReady = players.filter((p) => !p.ready || !connectedPlayerIds.has(p.id));
+  if (notReady.length > 0) {
+    throw new GameError(
+      `not everyone is ready: ${notReady.map((p) => p.nickname).join(", ")}`,
+      "not_all_ready",
+    );
   }
 
   const next = clone(state);

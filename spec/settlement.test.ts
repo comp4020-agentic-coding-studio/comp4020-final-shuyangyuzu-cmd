@@ -7,7 +7,7 @@
 // payout, which the API exposes for precisely this reason.
 
 import { expect, inject, it } from "vitest";
-import { createRoom, joinRoom, playFullRound, startGame } from "./helpers.ts";
+import { createRoom, joinRoom, playFullRound, readyUpAndStart } from "./helpers.ts";
 import type { Session } from "./helpers.ts";
 import type { PublicCasino, PublicState } from "../src/types.ts";
 
@@ -28,7 +28,7 @@ async function playOneRandomRound(
     const joined = (await joinRoom(baseUrl, host.code, `P${i}`, colors[i])).body as Session;
     sessions[joined.playerId] = joined;
   }
-  const started = await startGame(baseUrl, host.code, host);
+  const started = await readyUpAndStart(baseUrl, host.code, host, Object.values(sessions));
   const dealtBillsByCasino = (started.body as PublicState).casinos.map((c) => c.bills);
 
   const final = await playFullRound(baseUrl, host.code, sessions);

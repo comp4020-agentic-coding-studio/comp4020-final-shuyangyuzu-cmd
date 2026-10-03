@@ -23,8 +23,19 @@ function migrate(db: Database.Database): void {
       code TEXT UNIQUE NOT NULL,
       host_player_id TEXT NOT NULL,
       created_at TEXT NOT NULL,
+      -- NULL while open. Set once (last player left, or the host
+      -- disbanded it) and never unset — a closed room stays closed.
+      closed_at TEXT,
       state_json TEXT NOT NULL,
       version INTEGER NOT NULL DEFAULT 1
+    );
+
+    -- Heartbeat presence, deliberately NOT part of the versioned
+    -- rooms.state_json blob — see src/presence.ts for why.
+    CREATE TABLE IF NOT EXISTS presence (
+      player_id TEXT PRIMARY KEY,
+      room_id TEXT NOT NULL REFERENCES rooms(id),
+      last_seen_at TEXT NOT NULL
     );
 
     -- Identity proof for a returning player. Deliberately never joined
