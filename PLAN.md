@@ -293,8 +293,24 @@ a cached copy silently. `no-cache`, not `no-store`: the browser can
 still keep the bytes, it just has to ask first.
 
 Live verification this time was done directly against the production
-HTTPS URL, not localhost — see the dedicated verification note and
-screenshots referenced there.
+HTTPS URL, not localhost: a fresh browser context created a real room,
+a second fresh context opened the invite link and joined, checked the
+lobby's Ready/Leave/Disband buttons and the home page's "return to that
+room" banner, left, and disbanded — 12/12 checks passed, confirmed via
+screenshots and by reading the room's `closed` state back from the live
+API after disbanding, not just the UI. Deployed version: Fly release
+v6, image `deployment-01M41767MQMFKHSTQ7D959ZW9K` (`flyctl releases`).
+
+One of the first screenshots in that run looked wrong on a quick look —
+captured what seemed to be the pre-submit entry form right after
+"creating" a room. Checked before reporting it as a bug: the test
+script's own wait condition (`waitForSelector("text=Room ")`) matched
+home's own "Have a room code?" text (a case-insensitive substring match
+— "Room " is literally inside "Room code"), so it resolved instantly
+and raced ahead of the real navigation; a corrected wait
+(`button:has-text('Ready')`, which only exists in the lobby) showed the
+lobby rendering correctly all along. Noted here rather than silently
+dropped, since almost reporting a false bug is itself worth a record.
 
 # Plan — crit 8 (It's alive!)
 
