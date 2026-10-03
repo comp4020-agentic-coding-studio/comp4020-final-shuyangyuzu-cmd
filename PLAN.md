@@ -259,6 +259,43 @@ and the distinct 410 on a closed room all now behave correctly in
 production, not just locally. `/` and `/readme/` still serve; the repo
 is still private.
 
+## A third bug — found by the student, not by any of the agent's own checks
+
+The student personally checked the deployed app and still saw the old
+behavior (the old "Join instead" wording, no Ready/Leave/Disband, no
+"return to room" on home) *after* the redeploy above had gone out.
+Investigated properly rather than re-running local tests, since local
+tests and a fresh-browser-context Playwright run are structurally blind
+to this exact failure mode:
+
+1. Confirmed the right directory, the right commit, and the right Fly
+   app (`flyctl status`/`flyctl releases` showed the latest release,
+   matching image tag, deployed minutes earlier).
+2. Checked the Dockerfile and `.dockerignore`: `public/` isn't excluded,
+   there's no build step to go stale, nothing suspicious.
+3. Fetched the **live** `/app.js`, `/`, and `/styles.css` directly
+   (`curl`) and diffed them byte-for-byte against the repo's source —
+   identical. The deployed server was serving the correct, current
+   files the whole time.
+4. So the gap wasn't the deploy — it was that **no response carried any
+   `Cache-Control` header at all**. A browser that had visited the app
+   before this round's changes could serve `app.js`/`index.html` from
+   its own disk cache on an ordinary reload, with no request ever
+   reaching the server to reveal anything had changed. The agent's own
+   verification never catches this because every Playwright check (and
+   every fresh `curl`) starts from an empty cache; a real returning
+   visitor's browser does not.
+
+Fixed with a blanket `Cache-Control: no-cache` middleware
+(`src/server.ts`) — cheap for an app this size, and it forces a
+revalidation request on every load rather than letting a browser reuse
+a cached copy silently. `no-cache`, not `no-store`: the browser can
+still keep the bytes, it just has to ask first.
+
+Live verification this time was done directly against the production
+HTTPS URL, not localhost — see the dedicated verification note and
+screenshots referenced there.
+
 # Plan — crit 8 (It's alive!)
 
 A multiplayer browser dice game based on the **base game of *Las Vegas*** (Rüdiger

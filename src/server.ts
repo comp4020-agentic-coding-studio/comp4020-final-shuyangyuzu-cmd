@@ -14,6 +14,21 @@ import type { Color } from "./types.ts";
 const db = openDb(dbPathFromEnv());
 const app = new Hono();
 
+// No Cache-Control header at all (the previous state) lets a browser
+// serve app.js/index.html/styles.css straight from its own disk cache
+// on a normal reload, with no request ever reaching the server — so a
+// deploy can be live, correct, and verified, and a real person's own
+// browser still shows the previous version. `no-cache` (not `no-store`)
+// still lets the browser keep a cached copy, but forces it to
+// revalidate with the server (a conditional request) on every use —
+// cheap for an app this size, and the only way a server-side fix
+// reliably becomes something a returning player's browser actually
+// shows, without asking everyone to hard-refresh.
+app.use("*", async (c, next) => {
+  await next();
+  c.header("Cache-Control", "no-cache");
+});
+
 app.onError((err, c) => {
   if (err instanceof RoomError) {
     return c.json({ error: err.code, message: err.message }, err.status as 400 | 403 | 404 | 409 | 410);

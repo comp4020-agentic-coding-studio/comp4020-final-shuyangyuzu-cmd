@@ -148,6 +148,17 @@ built against a database in the *previous* shape by hand — see
 `spec/db-migration.test.ts` — not just the rest of the suite passing,
 which proves nothing about this specific failure mode.
 
+## Every response sets Cache-Control, deliberately
+
+A browser can serve `app.js`, `index.html`, or `styles.css` straight
+from its own disk cache on an ordinary reload with no request ever
+reaching the server at all — found the hard way: a deploy can be live,
+byte-identical to source, and fully verified by every automated check
+(which always start from an empty cache), while a real returning
+player's browser still shows what it cached from before. Every response
+carries `Cache-Control: no-cache` — not `no-store` — so a browser can
+still keep a copy but must revalidate with the server before using it.
+
 ## Routing goes through one dispatcher
 
 The client has exactly one function (`route()`) that decides what to
