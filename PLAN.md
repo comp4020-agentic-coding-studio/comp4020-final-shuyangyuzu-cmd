@@ -312,6 +312,91 @@ and raced ahead of the real navigation; a corrected wait
 lobby rendering correctly all along. Noted here rather than silently
 dropped, since almost reporting a false bug is itself worth a record.
 
+## The student's own retest still failed — caching, more precisely this time
+
+The student retested personally and still saw the old join interface;
+an ordinary refresh didn't fix it. Reasonable, and right to push back:
+"deployed + my own checks pass" is not the same claim as "fixed", and
+the previous report shouldn't have left room to read it that way.
+
+Re-checked the live headers directly before changing anything (not
+assumed): `Cache-Control: no-cache` **was** present on `/`, `/app.js`,
+and `/styles.css` in production at that moment, and the files were
+still byte-identical to source. So the no-cache middleware itself
+wasn't broken — it just isn't sufficient on its own. `no-cache` governs
+what a browser does with a *future* response; it does nothing to a
+response the browser already has sitting in its cache from before this
+app ever sent that header. A browser that cached `app.js` on an earlier
+visit (while the student was testing across several of today's
+deploys) can keep reusing that cached copy on an ordinary reload
+indefinitely, with no new request ever reaching the server to reveal
+anything changed — exactly matching "ordinary refresh didn't resolve
+it".
+
+Fixed properly this time with cache-busting, not another header:
+`src/version.ts` computes a short hash of the actual deployed
+`app.js`+`styles.css` bytes at startup; `/` is now server-rendered
+(templating `public/index.html`) so that hash lands in the script/link
+URLs (`?v=<hash>`) and is shown visibly on the page itself. A different
+URL is a different cache entry to every HTTP cache — this sidesteps the
+whole question of whether a given browser honors `no-cache` correctly
+for an old entry, rather than depending on it.
+
+**Verified the actual before/after transition this time, not just that
+the new code works in a fresh browser** — the gap in the previous
+round's evidence: built a persistent Playwright browser profile,
+pointed it at the *live* production site *before* deploying this fix,
+and let it cache `/`, `/app.js`, `/styles.css` exactly as a real
+returning visitor would. Deployed the fix. Reloaded **that same
+profile** — ordinary `goto`, no cache clearing, no hard refresh — and
+confirmed via the actual network requests made (not just the rendered
+page) that it fetched `/app.js?v=d9c58e7de2` and
+`/styles.css?v=d9c58e7de2` as fresh requests, and that this previously-
+stale browser profile now sees Ready/Leave/Disband and the correct join
+page.
+
+Then ran the student's full 6-item acceptance list again, against
+production, with screenshots for each:
+
+1. Home → entering a room code (current source's equivalent of "Join
+   instead" — see the terminology note below) → title "Join room
+   CODE", button "Join", not "Create room". **PASS.**
+2. Invite-link field's URL, opened in a separate browser, seats the
+   new player. **PASS.**
+3. Host authority recovers after a refresh, after "Back to home" then
+   "Return to that room", and after closing the page and reopening at
+   the room URL directly. **PASS** on all three.
+4. A non-host can leave voluntarily (host's view updates); the host
+   leaving transfers authority to the next player by join order.
+   **PASS.**
+5. Host disband closes the room, confirmed against the live API's
+   `closed` field, not just the UI. **PASS.**
+6. Start stays disabled with nobody ready, stays disabled with only
+   one of two ready, enables once both (host included) are, re-disables
+   on "Cancel ready", and the game actually starts once satisfied.
+   **PASS** on all five sub-checks.
+
+16/16 checks passed. The visible version (`build d9c58e7de2`) appears
+in every screenshot from this run, so it's independently checkable
+which build each screenshot is actually showing — not just taken on my
+word. Deployed as Fly release v7, image
+`deployment-01M418DGN8XER5W8ABWX73R2YH`.
+
+**Terminology note, asked about directly**: the student's acceptance
+item 1 says "点击 Join instead" — current source has no control with
+that literal text. The original "Join instead" toggle-link was replaced
+during the client rewrite with a separate "Have a room code?" text
+field + "Go" button on Home (same underlying behavior: enter a code,
+land on the join form). If what was seen and tested was literally a
+"Join instead" link, that was a stale cached build showing pre-rewrite
+UI, not a different, unfixed code path in the current source — the
+screenshots above show the current, equivalent flow instead.
+
+**This is the agent's own automated re-verification, immediately after
+deploying — not the student's own retest.** Status: awaiting the
+student's own check in their own (already-cached) browser before this
+is called resolved.
+
 # Plan — crit 8 (It's alive!)
 
 A multiplayer browser dice game based on the **base game of *Las Vegas*** (Rüdiger
