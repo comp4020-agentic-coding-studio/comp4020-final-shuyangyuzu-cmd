@@ -1,3 +1,151 @@
+# Playtest round 1 (2026-10-04) — lobby/identity/navigation fixes
+
+The student played the deployed app themselves (not the agent) and reported
+a substantial list of real problems, in their own words, grouped here as
+they gave them. This section is that feedback plus what was actually found
+when reproducing it, kept separate from the agent's own earlier QA pass
+(see the phase log further down) because it's a different kind of
+evidence — a real person using the real thing, not an automated script.
+
+## Feedback, as given
+
+**Invite link and navigation**
+- The copied invite link doesn't let a new player join properly.
+- Join mode still showed "Start a table / Create room" — should read "Join
+  a table / Join room".
+- Home, join, and room pages need distinct URLs and correct browser-history
+  navigation.
+- Needs an explicit "back to home" button, not dependent on refresh.
+- An invite link opened in a separate browser should prefill the room
+  code, let the new player fill in a nickname and pick an *available*
+  color, then join.
+- The same browser, already holding an identity for that room, should
+  restore that seat rather than show the join form again.
+- The invite link must never carry player credentials.
+
+**Identity recovery and room lifecycle**
+- Host identity can currently be lost after a refresh, back navigation, or
+  reopening — leaving everyone waiting on a host who can't start the game.
+- Fix persistent identity recovery; host authority is whatever the server
+  has on record, not inferred client-side.
+- The lobby needs a "Leave room" action; the host additionally gets
+  "Disband room", which needs confirmation.
+- Leaving voluntarily releases the seat immediately; if the host leaves,
+  host authority passes to the next player by join order.
+- When the last player leaves, the room closes; an old invite link should
+  say so, not look broken.
+- "Back to home" only navigates — it must not implicitly leave the room;
+  home should offer a way back into the current room.
+
+**Closing the page**
+- Use a heartbeat and server-side offline detection — don't leave the room
+  directly off the browser's unload event.
+- In the lobby, a disconnect should hold the seat and identity for a 60
+  second grace period before anything happens.
+- Returning within the grace period restores the original identity;
+  past it, auto-leave fires, with host transfer per the rule above.
+- Multiple tabs: as long as *one* stays connected, it must never look like
+  a leave.
+- A game already in progress keeps its existing disconnect-tolerant
+  policy — no auto-removal, no auto-skip, that part doesn't change.
+
+**Ready mechanism**
+- The lobby needs a Ready / Cancel-ready control per player, with
+  everyone's status visible.
+- The host can only start once there are at least 2 players and *everyone
+  currently present, host included,* is ready.
+- A newly-joined player defaults to not ready; start-eligibility is
+  recalculated after a host transfer, not cached.
+- The server enforces readiness and start-eligibility itself — disabling
+  the button client-side isn't enough.
+- A disconnected player must never count as an online, ready player for
+  the purpose of starting.
+- The lobby should name who isn't ready yet (or show the count), not just
+  say "waiting for host".
+
+**Verification asked for**
+Reproduce each problem before fixing it. Then, using independent browser
+contexts: (1) copy the invite link and have a new player join directly;
+(2) the join page's title/buttons/back-to-home are correct; (3) the host
+recovers identity and authority after a refresh, a back navigation, and a
+reopen-within-grace-period; (4) a voluntary leave, a host leaving (and
+transfer), and a host disband all work; (5) closing past the grace period
+releases the seat, while a plain refresh never does; (6) the game can't
+start until everyone's ready, and can once they are; (7) two tabs don't
+produce a false leave; (8) check all of this at both desktop and phone
+widths.
+
+Also asked: add tests that protect this behavior, record the feedback and
+fixes in this file and in CLAUDE.md, and — explicitly — don't write the
+student's reflection, and don't claim on the student's behalf that they've
+personally verified the fix.
+
+## Reproducing before fixing
+
+Two of the reported problems were reproduced directly, with evidence,
+before any fix was made:
+
+1. **The invite-link copy control lies about succeeding.** The handler
+   called `navigator.clipboard.writeText(shareLink)` with no `.catch`, and
+   unconditionally set the link's text to "copied!" regardless of outcome,
+   while also `preventDefault()`-ing the anchor so there was no fallback
+   way to reach the link at all. Reproduced in a fresh browser context
+   with clipboard permission denied (the realistic default, not an edge
+   case): the UI showed "copied!" while `navigator.clipboard.readText()`
+   immediately after returned `NotAllowedError: Read permission denied` —
+   i.e. nothing was actually on the clipboard, and the UI had no way of
+   knowing or saying so. A player pasting "the invite link" in this state
+   is pasting whatever was already in their clipboard, not the room. This
+   is almost certainly the direct cause of "the copied invite link doesn't
+   let a new player join".
+2. **Landing on the bare `/` with an existing room session in
+   localStorage offers no way back to it.** Reproduced: create a room as
+   host, then navigate to the plain origin (no `?room=`) — the home screen
+   shows only "Start a table / Create room", with no mention of the room
+   that still exists and is still waiting on this exact browser as its
+   host. Confirmed by inspecting `public/app.js`: the only history call in
+   the whole file was a single `history.replaceState` on room creation,
+   with no `pushState` anywhere and no `popstate` listener at all — so
+   there was never a code path that could offer "back to your room" or
+   react to the browser's own back/forward buttons. A host who ends up
+   back at this screen for any reason (typed the bare URL, an old
+   bookmark, a link shared without the `?room=` parameter) has no
+   indication their room still exists, and could easily create a second
+   room by mistake — leaving the first room's host seat unreachable from
+   that device, matching "everyone waits on a host who can't start"
+   exactly.
+
+The remaining reported problems (ready gating, disconnect/grace handling,
+leave/disband/host-transfer, distinct URLs) don't yet exist in the app at
+all — there's nothing to "reproduce" there beyond confirming the gap by
+reading the code, which the above already does for the navigation half.
+They're designed and built fresh below, not patched.
+
+## Fix plan
+
+- **Presence**: a heartbeat endpoint, written to a small table kept
+  separate from the versioned room-state blob — a heartbeat every few
+  seconds per player would otherwise contend with the optimistic-
+  concurrency version check every other action already relies on (see
+  CLAUDE.md). "Connected" is computed at read time from how recently a
+  player's heartbeat landed, never stored as a stale boolean.
+- **Lobby disconnect grace (60s)**: evaluated lazily — on every read or
+  action for a room, not via a background timer — as a function of
+  "now minus last heartbeat". This matches how the app already behaves
+  under Fly's `auto_stop_machines`: there's no process running to miss a
+  timer in when the machine is asleep, so a purely time-based, read-time
+  check is the only version that's correct regardless of whether anyone
+  was watching.
+- **Ready + leave + disband + host transfer**: new endpoints, all
+  lobby-only, all re-validated server-side (never just a disabled
+  button). Host transfer picks the remaining player with the lowest seat
+  number (join order). Last player leaving closes the room
+  (`rooms.closed_at`), checked by every endpoint afterwards.
+- **Router**: a single `route()` function driven by the URL and a
+  `popstate` listener, so the browser's own back/forward buttons and an
+  explicit "back to home" button go through the same code path instead of
+  the ad hoc `replaceState`-once approach that caused the bug above.
+
 # Plan — crit 8 (It's alive!)
 
 A multiplayer browser dice game based on the **base game of *Las Vegas*** (Rüdiger
