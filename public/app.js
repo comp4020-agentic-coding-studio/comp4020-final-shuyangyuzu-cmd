@@ -4,21 +4,28 @@
 // "the feature list... and the polish can all wait", and the visual
 // identity (product decision 5 in PLAN.md) is the student's own call to
 // design, not this MVP's.
+//
+// Routing: a single route() dispatcher driven by the URL and `popstate`,
+// so the browser's own back/forward buttons and an explicit "back to
+// home" button go through the same code path — see PLAN.md's playtest
+// round 1 section for why the previous one-off `replaceState` wasn't
+// enough.
 
 const COLORS = ["red", "blue", "green", "yellow"];
 const POLL_MS = 1500;
+const HEARTBEAT_MS = 5000; // comfortably under the server's default PRESENCE_STALE_MS (15s)
 
 const root = document.getElementById("app");
-const params = new URLSearchParams(location.search);
-const roomFromUrl = params.get("room");
 
-function storageKey(code) {
-  return `vegas:${code.toUpperCase()}`;
+// ---- Storage --------------------------------------------------------
+
+function roomSessionKey(code) {
+  return `vegas:room:${code.toUpperCase()}`;
 }
 
 function loadSession(code) {
   try {
-    const raw = localStorage.getItem(storageKey(code));
+    const raw = localStorage.getItem(roomSessionKey(code));
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null; // private window, cleared storage, etc. — fall through to join
@@ -27,12 +34,38 @@ function loadSession(code) {
 
 function saveSession(code, session) {
   try {
-    localStorage.setItem(storageKey(code), JSON.stringify(session));
+    localStorage.setItem(roomSessionKey(code), JSON.stringify(session));
+    localStorage.setItem("vegas:lastRoom", code.toUpperCase());
   } catch {
     // Storage may be unavailable (private window, quota); the game still
     // works for this tab, it just can't survive a reload. Not fatal.
   }
 }
+
+function clearSession(code) {
+  try {
+    localStorage.removeItem(roomSessionKey(code));
+    if (localStorage.getItem("vegas:lastRoom") === code.toUpperCase()) {
+      localStorage.removeItem("vegas:lastRoom");
+    }
+  } catch {
+    // nothing to do
+  }
+}
+
+/** For Home's "return to your room" offer — only returned if a session
+ * for it still actually exists (not just a dangling pointer). */
+function lastActiveRoom() {
+  try {
+    const code = localStorage.getItem("vegas:lastRoom");
+    if (!code) return null;
+    return loadSession(code) ? code : null;
+  } catch {
+    return null;
+  }
+}
+
+// ---- API helpers ------------------------------------------------------
 
 async function api(path, body) {
   const res = await fetch(`/api${path}`, {
@@ -50,6 +83,8 @@ async function getState(code) {
   if (!res.ok) throw Object.assign(new Error("room not found"), { status: res.status });
   return res.json();
 }
+
+// ---- Tiny DOM helper --------------------------------------------------
 
 function el(tag, attrs = {}, children = []) {
   const node = document.createElement(tag);
@@ -74,14 +109,50 @@ function render(node) {
   root.replaceChildren(node);
 }
 
-// ---- Entry form (create or join) -----------------------------------
+function backToHomeButton() {
+  return el("button", { type: "button", class: "secondary", onclick: () => navigate("/") }, "Back to home");
+}
 
-function entryView(initialCode) {
-  let mode = initialCode ? "join" : "choose";
+// ---- Router -------------------------------------------------------------
+
+function codeFromUrl() {
+  return new URLSearchParams(location.search).get("room");
+}
+
+function navigate(path) {
+  history.pushState(null, "", path);
+  route();
+}
+
+window.addEventListener("popstate", route);
+
+function route() {
+  stopHeartbeat();
+  stopPolling();
+  const code = codeFromUrl();
+  if (!code) {
+    renderHome();
+    return;
+  }
+  const upper = code.toUpperCase();
+  const session = loadSession(upper);
+  if (session) {
+    enterRoom(upper, session);
+  } else {
+    renderJoinOrClosed(upper);
+  }
+}
+
+// ---- Home ---------------------------------------------------------------
+
+function renderHome() {
   let selectedColor = COLORS[0];
-  let nicknameValue = ""; // survives a mode switch (e.g. "Join instead"), unlike a rebuilt <input>'s own value
+  let nicknameValue = "";
+  let joinCodeValue = "";
 
   function build() {
+    const last = lastActiveRoom();
+
     const nicknameInput = el("input", {
       type: "text",
       placeholder: "Your nickname",
@@ -98,67 +169,194 @@ function entryView(initialCode) {
         class: `color-swatch ${c}` + (c === selectedColor ? " selected" : ""),
         "aria-label": c,
         onclick: () => {
-          // Update the selection in place, rather than calling build()
-          // (a full form rebuild) — build() creates fresh input
-          // elements, which would silently wipe whatever the player had
-          // already typed into the nickname field.
           selectedColor = c;
           swatchButtons.forEach((btn, i) => btn.classList.toggle("selected", COLORS[i] === selectedColor));
         },
       }),
     );
-    const colorPicker = el("div", { class: "colors" }, swatchButtons);
-
-    const onSubmit = async (e) => {
-      e.preventDefault();
-      const nickname = nicknameInput.value.trim();
-      if (!nickname) return;
-      try {
-        if (mode === "choose" || mode === "create") {
-          const session = await api("/rooms", { nickname, color: selectedColor });
-          saveSession(session.code, session);
-          history.replaceState(null, "", `?room=${session.code}`);
-          enterRoom(session.code);
-        } else {
-          const code = initialCode.toUpperCase();
-          const session = await api(`/rooms/${code}/join`, { nickname, color: selectedColor });
-          saveSession(code, session);
-          enterRoom(code);
-        }
-      } catch (err) {
-        showError(err);
-      }
-    };
-
-    const form = el("form", { onsubmit: onSubmit }, [
-      el("h2", {}, mode === "join" ? `Join room ${initialCode?.toUpperCase() ?? ""}` : "Start a table"),
-      nicknameInput,
-      colorPicker,
-      el("button", { type: "submit" }, mode === "join" ? "Join" : "Create room"),
-    ]);
-
-    const switcher =
-      mode === "choose"
-        ? el("p", {}, [
-            "Have a room code? ",
-            el("a", { href: "#", onclick: (e) => { e.preventDefault(); mode = "join-code"; initialCode = ""; build(); } }, "Join instead"),
-          ])
-        : null;
-
-    const codeField =
-      mode === "join-code"
-        ? el("input", {
-            type: "text",
-            placeholder: "Room code (6 characters)",
-            maxlength: "6",
-            oninput: (e) => {
-              initialCode = e.target.value;
-            },
-          })
-        : null;
-    if (codeField) form.insertBefore(codeField, form.firstChild.nextSibling);
 
     const errorBox = el("p", { class: "error", id: "entry-error" });
+
+    const createForm = el(
+      "form",
+      {
+        onsubmit: async (e) => {
+          e.preventDefault();
+          const nickname = nicknameInput.value.trim();
+          if (!nickname) return;
+          try {
+            const session = await api("/rooms", { nickname, color: selectedColor });
+            saveSession(session.code, session);
+            navigate(`/?room=${session.code}`);
+          } catch (err) {
+            errorBox.textContent = err.message ?? "something went wrong";
+          }
+        },
+      },
+      [
+        el("h2", {}, "Start a table"),
+        nicknameInput,
+        el("div", { class: "colors" }, swatchButtons),
+        el("button", { type: "submit" }, "Create room"),
+      ],
+    );
+
+    const joinByCodeForm = el(
+      "form",
+      {
+        class: "join-by-code",
+        onsubmit: (e) => {
+          e.preventDefault();
+          const code = joinCodeValue.trim();
+          if (code) navigate(`/?room=${code.toUpperCase()}`);
+        },
+      },
+      [
+        el("input", {
+          type: "text",
+          placeholder: "Room code (6 characters)",
+          maxlength: "6",
+          oninput: (e) => {
+            joinCodeValue = e.target.value;
+          },
+        }),
+        el("button", { type: "submit" }, "Go"),
+      ],
+    );
+
+    render(
+      el("div", { class: "entry" }, [
+        el("h1", {}, "Vegas"),
+        el("p", { class: "note" }, [
+          "Built for a handful of friends sitting around one table, each on ",
+          "their own phone — not for matchmaking with strangers.",
+        ]),
+        last
+          ? el("div", { class: "return-banner" }, [
+              el("p", {}, `You still have a seat in room ${last}.`),
+              el(
+                "button",
+                { type: "button", onclick: () => navigate(`/?room=${last}`) },
+                "Return to that room",
+              ),
+            ])
+          : null,
+        createForm,
+        errorBox,
+        el("p", {}, "Have a room code?"),
+        joinByCodeForm,
+      ].filter(Boolean)),
+    );
+  }
+
+  build();
+}
+
+// ---- Join (a code with no local session) --------------------------------
+
+async function renderJoinOrClosed(code) {
+  render(el("p", {}, "Loading…"));
+  let state;
+  try {
+    state = await getState(code);
+  } catch {
+    render(
+      el("div", { class: "entry" }, [
+        el("h1", {}, "Vegas"),
+        el("p", { class: "error" }, `No room found for code ${code}.`),
+        backToHomeButton(),
+      ]),
+    );
+    return;
+  }
+
+  if (state.closed) {
+    render(
+      el("div", { class: "entry" }, [
+        el("h1", {}, "Vegas"),
+        el("p", {}, `Room ${code} has closed.`),
+        backToHomeButton(),
+      ]),
+    );
+    return;
+  }
+
+  if (state.phase !== "lobby") {
+    render(
+      el("div", { class: "entry" }, [
+        el("h1", {}, "Vegas"),
+        el("p", {}, `Room ${code} has already started, and this browser doesn't hold a seat in it.`),
+        backToHomeButton(),
+      ]),
+    );
+    return;
+  }
+
+  renderJoinForm(code, state);
+}
+
+function renderJoinForm(code, initialState) {
+  const takenColors = new Set(initialState.players.map((p) => p.color));
+  const firstAvailable = COLORS.find((c) => !takenColors.has(c)) ?? COLORS[0];
+  let selectedColor = firstAvailable;
+  let nicknameValue = "";
+
+  function build(state) {
+    const stillTaken = new Set(state.players.map((p) => p.color));
+    if (stillTaken.has(selectedColor)) {
+      selectedColor = COLORS.find((c) => !stillTaken.has(c)) ?? selectedColor;
+    }
+
+    const nicknameInput = el("input", {
+      type: "text",
+      placeholder: "Your nickname",
+      maxlength: "20",
+      id: "nickname",
+      value: nicknameValue,
+      oninput: (e) => {
+        nicknameValue = e.target.value;
+      },
+    });
+
+    const swatchButtons = COLORS.map((c) => {
+      const takenByOther = stillTaken.has(c);
+      return el("button", {
+        type: "button",
+        class: `color-swatch ${c}` + (c === selectedColor ? " selected" : "") + (takenByOther ? " taken" : ""),
+        disabled: takenByOther,
+        "aria-label": takenByOther ? `${c} (taken)` : c,
+        onclick: () => {
+          selectedColor = c;
+          swatchButtons.forEach((btn, i) => btn.classList.toggle("selected", COLORS[i] === selectedColor));
+        },
+      });
+    });
+
+    const errorBox = el("p", { class: "error", id: "entry-error" });
+
+    const form = el(
+      "form",
+      {
+        onsubmit: async (e) => {
+          e.preventDefault();
+          const nickname = nicknameInput.value.trim();
+          if (!nickname) return;
+          try {
+            const session = await api(`/rooms/${code}/join`, { nickname, color: selectedColor });
+            saveSession(code, session);
+            enterRoom(code, session); // URL is already ?room=CODE — no history change needed
+          } catch (err) {
+            errorBox.textContent = err.message ?? "something went wrong";
+          }
+        },
+      },
+      [
+        el("h2", {}, `Join room ${code}`),
+        nicknameInput,
+        el("div", { class: "colors" }, swatchButtons),
+        el("button", { type: "submit" }, "Join"),
+      ],
+    );
 
     render(
       el("div", { class: "entry" }, [
@@ -169,116 +367,293 @@ function entryView(initialCode) {
         ]),
         form,
         errorBox,
-        switcher,
-      ].filter(Boolean)),
+        backToHomeButton(),
+      ]),
     );
   }
 
-  function showError(err) {
-    const box = document.getElementById("entry-error");
-    if (box) box.textContent = err.message ?? "something went wrong";
-  }
-
-  build();
+  build(initialState);
 }
 
 // ---- Table / lobby view ---------------------------------------------
 
-function enterRoom(code) {
-  const session = loadSession(code);
-  if (!session) {
-    entryView(code);
-    return;
-  }
+function enterRoom(code, session) {
   // Confirm the stored session is still valid before committing to it —
-  // a cleared/rotated secret should fall back to the join form, not a
-  // silent dead end (CLAUDE.md: identity recovery is browser-local and
-  // has no fallback once that's gone; the UI says so, it doesn't hide it).
+  // a cleared/rotated secret should fall back to a clear message with a
+  // way out, not a silent dead end (CLAUDE.md: identity recovery is
+  // browser-local and has no fallback once that's gone; the UI says so).
   api(`/rooms/${code}/rejoin`, session)
-    .then(() => startPolling(code, session))
+    .then(() => {
+      startHeartbeat(code, session);
+      startPolling(code, session);
+    })
     .catch(() => {
       render(
         el("div", { class: "entry" }, [
           el("h1", {}, "Vegas"),
-          el("p", { class: "error" }, "This browser's saved seat for this room no longer works (cleared data, or a different device). There's no way to recover it — ask the host for a fresh invite if the room hasn't started yet."),
+          el(
+            "p",
+            { class: "error" },
+            "This browser's saved seat for this room no longer works (cleared data, or a different device). There's no way to recover it — ask the host for a fresh invite if the room hasn't started yet.",
+          ),
+          backToHomeButton(),
         ]),
       );
     });
 }
 
 let pollHandle = null;
+let heartbeatHandle = null;
+// Set by startPolling to its own tick function, so an action handler
+// (ready/start/roll/place/...) can force an immediate state refresh
+// right after its own request succeeds, rather than leaving the player
+// looking at a stale view for up to POLL_MS until the next scheduled
+// tick — which is both confusing and was caught producing a flaky-
+// looking "the button didn't work" moment during verification.
+let refreshNow = () => {};
+
+function stopPolling() {
+  if (pollHandle) clearInterval(pollHandle);
+  pollHandle = null;
+  refreshNow = () => {};
+}
+
+function stopHeartbeat() {
+  if (heartbeatHandle) clearInterval(heartbeatHandle);
+  heartbeatHandle = null;
+}
+
+function startHeartbeat(code, session) {
+  stopHeartbeat();
+  const tick = () => api(`/rooms/${code}/heartbeat`, session).catch(() => {});
+  tick();
+  heartbeatHandle = setInterval(tick, HEARTBEAT_MS);
+}
 
 function startPolling(code, session) {
-  if (pollHandle) clearInterval(pollHandle);
-  const tick = () => getState(code).then((state) => renderTable(code, session, state)).catch(() => {});
+  stopPolling();
+  const tick = () =>
+    getState(code)
+      .then((state) => {
+        const stillSeated = state.players.some((p) => p.id === session.playerId);
+        if (!state.closed && !stillSeated) {
+          // Swept out while we weren't looking (disconnect grace
+          // expired) — this browser's seat is just gone, same as a
+          // voluntary leave from elsewhere.
+          stopPolling();
+          stopHeartbeat();
+          clearSession(code);
+          render(
+            el("div", { class: "entry" }, [
+              el("h1", {}, "Vegas"),
+              el("p", {}, "You were removed from this room after being disconnected too long."),
+              backToHomeButton(),
+            ]),
+          );
+          return;
+        }
+        renderTable(code, session, state);
+      })
+      .catch(() => {});
+  refreshNow = tick;
   tick();
   pollHandle = setInterval(tick, POLL_MS);
 }
 
+function copyInviteLinkControl(shareLink) {
+  const status = el("span", { class: "copy-status" });
+  const copyBtn = el(
+    "button",
+    {
+      type: "button",
+      class: "secondary",
+      onclick: async () => {
+        try {
+          if (!navigator.clipboard) throw new Error("no Clipboard API");
+          await navigator.clipboard.writeText(shareLink);
+          status.textContent = "copied!";
+        } catch {
+          // No silent "copied!" lie (playtest round 1 root cause #1):
+          // if the automatic copy can't be confirmed, fall back to a
+          // selected, manually-copyable field instead of pretending it
+          // worked.
+          linkField.focus();
+          linkField.select();
+          status.textContent = "selected — press Ctrl/Cmd+C to copy";
+        }
+      },
+    },
+    "Copy",
+  );
+  const linkField = el("input", { type: "text", readonly: "", value: shareLink, class: "invite-link-field" });
+  return el("div", { class: "invite-link" }, [linkField, copyBtn, status]);
+}
+
 function renderTable(code, session, state) {
+  if (state.closed) {
+    stopPolling();
+    stopHeartbeat();
+    clearSession(code);
+    render(
+      el("div", { class: "entry" }, [
+        el("h1", {}, "Vegas"),
+        el("p", {}, `Room ${code} has closed.`),
+        backToHomeButton(),
+      ]),
+    );
+    return;
+  }
+
   const me = state.players.find((p) => p.id === session.playerId);
   const isHost = state.hostPlayerId === session.playerId;
   const isMyTurn = state.currentPlayerId === session.playerId;
-
   const shareLink = `${location.origin}/?room=${code}`;
 
   const header = el("header", {}, [
     el("h1", {}, "Vegas"),
-    el("p", {}, [
-      "Room ",
-      el("strong", {}, code),
-      " — ",
-      el("a", { href: shareLink, onclick: (e) => { e.preventDefault(); navigator.clipboard?.writeText(shareLink); e.target.textContent = "copied!"; } }, "copy invite link"),
-    ]),
+    el("p", {}, ["Room ", el("strong", {}, code)]),
+    copyInviteLinkControl(shareLink),
   ]);
 
   const playerList = el(
     "ul",
     { class: "players" },
-    state.players.map((p) =>
-      el("li", { class: p.id === state.currentPlayerId ? "current-turn" : "" }, [
+    state.players.map((p) => {
+      const tags = [];
+      if (p.id === state.hostPlayerId) tags.push("host");
+      if (state.phase === "lobby") tags.push(p.ready ? "ready" : "not ready");
+      if (!p.connected) tags.push("disconnected");
+      return el("li", { class: p.id === state.currentPlayerId ? "current-turn" : "" }, [
         el("span", { class: `swatch ${p.color}` }),
-        `${p.nickname}${p.id === state.hostPlayerId ? " (host)" : ""} — ${p.diceInHand} dice — $${p.moneyTotal.toLocaleString()}`,
-      ]),
-    ),
+        `${p.nickname}${tags.length ? ` (${tags.join(", ")})` : ""} — ${p.diceInHand} dice — $${p.moneyTotal.toLocaleString()}`,
+      ]);
+    }),
   );
 
   let body;
   if (state.phase === "lobby") {
-    body = el("div", {}, [
-      el("p", {}, `Waiting for players (${state.players.length}/4). Need at least 2 to start.`),
-      isHost
-        ? el("button", {
-            disabled: state.players.length < 2 ? "" : null,
-            onclick: async () => {
-              try {
-                await api(`/rooms/${code}/start`, session);
-              } catch (err) {
-                alert(err.message);
-              }
-            },
-          }, "Start game")
-        : el("p", {}, "Waiting for the host to start."),
-    ]);
+    body = lobbyControls(code, session, state, isHost, me);
   } else if (state.phase === "round_end") {
     body = el("div", {}, [
       el("h2", {}, "Round over"),
       el("p", {}, "Final money totals are shown above. Thanks for playing!"),
     ]);
   } else {
-    body = el("div", {}, [
-      casinoTable(state),
-      turnControls(code, session, state, isMyTurn),
-    ]);
+    body = el("div", {}, [casinoTable(state), turnControls(code, session, state, isMyTurn)]);
   }
 
   const notes = el("details", { class: "notes" }, [
     el("summary", {}, "About this version"),
-    el("p", {}, "Winnings are shown openly to everyone here, continuously — unlike the physical board game, where they're kept face-down and hidden until the end. A deliberate choice for a shared, multi-phone table."),
-    el("p", {}, "Your seat is tied to this browser's storage. Clearing site data, or opening the game on a different device, loses it with no way back."),
+    el(
+      "p",
+      {},
+      "Winnings are shown openly to everyone here, continuously — unlike the physical board game, where they're kept face-down and hidden until the end. A deliberate choice for a shared, multi-phone table.",
+    ),
+    el(
+      "p",
+      {},
+      "Your seat is tied to this browser's storage. Clearing site data, or opening the game on a different device, loses it with no way back.",
+    ),
   ]);
 
-  render(el("div", { class: "table" }, [header, playerList, body, notes]));
+  render(el("div", { class: "table" }, [header, playerList, body, notes, backToHomeButton()]));
+}
+
+function lobbyControls(code, session, state, isHost, me) {
+  const notReady = state.players.filter((p) => !p.ready);
+  const everyoneReady = state.players.length >= 2 && notReady.length === 0;
+
+  const readyBtn = el(
+    "button",
+    {
+      onclick: async () => {
+        try {
+          await api(`/rooms/${code}/ready`, { ...session, ready: !me.ready });
+          refreshNow();
+        } catch (err) {
+          alert(err.message);
+        }
+      },
+    },
+    me.ready ? "Cancel ready" : "Ready",
+  );
+
+  const leaveBtn = el(
+    "button",
+    {
+      type: "button",
+      class: "secondary",
+      onclick: async () => {
+        try {
+          await api(`/rooms/${code}/leave`, session);
+        } catch (err) {
+          alert(err.message);
+          return;
+        }
+        stopPolling();
+        stopHeartbeat();
+        clearSession(code);
+        navigate("/");
+      },
+    },
+    "Leave room",
+  );
+
+  const children = [
+    el("p", {}, `Waiting for players (${state.players.length}/4). Need at least 2, and everyone ready, to start.`),
+    notReady.length > 0
+      ? el("p", { class: "turn-note" }, `Waiting on: ${notReady.map((p) => p.nickname).join(", ")}`)
+      : null,
+    readyBtn,
+    leaveBtn,
+  ];
+
+  if (isHost) {
+    children.push(
+      el(
+        "button",
+        {
+          disabled: !everyoneReady,
+          onclick: async () => {
+            try {
+              await api(`/rooms/${code}/start`, session);
+              refreshNow();
+            } catch (err) {
+              alert(err.message);
+            }
+          },
+        },
+        "Start game",
+      ),
+    );
+    children.push(
+      el(
+        "button",
+        {
+          type: "button",
+          class: "danger",
+          onclick: async () => {
+            if (!confirm("Disband this room for everyone? This can't be undone.")) return;
+            try {
+              await api(`/rooms/${code}/disband`, { ...session, confirm: true });
+            } catch (err) {
+              alert(err.message);
+              return;
+            }
+            stopPolling();
+            stopHeartbeat();
+            clearSession(code);
+            navigate("/");
+          },
+        },
+        "Disband room",
+      ),
+    );
+  } else {
+    children.push(el("p", {}, "Waiting for the host to start."));
+  }
+
+  return el("div", {}, children.filter(Boolean));
 }
 
 function casinoTable(state) {
@@ -311,15 +686,20 @@ function turnControls(code, session, state, isMyTurn) {
   }
 
   if (state.phase === "awaiting_roll") {
-    return el("button", {
-      onclick: async () => {
-        try {
-          await api(`/rooms/${code}/roll`, session);
-        } catch (err) {
-          alert(err.message);
-        }
+    return el(
+      "button",
+      {
+        onclick: async () => {
+          try {
+            await api(`/rooms/${code}/roll`, session);
+            refreshNow();
+          } catch (err) {
+            alert(err.message);
+          }
+        },
       },
-    }, "Roll");
+      "Roll",
+    );
   }
 
   if (state.phase === "awaiting_placement" && state.lastRoll) {
@@ -331,15 +711,20 @@ function turnControls(code, session, state, isMyTurn) {
         "div",
         { class: "value-buttons" },
         [...counts.entries()].map(([value, count]) =>
-          el("button", {
-            onclick: async () => {
-              try {
-                await api(`/rooms/${code}/place`, { ...session, value });
-              } catch (err) {
-                alert(err.message);
-              }
+          el(
+            "button",
+            {
+              onclick: async () => {
+                try {
+                  await api(`/rooms/${code}/place`, { ...session, value });
+                  refreshNow();
+                } catch (err) {
+                  alert(err.message);
+                }
+              },
             },
-          }, `Place all ${count}×${value}`),
+            `Place all ${count}×${value}`,
+          ),
         ),
       ),
     ]);
@@ -350,15 +735,4 @@ function turnControls(code, session, state, isMyTurn) {
 
 // ---- Boot -------------------------------------------------------------
 
-(function init() {
-  if (roomFromUrl) {
-    const session = loadSession(roomFromUrl);
-    if (session) {
-      enterRoom(roomFromUrl.toUpperCase());
-      return;
-    }
-    entryView(roomFromUrl);
-    return;
-  }
-  entryView(null);
-})();
+route();

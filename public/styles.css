@@ -89,6 +89,21 @@ button:disabled {
   cursor: not-allowed;
 }
 
+button.secondary {
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--border);
+}
+
+button.danger {
+  background: #d1495b;
+  color: var(--fg);
+}
+
+button + button {
+  margin-left: 0.5rem;
+}
+
 .colors {
   display: flex;
   gap: 0.5rem;
@@ -113,6 +128,11 @@ button:disabled {
 
 .color-swatch.selected {
   border-color: var(--fg);
+}
+
+.color-swatch.taken {
+  opacity: 0.3;
+  cursor: not-allowed;
 }
 
 .color-swatch.red,
@@ -197,4 +217,43 @@ button:disabled {
   margin-top: 1.5rem;
   font-size: 0.85rem;
   color: var(--muted);
+}
+
+.return-banner {
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+}
+
+.invite-link {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin: 0.5rem 0 1rem;
+  flex-wrap: wrap;
+}
+
+.invite-link-field {
+  flex: 1;
+  min-width: 10rem;
+  font-size: 0.85rem;
+}
+
+.copy-status {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.join-by-code {
+  flex-direction: row;
+}
+
+.join-by-code input {
+  flex: 1;
+}
+
+header + .players {
+  margin-top: 0;
 }
