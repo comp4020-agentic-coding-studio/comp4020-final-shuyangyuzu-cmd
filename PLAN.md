@@ -253,6 +253,12 @@ manual check, since this is exactly the kind of bug that only a test
 against a *pre-existing* database — not a fresh one — can catch, and
 every other test in this repo starts from a fresh one.
 
+Redeployed with the fix and re-ran the same live checks directly
+against the deployed API: ready-gating, host transfer, room closing,
+and the distinct 410 on a closed room all now behave correctly in
+production, not just locally. `/` and `/readme/` still serve; the repo
+is still private.
+
 # Plan — crit 8 (It's alive!)
 
 A multiplayer browser dice game based on the **base game of *Las Vegas*** (Rüdiger
