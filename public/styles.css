@@ -257,3 +257,14 @@ button + button {
 header + .players {
   margin-top: 0;
 }
+
+.build-version {
+  position: fixed;
+  bottom: 0.4rem;
+  right: 0.6rem;
+  margin: 0;
+  font-size: 0.7rem;
+  color: var(--muted);
+  opacity: 0.7;
+  font-family: monospace;
+}

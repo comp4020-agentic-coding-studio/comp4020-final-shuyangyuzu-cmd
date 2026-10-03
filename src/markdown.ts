@@ -4,6 +4,7 @@
 
 import { marked } from "marked";
 import { readFileSync } from "node:fs";
+import { BUILD_VERSION } from "./version.ts";
 
 export function renderReadme(readmePath = "README.md"): string {
   const source = readFileSync(readmePath, "utf8");
@@ -14,7 +15,7 @@ export function renderReadme(readmePath = "README.md"): string {
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>About</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=${BUILD_VERSION}" />
   </head>
   <body>
     <main class="readme">

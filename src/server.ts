@@ -10,6 +10,7 @@ import { renderReadme } from "./markdown.ts";
 import { RoomError } from "./rooms.ts";
 import * as rooms from "./rooms.ts";
 import type { Color } from "./types.ts";
+import { BUILD_VERSION, renderIndexHtml } from "./version.ts";
 
 const db = openDb(dbPathFromEnv());
 const app = new Hono();
@@ -37,7 +38,15 @@ app.onError((err, c) => {
   return c.json({ error: "internal_error", message: "something went wrong" }, 500);
 });
 
+// Server-rendered, not a static file: this is what injects BUILD_VERSION
+// into the asset URLs (see src/version.ts for why a Cache-Control header
+// alone isn't enough). Registered before the catch-all serveStatic below
+// so it takes precedence for exactly "/".
+app.get("/", (c) => c.html(renderIndexHtml()));
+
 app.get("/readme/", (c) => c.html(renderReadme()));
+
+app.get("/version", (c) => c.json({ version: BUILD_VERSION }));
 
 interface CreateJoinBody {
   nickname?: unknown;
@@ -141,7 +150,12 @@ app.post("/api/rooms/:code/disband", async (c) => {
   return c.json({ ok: true });
 });
 
-app.use("/*", serveStatic({ root: "./public", index: "index.html" }));
+// No `index` option — "/" is handled explicitly above (it needs
+// templating, not a raw file serve); this just serves app.js, styles.css,
+// etc. The `?v=` query string on those is ignored for path matching
+// (serveStatic matches by pathname only), which is exactly what makes it
+// work as a cache-busting token rather than a routing concern.
+app.use("/*", serveStatic({ root: "./public" }));
 
 const port = Number(process.env.PORT ?? 8080);
 serve({ fetch: app.fetch, port, hostname: "0.0.0.0" }, (info) => {
