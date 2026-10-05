@@ -178,6 +178,17 @@ a reserved table shows its label, clicking a Vegas table correctly says
 "Phase 2", classic panel still fully functional, no console errors, no
 horizontal overflow and a correctly-sized canvas at 390px phone width.
 
+**Deployed and re-verified live**, not just locally: Fly release v8,
+image `deployment-01M4615FJ1GYV4PETDKM85XZN6`, visible version
+`46172aa693` (matches `/version` and the on-page `build …` corner label
+in every screenshot from this run, so any screenshot's build is
+independently checkable). The exact same 11-check Playwright run above,
+re-pointed at `https://comp4020-final-shuyangyuzu-cmd.fly.dev`: all 11
+passed against production. Repo stayed private; no `/ship`.
+
+**This is the agent's own automated re-verification, immediately after
+deploying — not the student's own check.** Status: 等待用户验收.
+
 # Playtest round 1 (2026-10-04) — lobby/identity/navigation fixes
 
 The student played the deployed app themselves (not the agent) and reported
