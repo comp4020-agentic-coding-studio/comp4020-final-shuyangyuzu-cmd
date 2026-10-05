@@ -62,9 +62,19 @@ touchscreen test, and neither is reported as one** — that check is still
 outstanding. Part of the same
 [`27713dc`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/commit/27713dc).
 
-**What's next**, continuing in this same repository: binding each
-physical Vegas table to its own independent game room (Phase 2), a
-counter menu with persisted, duplicate-proof ordering (Phase 3), and
-seating with server-arbitrated occupancy (Phase 4) — see `PLAN.md` for
-what's actually built and verified as each one lands, and this file for
+**Claude's Phase 2** — each Vegas table bound to its own independent
+game room: clicking one reads its live status and offers exactly the
+legal action (create/join), reusing the bar nickname automatically and
+a separate 4-colour game palette with taken colours disabled; the
+lobby's own copy was tightened to distinguish "back to the bar" (keeps
+your seat) from "leave table" (gives it up). One real bug — re-clicking
+your own active table would have minted a duplicate player — caught by
+writing the test case before trusting the function, not by luck.
+[`f091b43`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/commit/f091b43)
+(commit message has the detail; `PLAN.md` has the verification).
+
+**What's next**, continuing in this same repository: a counter menu
+with persisted, duplicate-proof ordering (Phase 3), and seating with
+server-arbitrated occupancy (Phase 4) — see `PLAN.md` for what's
+actually built and verified as each one lands, and this file for
 further entries as they do.
