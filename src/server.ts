@@ -12,6 +12,8 @@ import { dbPathFromEnv, openDb } from "./db.ts";
 import { renderReadme } from "./markdown.ts";
 import { RoomError } from "./rooms.ts";
 import * as rooms from "./rooms.ts";
+import { TableError } from "./tables.ts";
+import * as tables from "./tables.ts";
 import type { Color } from "./types.ts";
 import { BUILD_VERSION, renderIndexHtml } from "./version.ts";
 
@@ -34,7 +36,7 @@ app.use("*", async (c, next) => {
 });
 
 app.onError((err, c) => {
-  if (err instanceof RoomError || err instanceof BarError) {
+  if (err instanceof RoomError || err instanceof BarError || err instanceof TableError) {
     return c.json({ error: err.code, message: err.message }, err.status as 400 | 403 | 404 | 409 | 410);
   }
   console.error(err);
@@ -204,6 +206,24 @@ app.post("/api/bar/move", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody & { x?: unknown; y?: unknown };
   bar.moveBar(db, barPlayerId(body), barSessionSecret(body), Number(body.x), Number(body.y));
   return c.json(bar.getPublicBarState(db));
+});
+
+// ---- Phase 2: each Vegas table bound to its own independent room ----
+
+app.get("/api/bar/tables", (c) => c.json(tables.getTablesStatus(db)));
+
+app.post("/api/bar/tables/:tableId/create", async (c) => {
+  const tableId = c.req.param("tableId");
+  const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody & { color?: unknown };
+  const result = tables.createTableRoom(db, tableId, barPlayerId(body), barSessionSecret(body), body.color as Color);
+  return c.json(result, 201);
+});
+
+app.post("/api/bar/tables/:tableId/join", async (c) => {
+  const tableId = c.req.param("tableId");
+  const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody & { color?: unknown };
+  const result = tables.joinTableRoom(db, tableId, barPlayerId(body), barSessionSecret(body), body.color as Color);
+  return c.json(result, 201);
 });
 
 // No `index` option — "/" is handled explicitly above (it needs

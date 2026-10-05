@@ -86,7 +86,10 @@ export function joinBar(db: Database.Database, nickname: string, color: BarColor
   return { playerId: id, sessionSecret, x, y };
 }
 
-function requireBarSession(db: Database.Database, playerId: string, sessionSecret: string): void {
+// Exported for src/tables.ts — table creation/joining acts on behalf of
+// a bar identity, so it needs the same proof-of-identity check every
+// other bar action already uses, not a copy of it.
+export function requireBarSession(db: Database.Database, playerId: string, sessionSecret: string): void {
   const row = db.prepare(`SELECT session_secret FROM bar_sessions WHERE player_id = ?`).get(playerId) as
     | { session_secret: string }
     | undefined;

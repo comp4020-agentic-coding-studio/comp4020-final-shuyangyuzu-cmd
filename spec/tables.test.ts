@@ -1,0 +1,210 @@
+// Phase 2: each physical Vegas table bound to its own independent game
+// room. Black-box over HTTP — see PLAN.md for the pivot this is part
+// of, and CLAUDE.md for the one-table-at-a-time / furniture-is-fixed
+// constraints this is built to satisfy.
+//
+// There are only 3 real Vegas tables, shared by every test in this
+// file (tests within one file run sequentially in vitest, but nothing
+// here assumes a *specific* table id stays free by the time a later
+// test runs) — every test that needs an empty table asks the server
+// which one currently is, rather than hardcoding "vegas-1" and hoping.
+
+import { expect, inject, it } from "vitest";
+
+const baseUrl = inject("baseUrl");
+
+async function postJson(path: string, body: unknown) {
+  const res = await fetch(new URL(path, baseUrl), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  return { status: res.status, body: await res.json() };
+}
+
+async function getJson(path: string) {
+  const res = await fetch(new URL(path, baseUrl));
+  return { status: res.status, body: await res.json() };
+}
+
+async function joinBar(nickname: string, color: string) {
+  const { body } = await postJson("/api/bar/join", { nickname, color, skin: "warm" });
+  return { playerId: body.playerId, sessionSecret: body.sessionSecret };
+}
+
+interface TableView {
+  id: string;
+  gameType: string;
+  available: boolean;
+  status: string;
+  roomCode: string | null;
+  playerCount: number;
+  takenColors: string[];
+}
+
+async function tablesStatus(): Promise<TableView[]> {
+  const { body } = await getJson("/api/bar/tables");
+  return body;
+}
+
+async function anEmptyVegasTable(): Promise<string> {
+  const tables = await tablesStatus();
+  const empty = tables.find((t) => t.gameType === "vegas" && t.status === "empty");
+  if (!empty) throw new Error("no empty Vegas table available for this test — only 3 exist");
+  return empty.id;
+}
+
+it("lists exactly 3 playable Vegas tables and 3 reserved slots that can never be created/joined", async () => {
+  const tables = await tablesStatus();
+  expect(tables.filter((t) => t.gameType === "vegas")).toHaveLength(3);
+  const reserved = tables.filter((t) => !t.available);
+  expect(reserved).toHaveLength(3);
+
+  const patron = await joinBar("Reservist", "red");
+  for (const t of reserved) {
+    const create = await postJson(`/api/bar/tables/${t.id}/create`, { ...patron, color: "red" });
+    expect(create.status).toBe(404);
+    const join = await postJson(`/api/bar/tables/${t.id}/join`, { ...patron, color: "blue" });
+    expect(join.status).toBe(404);
+  }
+});
+
+it("creating a game at a table reuses the bar nickname, no re-entry, and frees it again on disband", async () => {
+  const tableId = await anEmptyVegasTable();
+  const patron = await joinBar("Hosty McHostface", "purple");
+  const created = await postJson(`/api/bar/tables/${tableId}/create`, { ...patron, color: "red" });
+  expect(created.status).toBe(201);
+  const roomState = await getJson(`/api/rooms/${created.body.code}/state`);
+  expect(roomState.body.players[0].nickname).toBe("Hosty McHostface");
+
+  // Clean up so this table is free for the rest of the file — every
+  // test in it shares just 3 real tables.
+  const disband = await postJson(`/api/rooms/${created.body.code}/disband`, { ...created.body, confirm: true });
+  expect(disband.status).toBe(200);
+  const after = await tablesStatus();
+  expect(after.find((t) => t.id === tableId)?.status).toBe("empty");
+});
+
+it("table status reflects a real room: waiting, player count, taken colors", async () => {
+  const tableId = await anEmptyVegasTable();
+  const host = await joinBar("Alice", "purple");
+  const created = await postJson(`/api/bar/tables/${tableId}/create`, { ...host, color: "red" });
+  expect(created.status).toBe(201);
+
+  let t = (await tablesStatus()).find((x) => x.id === tableId)!;
+  expect(t.status).toBe("waiting");
+  expect(t.playerCount).toBe(1);
+  expect(t.takenColors).toEqual(["red"]);
+  expect(t.roomCode).toBe(created.body.code);
+
+  const guest = await joinBar("Bob", "teal");
+  const joined = await postJson(`/api/bar/tables/${tableId}/join`, { ...guest, color: "blue" });
+  expect(joined.status).toBe(201);
+  expect(joined.body.code).toBe(created.body.code);
+
+  t = (await tablesStatus()).find((x) => x.id === tableId)!;
+  expect(t.playerCount).toBe(2);
+  expect(t.takenColors.sort()).toEqual(["blue", "red"]);
+
+  await postJson(`/api/rooms/${created.body.code}/disband`, { ...created.body, confirm: true }); // free it back up
+});
+
+it("refuses joining a table with no game yet", async () => {
+  const tableId = await anEmptyVegasTable();
+  const patron = await joinBar("Lonely", "orange");
+  const res = await postJson(`/api/bar/tables/${tableId}/join`, { ...patron, color: "red" });
+  expect(res.status).toBe(404);
+  expect(res.body.error).toBe("table_empty");
+});
+
+it("refuses creating a second game at a table that already has one", async () => {
+  const tableId = await anEmptyVegasTable();
+  const host = await joinBar("First", "pink");
+  const created = await postJson(`/api/bar/tables/${tableId}/create`, { ...host, color: "red" });
+  expect(created.status).toBe(201);
+
+  const other = await joinBar("Second", "yellow");
+  const res = await postJson(`/api/bar/tables/${tableId}/create`, { ...other, color: "blue" });
+  expect(res.status).toBe(409);
+  expect(res.body.error).toBe("table_occupied");
+
+  await postJson(`/api/rooms/${created.body.code}/disband`, { ...created.body, confirm: true });
+});
+
+it("a patron can only be seated at one table at a time, server-enforced", async () => {
+  const tableA = await anEmptyVegasTable();
+  const patron = await joinBar("OneSeat", "teal");
+  const first = await postJson(`/api/bar/tables/${tableA}/create`, { ...patron, color: "green" });
+  expect(first.status).toBe(201);
+
+  const tableB = await anEmptyVegasTable(); // a *different* table — tableA is now occupied
+  expect(tableB).not.toBe(tableA);
+  const res = await postJson(`/api/bar/tables/${tableB}/create`, { ...patron, color: "yellow" });
+  expect(res.status).toBe(409);
+  expect(res.body.error).toBe("already_seated");
+
+  await postJson(`/api/rooms/${first.body.code}/disband`, { ...first.body, confirm: true });
+});
+
+it("re-requesting create/join for the table you're already at returns the same seat, not a duplicate player", async () => {
+  const tableId = await anEmptyVegasTable();
+  const patron = await joinBar("Idempotent", "pink");
+  const first = await postJson(`/api/bar/tables/${tableId}/create`, { ...patron, color: "green" });
+  expect(first.status).toBe(201);
+
+  const again = await postJson(`/api/bar/tables/${tableId}/join`, { ...patron, color: "green" });
+  expect(again.status).toBe(201);
+  expect(again.body.code).toBe(first.body.code);
+  expect(again.body.playerId).toBe(first.body.playerId);
+
+  const state = await getJson(`/api/rooms/${first.body.code}/state`);
+  expect(state.body.players.filter((p: { nickname: string }) => p.nickname === "Idempotent")).toHaveLength(1);
+
+  await postJson(`/api/rooms/${first.body.code}/disband`, { ...first.body, confirm: true });
+});
+
+it("a disbanded room's table becomes available again, with no stale binding, and is genuinely reusable", async () => {
+  const tableId = await anEmptyVegasTable();
+  const host = await joinBar("Disbander", "orange");
+  const room = await postJson(`/api/bar/tables/${tableId}/create`, { ...host, color: "yellow" });
+  expect(room.status).toBe(201);
+
+  const disband = await postJson(`/api/rooms/${room.body.code}/disband`, { ...room.body, confirm: true });
+  expect(disband.status).toBe(200);
+
+  const status = await tablesStatus();
+  const t = status.find((x) => x.id === tableId)!;
+  expect(t.status).toBe("empty");
+  expect(t.roomCode).toBeNull();
+
+  const another = await joinBar("NextUp", "teal");
+  const recreated = await postJson(`/api/bar/tables/${tableId}/create`, { ...another, color: "green" });
+  expect(recreated.status).toBe(201);
+  expect(recreated.body.code).not.toBe(room.body.code);
+
+  await postJson(`/api/rooms/${recreated.body.code}/disband`, { ...recreated.body, confirm: true });
+});
+
+it("a table also frees up when its last player leaves (not only on explicit disband)", async () => {
+  const tableId = await anEmptyVegasTable();
+  const host = await joinBar("SoleOccupant", "blue");
+  const room = await postJson(`/api/bar/tables/${tableId}/create`, { ...host, color: "red" });
+  expect(room.status).toBe(201);
+
+  const leave = await postJson(`/api/rooms/${room.body.code}/leave`, room.body);
+  expect(leave.status).toBe(200);
+
+  const t = (await tablesStatus()).find((x) => x.id === tableId)!;
+  expect(t.status).toBe("empty");
+});
+
+it("refuses an action with a wrong bar session secret", async () => {
+  const tableId = await anEmptyVegasTable();
+  const patron = await joinBar("Impostee", "blue");
+  const res = await postJson(`/api/bar/tables/${tableId}/create`, {
+    playerId: patron.playerId,
+    sessionSecret: "wrong",
+    color: "red",
+  });
+  expect(res.status).toBe(403);
+});

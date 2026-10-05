@@ -112,7 +112,10 @@ function render(node) {
 }
 
 function backToHomeButton() {
-  return el("button", { type: "button", class: "secondary", onclick: () => navigate("/") }, "Back to home");
+  // Navigates only — never calls /leave. Phase 2: this is explicitly
+  // *not* the same action as the Leave room button in the lobby, and
+  // the two must not be confused in the copy (PLAN.md).
+  return el("button", { type: "button", class: "secondary", onclick: () => navigate("/") }, "Back to the bar");
 }
 
 // ---- Router -------------------------------------------------------------
@@ -600,6 +603,7 @@ function lobbyControls(code, session, state, isHost, me) {
       type: "button",
       class: "secondary",
       onclick: async () => {
+        if (!confirm("Leave this table? Your seat is given up — someone else could take it.")) return;
         try {
           await api(`/rooms/${code}/leave`, session);
         } catch (err) {
@@ -612,7 +616,7 @@ function lobbyControls(code, session, state, isHost, me) {
         navigate("/");
       },
     },
-    "Leave room",
+    "Leave table",
   );
 
   const children = [
@@ -622,6 +626,11 @@ function lobbyControls(code, session, state, isHost, me) {
       : null,
     readyBtn,
     leaveBtn,
+    el(
+      "p",
+      { class: "note" },
+      "\"Back to the bar\" keeps your seat here — come back any time. \"Leave table\" gives it up for good.",
+    ),
   ];
 
   if (isHost) {
@@ -751,5 +760,5 @@ function turnControls(code, session, state, isMyTurn) {
 
 // ---- Boot -------------------------------------------------------------
 
-const tavern = createTavern({ el, render, navigate, buildClassicPanel, lastActiveRoom });
+const tavern = createTavern({ el, render, navigate, buildClassicPanel, lastActiveRoom, saveSession });
 route();

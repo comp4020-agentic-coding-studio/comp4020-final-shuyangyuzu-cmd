@@ -97,6 +97,10 @@ function migrate(db: Database.Database): void {
   // every future new column goes through it, not a bare ALTER TABLE.
   addColumnIfMissing(db, "rooms", "closed_at", "TEXT");
   addColumnIfMissing(db, "bar_players", "skin", "TEXT NOT NULL DEFAULT 'warm'");
+  // Phase 2: the only link between a bar identity and which game-room
+  // player row they became when they sat at a table — what makes "one
+  // table at a time" actually checkable server-side (src/tables.ts).
+  addColumnIfMissing(db, "bar_players", "current_game_player_id", "TEXT");
 }
 
 /** The 6 game-table slots are fixed furniture (src/barLayout.ts) —

@@ -870,3 +870,69 @@ reported as one.
 
 No corrections needed to Codex's work or to the entry above — moving on
 to Phase 2 (per-table room binding) on this foundation.
+
+## Phase 2 — built: each Vegas table bound to its own independent room
+
+New `src/tables.ts`, additive only — no change to `rooms`/`sessions`/
+`presence`/`events`, or to any of `src/rooms.ts`'s own logic. A new
+`bar_players.current_game_player_id` column (migration) is the only
+link between a bar identity and which game-room player row they became
+when seated — the two identity spaces stay separate (CLAUDE.md), but
+"one table at a time" needs *some* way to check "is this patron still
+genuinely in that room," and this is it.
+
+A physical table's `tables.current_room_id` pointer is cleared lazily,
+at the next status read, once the room behind it closes — the same
+lazy-not-background-swept pattern `src/rooms.ts` already uses for its
+lobby grace period, and for the same reason (correct regardless of
+whether anything was running to notice in between, under Fly's
+`auto_stop_machines`). Re-clicking the table you're already seated at
+returns your existing seat rather than minting a second player row for
+yourself — caught and fixed before it shipped (see below).
+
+Client (`public/tavern.js`): clicking an available Vegas table now reads
+that table's live status fresh (empty / waiting / in-progress / round
+over) and offers exactly the one legal action — create or join — rather
+than the generic classic form. The bar nickname is reused automatically,
+never re-asked; a separate, smaller colour picker (the 4 game colours,
+not the bar's 8) is shown, with already-taken colours disabled rather
+than left to fail server-side. On success it reuses the exact same
+`saveSession`/`navigate` path the classic form already used, landing in
+the same, completely unmodified lobby/ready/host/invite/leave/disband
+UI. The HUD's "Game rooms" button is relabelled "Join by code" now that
+it's no longer the only way in. The game-room lobby's own copy was
+tightened too: "Back to home" → "Back to the bar" (keeps your seat,
+explicit now), "Leave room" → "Leave table" with a confirm dialog and an
+explicit note distinguishing the two, directly per the student's ask
+that returning to the bar and leaving the table read as different
+things.
+
+**One real bug caught before it shipped, by writing the test before
+assuming the design was right**: the first version of the "one table at
+a time" check treated re-clicking your own already-active table as an
+error case indistinguishable from clicking a *different* occupied
+table, which would have made `joinTableRoom` call `rooms.joinRoom`
+again for someone already seated — minting a second, duplicate player
+row for the same patron in the same room. Caught by actually writing out
+the "re-click your own table" test case before trusting the function,
+not by running it and getting lucky. Fixed with a three-way
+`checkExistingSeat` (seated here → hand back the existing seat; seated
+elsewhere → refuse; free → proceed) rather than a two-way check.
+
+12 new tests (`spec/tables.test.ts`), each cleaning up its own room via
+disband so the file's 3 shared real Vegas tables don't get exhausted by
+earlier tests — 88/88 total passing. Manually smoke-tested every
+transition by hand over curl first (create, second player join,
+one-seat enforcement, idempotent re-join, disband freeing the table)
+before trusting the automated tests to re-confirm it. Playwright,
+end to end: clicking an empty table shows "is empty", creating lands in
+the real lobby with the bar nickname carried over, going back to the
+bar surfaces "Return to your game", a second patron sees "1/4 waiting"
+with the first colour correctly disabled, and both end up in the same
+real room — 7/7 checks passed. Also checked at 390px: no console errors,
+no horizontal overflow, the world itself renders correctly (the
+table-dialog's own click-target math at that exact viewport wasn't
+independently confirmed this round — the dialog shares the character
+editor's already-verified responsive markup and CSS, which is why this
+wasn't treated as a gap worth blocking on, but it's not the same as
+having clicked a table specifically on a small screen).

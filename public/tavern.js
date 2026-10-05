@@ -25,7 +25,7 @@ export function bindDirectionHold(button, { onPress, onRelease, onTap }) {
     win.removeEventListener('blur', release); button.ownerDocument.removeEventListener('visibilitychange', hidden);
   };
 }
-export function createTavern({ el, render, navigate, buildClassicPanel, lastActiveRoom }) {
+export function createTavern({ el, render, navigate, buildClassicPanel, lastActiveRoom, saveSession }) {
   const colors = { red:'#c85e59', blue:'#6485bc', green:'#629e86', yellow:'#ddba65', purple:'#997cb5', teal:'#66b5b0', orange:'#cf8858', pink:'#cd88a3' };
   const skins = { fair:'#f3d7b6', warm:'#dcb58a', tan:'#ba875f', brown:'#906044', deep:'#614437' };
   let dispose = () => {};
@@ -63,7 +63,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, lastActi
     const online=el('span',{class:'online-count'},'Connecting…');
     const hud=el('header',{class:'world-hud'},[
       el('div',{class:'world-brand'},[el('span',{class:'brand-mark'},'◆'),el('div',{},[el('strong',{},'THE AMBER ROOM'),el('small',{},'A little place to be together')])]),
-      el('div',{class:'hud-actions'},[online,el('button',{class:'hud-button',onclick:()=>{path=[];chooseCharacter();}},'Your character'),el('button',{class:'hud-button',onclick:()=>openGames()},'Game rooms')]),
+      el('div',{class:'hud-actions'},[online,el('button',{class:'hud-button',onclick:()=>{path=[];chooseCharacter();}},'Your character'),el('button',{class:'hud-button',onclick:()=>openGames()},'Join by code')]),
     ]);
     const directions=el('div',{class:'world-dpad','aria-label':'Movement controls'});
     for(const [label,dx,dy] of [['↑',0,-1],['←',-1,0],['↓',0,1],['→',1,0]]) {
@@ -106,6 +106,60 @@ export function createTavern({ el, render, navigate, buildClassicPanel, lastActi
         el('p',{class:'eyebrow'},'PULL UP A CHAIR'),buildClassicPanel(),
       ]));
     }
+    // Phase 2: each Vegas fixture is bound to its own independent room
+    // (src/tables.ts), not a generic "create a room" form — this reads
+    // that table's *current* status fresh on every click (not a cached
+    // guess) and offers exactly the one legal action for it. The bar
+    // nickname is reused automatically (never re-asked); only a game
+    // colour — a different, smaller palette from the bar's own — is
+    // chosen here, and taken colours at a waiting table are disabled
+    // rather than left to fail server-side.
+    const GAME_COLORS=['red','blue','green','yellow'];
+    async function openTableDialog(f){
+      path=[];
+      let tableList;
+      try{tableList=await read('/tables');}catch(e){toast.textContent='Could not reach the tables — try again.';return;}
+      const t=tableList.find(x=>x.id===f.id);
+      if(!t){toast.textContent='That table is not available.';return;}
+
+      const taken=new Set(t.takenColors||[]);
+      let selected=GAME_COLORS.find(c=>!taken.has(c))||GAME_COLORS[0];
+      const error=el('p',{class:'error',role:'alert'});
+      const canAct=t.status==='empty'||t.status==='waiting';
+
+      const swatches=el('div',{class:'avatar-swatches','aria-label':'Table colour'},GAME_COLORS.map(c=>
+        el('button',{type:'button',class:'avatar-swatch','aria-label':`Colour ${c}`,disabled:taken.has(c),
+          'aria-pressed':c===selected?'true':'false',style:`--swatch:${colors[c]}`,
+          onclick:e=>{if(taken.has(c))return;selected=c;for(const b of e.currentTarget.parentElement.children)b.setAttribute('aria-pressed','false');e.currentTarget.setAttribute('aria-pressed','true');},
+        },'')));
+
+      const statusLine=t.status==='empty'?`${f.label} is empty.`
+        :`${f.label} — ${t.playerCount}/4 ${t.status==='waiting'?'waiting to start':t.status==='in_progress'?'mid-game':'round over'}.`;
+      const subtitle=canAct
+        ? `Joining as ${mine?.nickname??'you'} — just pick a table colour.`
+        : t.status==='in_progress'
+          ? "This table is already playing — ask to be invited, or wait for it to finish."
+          : "This round is over. Whoever's hosting can disband it to free the table.";
+
+      const body=[
+        el('button',{class:'dialog-close','aria-label':'Close',onclick:()=>overlay.replaceChildren()},'×'),
+        el('p',{class:'eyebrow'},'VEGAS DICE'),el('h1',{},statusLine),
+        el('p',{class:'dialog-subtitle'},subtitle),
+      ];
+      if(canAct){
+        body.push(swatches,error,el('button',{class:'enter-world',onclick:async e=>{
+          const btn=e.currentTarget;btn.disabled=true;error.textContent='';
+          try{
+            const endpoint=t.status==='empty'?'create':'join';
+            const result=await post(`/tables/${f.id}/${endpoint}`,{...session,color:selected});
+            try{saveSession(result.code,{playerId:result.playerId,sessionSecret:result.sessionSecret});}catch{}
+            overlay.replaceChildren();
+            navigate(`/?room=${result.code}`);
+          }catch(err){error.textContent=err.message||'Could not join that table';btn.disabled=false;}
+        }},t.status==='empty'?'Start a game here':'Join this table'));
+      }
+      overlay.replaceChildren(el('section',{class:'world-dialog game-dialog',role:'dialog','aria-label':f.label},body));
+    }
     function chooseCharacter(){
       let color=mine?.color||'green',skin=mine?.skin||'warm';
       const preview=el('canvas',{width:'180',height:'180','aria-label':'Character preview'});
@@ -141,7 +195,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, lastActi
     canvas.addEventListener('click',e=>{
       if(!mine||overlay.childElementCount)return;const rect=canvas.getBoundingClientRect(),x=Math.floor((e.clientX-rect.left+camera.x)/tile),y=Math.floor((e.clientY-rect.top+camera.y)/tile);
       const f=fixtures.find(f=>x>=f.x&&x<f.x+f.w&&y>=f.y&&y<f.y+f.h);
-      if(f){if(f.kind==='game_table'){if(f.available)openGames();else toast.textContent=`${f.label}`;}else if(f.kind==='counter')toast.textContent='The kitchen is not open yet. Grab a game while you wait.';return;}
+      if(f){if(f.kind==='game_table'){if(f.available)openTableDialog(f);else toast.textContent=`${f.label}`;}else if(f.kind==='counter')toast.textContent='The kitchen is not open yet. Grab a game while you wait.';return;}
       path=findPath(x,y);destination=path.length?{x,y}:null;
     });
     async function step(x,y){
