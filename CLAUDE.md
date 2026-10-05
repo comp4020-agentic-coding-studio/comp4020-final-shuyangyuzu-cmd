@@ -159,6 +159,53 @@ player's browser still shows what it cached from before. Every response
 carries `Cache-Control: no-cache` — not `no-store` — so a browser can
 still keep a copy but must revalidate with the server before using it.
 
+## The bar is a separate identity layer, never merged with a game room's
+
+A bar identity (nickname/color/position in the shared tavern) and a game
+room's player record are different things, with different tables and
+different session secrets, even though both follow the same "secret in
+localStorage + heartbeat presence + lazy sweep" shape. Being present in
+the bar never implies being seated at any table's game, and vice versa.
+This separation exists specifically so nothing about the already-verified
+room/session/ready/leave/disband logic has to change, or risk breaking,
+to make room for the bar — if a refactor would require touching
+`rooms`/`sessions`/`presence`/`events`' existing shape to fit the bar in,
+that's the wrong design; add new tables instead.
+
+## Furniture is fixed; it is never created or deleted at runtime
+
+A physical table (a Vegas table, or a reserved Texas/dominoes/blackjack
+slot) and a bar seat are fixtures, seeded once and permanent. What
+changes at runtime is only which game room (if any) a table currently
+points at, or which patron (if any) occupies a seat — never the fixture
+rows themselves. A finished, disbanded, or abandoned game room is never
+deleted and never overwritten; a table whose game ends just has its
+pointer cleared, and the next game started there is a new room row.
+
+## A patron holds at most one open table at a time
+
+Enforced server-side on the bar identity, the same way every other rule
+in this file is: starting or joining a different table while already
+seated at an open one is refused outright, not just hidden by the
+client's own UI. Switching tables requires the existing `/leave` first.
+
+## Movement is server-validated, grid-tile, no pathfinding
+
+A move request names a destination tile; the server's only job is
+confirming it's adjacent to the patron's current tile and walkable (not
+furniture, not out of bounds) — never trusting a client-reported
+position outright, and never implementing real pathfinding to get there
+simply because none was asked for.
+
+## Visual assets: original or clearly licensed, never copied
+
+The bar's tiles and sprites are either drawn in code or hand-authored and
+committed to the repo — not lifted from Stardew Valley, Gather, Red Dead
+Redemption 2, or any other reference, which are inspirations for the
+*spatial language and atmosphere*, not asset sources. Any external asset
+would need a stated, checked licence and a recorded source in the repo;
+absent that, the default is draw-it-ourselves.
+
 ## Routing goes through one dispatcher
 
 The client has exactly one function (`route()`) that decides what to

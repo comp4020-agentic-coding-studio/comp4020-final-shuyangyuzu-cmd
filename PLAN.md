@@ -1,3 +1,126 @@
+# Final-project pivot (2026-10-05) — Vegas becomes one table in a shared bar
+
+The student is changing the final project's direction: the existing Las
+Vegas dice game becomes one game table inside a shared virtual bar,
+inspired by Red Dead Redemption 2's saloon — friends walk in, order at
+the counter, sit at tables, and go play a game at one of several tables.
+Texas hold'em, dominoes, and blackjack are reserved table slots this
+week, clearly marked "not yet open," built out in later crit weeks (9–11,
+same repo, cutoffs Oct 12/19). Crit 8 itself (cutoff Wed 7 Oct 13:30, ~2
+days out at the time of this pivot) has already been satisfied by the
+deployed Vegas game as-is (alive, persists, deployed) — this pivot
+doesn't put that at risk, it's additional scope on top.
+
+A full proposal (layout sketch, identity/table/room/seat relationships,
+invite-link handling, data model, phased priorities, open questions) was
+written and approved before any code changed — see the personal plan
+scratch copy for the full write-up; what matters for the repo's own
+record is the **decisions** below, since those are what the build is held
+to.
+
+## Decisions (confirmed with the student)
+
+- **Scope, additive not a rewrite.** `rooms`/`sessions`/`presence`/
+  `events` and all 52 existing tests are untouched. The existing
+  `/?room=CODE` direct entry to a Vegas game keeps working throughout —
+  there is always a demoable, already-verified path even mid-build.
+- **Two separate identity layers, never merged.** A *bar* identity
+  (nickname/color/position, scoped to the bar) is new and distinct from a
+  *game room's* player record. A patron can be bar-present without being
+  seated at any table; being seated at a table's game still goes through
+  the existing, unmodified room/session/ready/leave/disband logic.
+- **Physical table vs. game room.** A table (`VEGAS #1/#2/#3`, plus 3
+  reserved slots for Texas/dominoes/blackjack) is a fixed fixture that's
+  never created or destroyed — it just points at whichever game room is
+  *currently* open there, or none. Closing a room clears that pointer;
+  the old room row is never deleted or overwritten, and a new game at the
+  same table is a new row.
+- **One active table at a time**, enforced server-side on the bar
+  identity: starting or joining a different table while already seated
+  somewhere open is refused until the player explicitly leaves first
+  (reusing the existing `/leave` endpoint, unchanged).
+- **Movement: grid-tile steps**, 8-directional, one tile at a time,
+  identical interaction on desktop and phone (tap/click a walkable tile;
+  clicking an interactive tile — counter, table, seat — acts instead of
+  walking). The server only ever validates "is this tile adjacent and
+  walkable" — no pathfinding, no continuous-collision math.
+- **Visual direction: a warm, recognisable pixel-art tavern from week
+  one** — dark wood floor, a wooden bar counter, round tables, chairs;
+  patrons as simple but recognisable small figures carrying their
+  nickname and colour. Spatial language from Stardew/Gather, atmosphere
+  inspired by RDR2's saloon, **no assets copied from either** — original
+  tiles/sprites, drawn in code or hand-authored and committed, not an
+  imported tileset (keeps provenance unambiguous; an external asset would
+  need a stated, checked licence and recorded source — none supplied).
+  Kept simple: no complex lighting, no large asset volume, no fine
+  animation this week — just clearly readable and tappable at phone
+  width.
+- **Bar-identity colour palette is separate and larger than the Vegas
+  table's 4** — the bar isn't capped at 4 patrons just because a Vegas
+  table is capped at 4 players.
+- **Position sync stays at ~1.5s polling** — same architecture as the
+  existing game-state poll, no change. (~1s and real-time sync are later,
+  explicitly deferred upgrades, not this week's work.)
+- **Final priority order for this week (the student's call, in this exact
+  order):**
+  1. Bar shell: visuals, movement, shared positions, identity recovery.
+  2. At least 2 independently-playable Vegas tables, aiming for 3 —
+     select/join/return-to-bar, live player count and status per table.
+  3. Simple menu and ordering.
+  4. Dining/bar seats and eat/drink status.
+  5. Extra decoration and animation.
+- **Cut order if the deadline bites (confirmed): decoration → animation/
+  eat-drink presentation → defer ordering/seating (3–4) entirely if
+  needed. Never reduce the table count below 2 for the sake of visual
+  polish** — table count explicitly outranks decoration and ordering.
+
+## Minimal data model (additive — new tables only)
+
+```sql
+CREATE TABLE bar_players (
+  id TEXT PRIMARY KEY, nickname TEXT NOT NULL, color TEXT NOT NULL,
+  x INTEGER NOT NULL, y INTEGER NOT NULL,
+  current_table_id TEXT,      -- which table's game they're in, NULL if free
+  current_seat_id TEXT,       -- which bar/dining seat, NULL if standing
+  created_at TEXT NOT NULL
+);
+CREATE TABLE bar_sessions (player_id TEXT PRIMARY KEY, session_secret TEXT NOT NULL);
+CREATE TABLE bar_presence (player_id TEXT PRIMARY KEY, last_seen_at TEXT NOT NULL);
+
+-- Fixed furniture, seeded once, never created/deleted at runtime.
+CREATE TABLE tables (
+  id TEXT PRIMARY KEY, game_type TEXT NOT NULL, available INTEGER NOT NULL,
+  x INTEGER NOT NULL, y INTEGER NOT NULL,
+  current_room_id TEXT         -- FK into existing rooms.id; NULL = free
+);
+CREATE TABLE bar_seats (
+  id TEXT PRIMARY KEY, kind TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL,
+  occupied_by TEXT             -- bar_players.id; NULL = free
+);
+CREATE TABLE orders (
+  id TEXT PRIMARY KEY, player_id TEXT NOT NULL, item TEXT NOT NULL,
+  price INTEGER NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL,
+  idempotency_key TEXT UNIQUE  -- a duplicate request can't double-order
+);
+```
+
+These are brand-new tables, so `CREATE TABLE IF NOT EXISTS` is actually
+sufficient (unlike the `closed_at`-column bug earlier — that was a column
+added to a table that already existed in production). Still adding a
+regression test built against today's real production schema, mirroring
+`spec/db-migration.test.ts`, rather than assuming safety from the pattern
+alone.
+
+## Execution discipline for this pivot
+
+Phased, verify-before-continuing, never batching multiple phases into one
+undemonstrated deploy: implement a phase → `pnpm check` green → Playwright
+verification of that phase → deploy → live re-verification against
+*production* (not just localhost) with the visible version number and
+screenshots → only then start the next phase. Every verification report
+states actual pass/fail per item and is marked **"等待用户验收"** (awaiting
+the student's own check) until they confirm it themselves.
+
 # Playtest round 1 (2026-10-04) — lobby/identity/navigation fixes
 
 The student played the deployed app themselves (not the agent) and reported
