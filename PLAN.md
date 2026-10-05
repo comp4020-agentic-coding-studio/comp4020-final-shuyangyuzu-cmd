@@ -936,3 +936,9 @@ independently confirmed this round — the dialog shares the character
 editor's already-verified responsive markup and CSS, which is why this
 wasn't treated as a gap worth blocking on, but it's not the same as
 having clicked a table specifically on a small screen).
+
+**Deployed and re-verified live**: Fly release v12, version `58cee56238`
+(matches `/version` and the on-page corner label). The same 7-check
+Playwright run re-pointed at `https://comp4020-final-shuyangyuzu-cmd.fly.dev`:
+all 7 passed. Repo stayed private; no `/ship`. This is the agent's own
+re-verification, not the student's own check — 等待用户验收.
