@@ -121,6 +121,63 @@ screenshots → only then start the next phase. Every verification report
 states actual pass/fail per item and is marked **"等待用户验收"** (awaiting
 the student's own check) until they confirm it themselves.
 
+## Phase 1 — built: bar shell (visuals, movement, identity, sync)
+
+New, additive-only (`src/barLayout.ts`, `src/bar.ts`; `tables`,
+`bar_players`, `bar_sessions`, `bar_presence` in `src/db.ts`) — none of
+`rooms`/`sessions`/`presence`/`events` touched. `src/barLayout.ts` is the
+single source of truth for the floor plan (20×10 grid, 32px tiles): the
+bar counter, 5 stools, 3 dining tables, and the 6 game-table slots (3
+Vegas, playable; Texas/dominoes/blackjack, reserved and labelled "not yet
+open"), seeded once into `tables` and never touched again except by
+Phase 2's `current_room_id` updates. Movement is grid-tile, server-
+validated (`isValidStep`: adjacent and walkable only, no pathfinding).
+A stale heartbeat removes a patron's avatar from `GET /api/bar/state`
+without ever deleting their `bar_players` row — identity, any future
+table membership, and any future order all survive exactly as PLAN.md's
+decisions specify.
+
+Client (`public/app.js`): a procedurally-drawn warm wood-tavern scene on
+`<canvas>` — no imported tileset, no copied assets, drawn entirely in
+code (CLAUDE.md). Bare `/` is now the bar; the classic create/join-by-
+code panel (exactly the old Home screen's content) sits directly below
+the canvas, unmodified in behavior, so direct access to the current game
+never regressed during this phase. `/?room=CODE` is completely
+untouched — still the old full-takeover flow, bypassing the bar
+entirely, deliberately deferred to Phase 2's overlay design.
+
+**Two real bugs found before trusting this, neither caught by the first
+pass of automated tests:**
+1. `bar.ts`'s `joinBar` validated colors against the *game's* 4-color
+   `COLORS`, not a bar-specific palette — joining with any of the 4
+   extra bar colours (purple/teal/orange/pink) silently 400'd at the
+   join step, which only surfaced as a confusing downstream 403 on the
+   next request (since the client never got a real session). Fixed with
+   a proper `BAR_COLORS` (8 colours) in `src/bar.ts`, matching
+   `public/app.js`'s own list — there's no shared module between server
+   and this plain-JS client to enforce that automatically, so
+   `spec/bar.test.ts` exercises several of the non-game colours against
+   the real endpoint specifically to catch drift.
+2. Clicking a far-away or non-game-furniture tile fired a request the
+   server correctly rejected (409) — but logged as a failed network
+   request regardless of the app handling it gracefully, caught by a
+   Playwright console-error check. Fixed properly rather than loosening
+   the check: added a client-side pre-check (`STATIC_FURNITURE_RECTS` +
+   an adjacency test against the player's last-known position) so an
+   obviously-invalid click is just a local status message, never a
+   round trip — the server's own validation is unchanged and still the
+   actual authority, this just avoids asking it something already known
+   to be invalid.
+
+9 new tests (`spec/bar.test.ts`, `spec/barLayout.test.ts`, 4 more in
+`spec/db-migration.test.ts` built against today's real production
+schema) — 71/71 passing. Playwright verification: canvas renders,
+identity setup → enter → canvas (no re-setup needed), refresh recovers
+identity, two separate patrons both appear in the shared state, clicking
+a reserved table shows its label, clicking a Vegas table correctly says
+"Phase 2", classic panel still fully functional, no console errors, no
+horizontal overflow and a correctly-sized canvas at 390px phone width.
+
 # Playtest round 1 (2026-10-04) — lobby/identity/navigation fixes
 
 The student played the deployed app themselves (not the agent) and reported

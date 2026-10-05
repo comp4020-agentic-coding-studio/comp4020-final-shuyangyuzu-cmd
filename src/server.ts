@@ -5,6 +5,9 @@
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
+import * as bar from "./bar.ts";
+import { BarError } from "./bar.ts";
+import { GRID_COLS, GRID_ROWS, TILE_SIZE } from "./barLayout.ts";
 import { dbPathFromEnv, openDb } from "./db.ts";
 import { renderReadme } from "./markdown.ts";
 import { RoomError } from "./rooms.ts";
@@ -31,7 +34,7 @@ app.use("*", async (c, next) => {
 });
 
 app.onError((err, c) => {
-  if (err instanceof RoomError) {
+  if (err instanceof RoomError || err instanceof BarError) {
     return c.json({ error: err.code, message: err.message }, err.status as 400 | 403 | 404 | 409 | 410);
   }
   console.error(err);
@@ -148,6 +151,53 @@ app.post("/api/rooms/:code/disband", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as AuthedBody & { confirm?: unknown };
   rooms.disbandRoom(db, code, playerId(body), sessionSecret(body), body.confirm === true);
   return c.json({ ok: true });
+});
+
+// ---- The bar (Phase 1: identity, movement, presence — see PLAN.md) ----
+
+interface BarAuthedBody {
+  playerId?: unknown;
+  sessionSecret?: unknown;
+}
+
+function barPlayerId(body: BarAuthedBody): string {
+  return typeof body.playerId === "string" ? body.playerId : "";
+}
+
+function barSessionSecret(body: BarAuthedBody): string {
+  return typeof body.sessionSecret === "string" ? body.sessionSecret : "";
+}
+
+app.get("/api/bar/layout", (c) =>
+  c.json({ gridCols: GRID_COLS, gridRows: GRID_ROWS, tileSize: TILE_SIZE, tables: bar.getGameTables() }),
+);
+
+app.get("/api/bar/state", (c) => c.json(bar.getPublicBarState(db)));
+
+app.post("/api/bar/join", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as CreateJoinBody;
+  // Deliberately not asColor() — the bar's palette is separate from and
+  // larger than the Vegas table's 4 (bar.BAR_COLORS), per PLAN.md.
+  const result = bar.joinBar(db, asNickname(body), body.color as bar.BarColor);
+  return c.json(result, 201);
+});
+
+app.post("/api/bar/rejoin", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody;
+  bar.rejoinBar(db, barPlayerId(body), barSessionSecret(body));
+  return c.json(bar.getPublicBarState(db));
+});
+
+app.post("/api/bar/heartbeat", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody;
+  bar.barHeartbeat(db, barPlayerId(body), barSessionSecret(body));
+  return c.json({ ok: true });
+});
+
+app.post("/api/bar/move", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody & { x?: unknown; y?: unknown };
+  bar.moveBar(db, barPlayerId(body), barSessionSecret(body), Number(body.x), Number(body.y));
+  return c.json(bar.getPublicBarState(db));
 });
 
 // No `index` option — "/" is handled explicitly above (it needs

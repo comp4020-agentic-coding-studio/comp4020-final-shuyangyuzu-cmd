@@ -6,6 +6,7 @@
 import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { GAME_TABLES } from "./barLayout.ts";
 
 export function openDb(path: string): Database.Database {
   mkdirSync(dirname(path), { recursive: true });
@@ -13,6 +14,7 @@ export function openDb(path: string): Database.Database {
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
   migrate(db);
+  seedBarFurniture(db);
   return db;
 }
 
@@ -51,6 +53,39 @@ function migrate(db: Database.Database): void {
       payload TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+
+    -- The bar: a separate identity layer from a game room's, on purpose
+    -- (CLAUDE.md) — none of the tables above are touched by any of this.
+    CREATE TABLE IF NOT EXISTS bar_players (
+      id TEXT PRIMARY KEY,
+      nickname TEXT NOT NULL,
+      color TEXT NOT NULL,
+      x INTEGER NOT NULL,
+      y INTEGER NOT NULL,
+      current_table_id TEXT,
+      current_seat_id TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS bar_sessions (
+      player_id TEXT PRIMARY KEY REFERENCES bar_players(id),
+      session_secret TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS bar_presence (
+      player_id TEXT PRIMARY KEY REFERENCES bar_players(id),
+      last_seen_at TEXT NOT NULL
+    );
+
+    -- Fixed furniture (src/barLayout.ts), seeded below — never created or
+    -- deleted outside that seed (CLAUDE.md). current_room_id is Phase 2;
+    -- left NULL and unused until then.
+    CREATE TABLE IF NOT EXISTS tables (
+      id TEXT PRIMARY KEY,
+      game_type TEXT NOT NULL,
+      available INTEGER NOT NULL,
+      x INTEGER NOT NULL,
+      y INTEGER NOT NULL,
+      current_room_id TEXT REFERENCES rooms(id)
+    );
   `);
 
   // Added after the first deploy. "CREATE TABLE IF NOT EXISTS" above is a
@@ -61,6 +96,21 @@ function migrate(db: Database.Database): void {
   // already-deployed Fly volume. addColumnIfMissing is the general fix —
   // every future new column goes through it, not a bare ALTER TABLE.
   addColumnIfMissing(db, "rooms", "closed_at", "TEXT");
+}
+
+/** The 6 game-table slots are fixed furniture (src/barLayout.ts) —
+ * seeded once, idempotently, and never touched again by anything except
+ * Phase 2's current_room_id updates. INSERT OR IGNORE rather than
+ * upsert: a table that already exists keeps whatever current_room_id
+ * it's accumulated, not reset to the seed's NULL on every restart. */
+function seedBarFurniture(db: Database.Database): void {
+  const insert = db.prepare(
+    `INSERT OR IGNORE INTO tables (id, game_type, available, x, y, current_room_id)
+     VALUES (?, ?, ?, ?, ?, NULL)`,
+  );
+  for (const t of GAME_TABLES) {
+    insert.run(t.id, t.gameType, t.available ? 1 : 0, t.x, t.y);
+  }
 }
 
 function addColumnIfMissing(db: Database.Database, table: string, column: string, type: string): void {

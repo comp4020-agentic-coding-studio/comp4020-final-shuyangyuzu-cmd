@@ -151,6 +151,24 @@ button + button {
 .swatch.yellow {
   background: #e9c46a;
 }
+/* Bar-identity colours: a separate, larger palette from the Vegas
+   table's 4 (PLAN.md decision — the bar isn't capped at 4 patrons). */
+.color-swatch.purple,
+.swatch.purple {
+  background: #9b5de5;
+}
+.color-swatch.teal,
+.swatch.teal {
+  background: #2ec4b6;
+}
+.color-swatch.orange,
+.swatch.orange {
+  background: #f4895f;
+}
+.color-swatch.pink,
+.swatch.pink {
+  background: #f06ba8;
+}
 
 .error {
   color: #ff8a8a;
@@ -267,4 +285,39 @@ header + .players {
   color: var(--muted);
   opacity: 0.7;
   font-family: monospace;
+}
+
+.bar-page {
+  max-width: 48rem;
+  margin: 0 auto;
+}
+
+.bar-canvas-wrap {
+  background: #1a120b;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.5rem;
+  margin: 0.75rem 0;
+  line-height: 0;
+}
+
+.bar-canvas-wrap canvas {
+  width: 100%;
+  height: auto;
+  display: block;
+  image-rendering: pixelated;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.bar-status {
+  color: var(--muted);
+  font-size: 0.85rem;
+  min-height: 1.2em;
+}
+
+.classic-entry {
+  margin-top: 2rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
 }
