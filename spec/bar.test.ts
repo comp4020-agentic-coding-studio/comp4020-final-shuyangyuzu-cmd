@@ -6,6 +6,22 @@ import { expect, inject, it } from "vitest";
 
 const baseUrl = inject("baseUrl");
 
+it("persists selected skin tone across rejoin and rejects unsupported appearance", async () => {
+  const joined = await postJson("/api/bar/join", { nickname: "Appearance", color: "purple", skin: "deep" });
+  expect(joined.status).toBe(201);
+  const session = { playerId: joined.body.playerId, sessionSecret: joined.body.sessionSecret };
+  const recovered = await postJson("/api/bar/rejoin", session);
+  expect(recovered.body.players.find((p: { id: string }) => p.id === session.playerId).skin).toBe("deep");
+  const bad = await postJson("/api/bar/join", { nickname: "Invalid", color: "blue", skin: "anything" });
+  expect(bad.status).toBe(400);
+  const changed = await postJson("/api/bar/appearance", { ...session, nickname: "Same person", color: "blue", skin: "fair" });
+  expect(changed.status).toBe(200);
+  expect(changed.body.players.find((p: { id: string }) => p.id === session.playerId))
+    .toMatchObject({ nickname: "Same person", color: "blue", skin: "fair" });
+  const forbidden = await postJson("/api/bar/appearance", { ...session, sessionSecret: "wrong", nickname: "Impostor", color: "red", skin: "deep" });
+  expect(forbidden.status).toBe(403);
+});
+
 async function postJson(path: string, body: unknown) {
   const res = await fetch(new URL(path, baseUrl), {
     method: "POST",

@@ -96,6 +96,7 @@ function migrate(db: Database.Database): void {
   // already-deployed Fly volume. addColumnIfMissing is the general fix —
   // every future new column goes through it, not a bare ALTER TABLE.
   addColumnIfMissing(db, "rooms", "closed_at", "TEXT");
+  addColumnIfMissing(db, "bar_players", "skin", "TEXT NOT NULL DEFAULT 'warm'");
 }
 
 /** The 6 game-table slots are fixed furniture (src/barLayout.ts) —
@@ -110,6 +111,8 @@ function seedBarFurniture(db: Database.Database): void {
   );
   for (const t of GAME_TABLES) {
     insert.run(t.id, t.gameType, t.available ? 1 : 0, t.x, t.y);
+    // Layout revisions move fixtures without resetting their game pointer.
+    db.prepare(`UPDATE tables SET x = ?, y = ? WHERE id = ?`).run(t.x, t.y, t.id);
   }
 }
 

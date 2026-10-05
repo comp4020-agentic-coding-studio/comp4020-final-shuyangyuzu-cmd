@@ -20,6 +20,21 @@ import { openDb } from "../src/db.ts";
 
 let dir: string;
 
+it("adds skin tone to an existing bar database without losing its identity", () => {
+  const path = join(dir, "old-bar.db");
+  const old = new Database(path);
+  old.exec(`CREATE TABLE bar_players (
+    id TEXT PRIMARY KEY, nickname TEXT NOT NULL, color TEXT NOT NULL,
+    x INTEGER NOT NULL, y INTEGER NOT NULL, current_table_id TEXT,
+    current_seat_id TEXT, created_at TEXT NOT NULL);
+    INSERT INTO bar_players VALUES ('kept', 'Returning', 'blue', 10, 9, NULL, NULL, '2026-10-05');`);
+  old.close();
+  const migrated = openDb(path);
+  expect(migrated.prepare("SELECT id, nickname, skin FROM bar_players WHERE id = 'kept'").get())
+    .toEqual({ id: "kept", nickname: "Returning", skin: "warm" });
+  migrated.close();
+});
+
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "vegas-migration-test-"));
 });

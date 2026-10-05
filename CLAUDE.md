@@ -189,13 +189,46 @@ in this file is: starting or joining a different table while already
 seated at an open one is refused outright, not just hidden by the
 client's own UI. Switching tables requires the existing `/leave` first.
 
-## Movement is server-validated, grid-tile, no pathfinding
+## Movement is server-validated; the client may plan a path
 
-A move request names a destination tile; the server's only job is
-confirming it's adjacent to the patron's current tile and walkable (not
-furniture, not out of bounds) — never trusting a client-reported
-position outright, and never implementing real pathfinding to get there
-simply because none was asked for.
+A move request names a destination tile; the server confirms it is adjacent
+and walkable, without trusting a client-reported starting position. The
+user's 6 October spatial-interface direction supersedes the original
+one-click-per-step constraint: the client may find a path to a clicked
+destination, but submits and awaits each legal step individually. Camera
+coordinates must never be sent as world coordinates. Keyboard and touch
+controls share these same movement checks.
+
+## The bar is a full-screen world, with a following camera
+
+The entry flow is a floating character editor over the visible map, with
+independent clothing color and skin-tone selection and a live sprite preview.
+Joining goes directly into the map. The canvas viewport follows the patron;
+it never shrinks the whole world into a webpage card. Furniture coordinates
+come from `/api/bar/layout`, the same definition the server checks. The old
+game forms are reachable from a secondary overlay, not stacked under the map.
+Persist skin tone through an additive migration that preserves old identities.
+Include every client module in the version hash and in versioned resource URLs.
+
+## A direction-hold control must stop cleanly, by default
+
+A press-and-hold movement control (the on-screen d-pad) keeps stepping
+only while the triggering pointer is actually still down on it. Every
+way that stops being true — pointer released anywhere (not just on the
+button), pointer cancelled, pointer leaves the button, the window loses
+focus, the document is hidden (tab/app switch) — must stop the hold.
+Getting this list right matters more than the stepping logic itself: a
+hold that silently keeps going after the finger has left is the failure
+mode that actually matters here, so default to adding another stop
+condition rather than assuming the common ones are enough. A plain tap
+(no hold) still takes exactly one step. Listeners bound for a hold are
+removed on navigation/unmount, not left attached to a detached button.
+
+Automated event-simulated tests (jsdom, synthetic pointer events) are
+not a substitute for checking this on a real touchscreen — they prove
+the listener wiring is correct, not that a physical long-press behaves
+right on an actual phone. Don't report this behavior as device-verified
+until someone has actually held a finger on it.
 
 ## Visual assets: original or clearly licensed, never copied
 

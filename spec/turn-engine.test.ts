@@ -42,15 +42,29 @@ it("refuses a duplicate roll while a placement is still pending (idempotency)", 
 });
 
 it("refuses placing a value that wasn't rolled", async () => {
-  const { code, host } = await startedTwoPlayerRoom();
-  const rolled = await rollDice(baseUrl, code, host);
-  const rolledValues = new Set<number>(rolled.body.lastRoll.values);
-  const notRolled = [1, 2, 3, 4, 5, 6].find((v) => !rolledValues.has(v));
-  expect(notRolled, "test needs a value this roll of 8 dice didn't show, vanishingly unlikely to be missing").not.toBeUndefined();
-
-  const res = await placeDice(baseUrl, code, host, notRolled!);
-  expect(res.status).toBe(409);
-  expect(res.body.error).toBe("value_not_rolled");
+  const { code, host, bob } = await startedTwoPlayerRoom();
+  const sessions: Record<string, Session> = { [host.playerId]: host, [bob.playerId]: bob };
+  let state = await getState(baseUrl, code);
+  // Eight dice CAN show all six faces. Advance legitimate turns until
+  // a missing face exists; by a hand of five dice this is guaranteed.
+  for (let turn = 0; turn < 8; turn++) {
+    const actor = sessions[state.currentPlayerId!];
+    const rolled = await rollDice(baseUrl, code, actor);
+    expect(rolled.status).toBe(200);
+    const values = new Set<number>(rolled.body.lastRoll.values);
+    const absent = [1, 2, 3, 4, 5, 6].find((v) => !values.has(v));
+    if (absent !== undefined) {
+      const res = await placeDice(baseUrl, code, actor, absent);
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe("value_not_rolled");
+      expect(await getState(baseUrl, code)).toEqual(rolled.body);
+      return;
+    }
+    const placed = await placeDice(baseUrl, code, actor, rolled.body.lastRoll.values[0]);
+    expect(placed.status).toBe(200);
+    state = placed.body;
+  }
+  throw new Error("No missing face after eight valid turns");
 });
 
 it("refuses a duplicate placement of the same roll (idempotency)", async () => {

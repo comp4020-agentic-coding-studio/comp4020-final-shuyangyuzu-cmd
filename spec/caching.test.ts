@@ -17,6 +17,7 @@ function expectedVersion(): string {
   const hash = createHash("sha256");
   hash.update(readFileSync("public/app.js"));
   hash.update(readFileSync("public/styles.css"));
+  hash.update(readFileSync("public/tavern.js"));
   return hash.digest("hex").slice(0, 10);
 }
 

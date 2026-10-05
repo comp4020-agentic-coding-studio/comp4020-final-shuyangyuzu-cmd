@@ -11,6 +11,8 @@
 // round 1 section for why the previous one-off `replaceState` wasn't
 // enough.
 
+const assetVersion = new URL(document.querySelector('script[type="module"]').src).searchParams.get('v');
+const { createTavern } = await import(`./tavern.js?v=${assetVersion}`);
 const COLORS = ["red", "blue", "green", "yellow"];
 const POLL_MS = 1500;
 const HEARTBEAT_MS = 5000; // comfortably under the server's default PRESENCE_STALE_MS (15s)
@@ -129,10 +131,11 @@ window.addEventListener("popstate", route);
 function route() {
   stopHeartbeat();
   stopPolling();
-  stopBarLoop();
+
+  tavern.stop();
   const code = codeFromUrl();
   if (!code) {
-    renderBarPage();
+    tavern.mount();
     return;
   }
   const upper = code.toUpperCase();
@@ -158,6 +161,11 @@ function buildClassicPanel() {
   const container = el("div", { class: "classic-entry" });
   let selectedColor = COLORS[0];
   let nicknameValue = "";
+  try {
+    const patron = JSON.parse(localStorage.getItem('vegas:bar:session') || 'null');
+    nicknameValue = patron?.nickname || '';
+    if (COLORS.includes(patron?.color)) selectedColor = patron.color;
+  } catch { /* storage may be unavailable */ }
   let joinCodeValue = "";
 
   function build() {
@@ -258,381 +266,6 @@ function buildClassicPanel() {
 
   build();
   return container;
-}
-
-// ---- The bar (Phase 1: visuals, movement, identity, sync) -----------------
-//
-// A separate identity layer from a game room's, on purpose (CLAUDE.md):
-// its own localStorage key, its own session secret, its own heartbeat —
-// never the same rows as a Vegas room's player. Table click-to-join/
-// create (Phase 2), ordering (Phase 3), and seating (Phase 4) aren't
-// wired yet; the 6 game-table tiles are visible but inert this phase.
-
-const BAR_COLORS = ["red", "blue", "green", "yellow", "purple", "teal", "orange", "pink"];
-const BAR_SESSION_KEY = "vegas:bar:session";
-const BAR_POLL_MS = 1500; // matches the existing game-state poll — no architecture change this phase
-const BAR_HEARTBEAT_MS = 5000;
-
-function loadBarSession() {
-  try {
-    const raw = localStorage.getItem(BAR_SESSION_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
-}
-
-function saveBarSession(session) {
-  try {
-    localStorage.setItem(BAR_SESSION_KEY, JSON.stringify(session));
-  } catch {
-    // tab-only fallback, same as the game's session storage
-  }
-}
-
-let barLayoutCache = null;
-async function getBarLayout() {
-  if (barLayoutCache) return barLayoutCache;
-  const res = await fetch("/api/bar/layout");
-  barLayoutCache = await res.json();
-  return barLayoutCache;
-}
-
-async function barApi(path, body) {
-  const res = await fetch(`/api/bar${path}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body ?? {}),
-  });
-  const data = await res.json();
-  if (!res.ok) throw Object.assign(new Error(data.message ?? "request failed"), { code: data.error, status: res.status });
-  return data;
-}
-
-async function getBarState() {
-  const res = await fetch("/api/bar/state");
-  return res.json();
-}
-
-let barHeartbeatHandle = null;
-let barPollHandle = null;
-
-function stopBarLoop() {
-  if (barHeartbeatHandle) clearInterval(barHeartbeatHandle);
-  if (barPollHandle) clearInterval(barPollHandle);
-  barHeartbeatHandle = null;
-  barPollHandle = null;
-}
-
-// Warm wood-tavern palette, drawn procedurally — no imported tileset or
-// copied assets (CLAUDE.md). Deliberately simple: two floor tones, flat
-// furniture blocks, no lighting effects.
-const BAR_PALETTE = {
-  floorA: "#5a3b26",
-  floorB: "#6b4631",
-  counter: "#3d2817",
-  counterTop: "#8a5a33",
-  stool: "#2e1d10",
-  diningTable: "#7a4b2a",
-  diningTableTop: "#9c6b3f",
-  tableFelt: "#2d5a3d",
-  tableFeltReserved: "#4a4a44",
-  tableLabel: "#f4e9d8",
-  textOutline: "#1a120b",
-};
-
-const BAR_SWATCH_HEX = {
-  red: "#d1495b",
-  blue: "#3a86ff",
-  green: "#2a9d8f",
-  yellow: "#e9c46a",
-  purple: "#9b5de5",
-  teal: "#2ec4b6",
-  orange: "#f4895f",
-  pink: "#f06ba8",
-};
-
-function drawBarScene(ctx, layout, state, tileSize) {
-  const { gridCols, gridRows, tables } = layout;
-  ctx.clearRect(0, 0, gridCols * tileSize, gridRows * tileSize);
-
-  // Floor
-  for (let y = 0; y < gridRows; y++) {
-    for (let x = 0; x < gridCols; x++) {
-      ctx.fillStyle = (x + y) % 2 === 0 ? BAR_PALETTE.floorA : BAR_PALETTE.floorB;
-      ctx.fillRect(x * tileSize, y * tileSize, tileSize, tileSize);
-    }
-  }
-
-  function tileRect(x, y, w, h) {
-    return [x * tileSize, y * tileSize, w * tileSize, h * tileSize];
-  }
-
-  // Counter (hardcoded to match src/barLayout.ts's FURNITURE — Phase 1
-  // doesn't fetch dining-table/stool positions from the server since
-  // they're not interactive yet; only the game tables come from /api/bar/layout).
-  ctx.fillStyle = BAR_PALETTE.counter;
-  ctx.fillRect(...tileRect(3, 1, 14, 1));
-  ctx.fillStyle = BAR_PALETTE.counterTop;
-  ctx.fillRect(3 * tileSize, 1 * tileSize, 14 * tileSize, tileSize * 0.3);
-
-  for (const sx of [3, 6, 9, 12, 15]) {
-    ctx.fillStyle = BAR_PALETTE.stool;
-    const cx = sx * tileSize + tileSize / 2;
-    const cy = 2 * tileSize + tileSize / 2;
-    ctx.beginPath();
-    ctx.arc(cx, cy, tileSize * 0.32, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  for (const dx of [1, 8, 15]) {
-    ctx.fillStyle = BAR_PALETTE.diningTable;
-    ctx.fillRect(...tileRect(dx, 4, 2, 2));
-    ctx.fillStyle = BAR_PALETTE.diningTableTop;
-    const cx = (dx + 1) * tileSize;
-    const cy = 5 * tileSize;
-    ctx.beginPath();
-    ctx.arc(cx, cy, tileSize * 0.75, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  // Game tables — these DO come from the server (src/bar.ts getGameTables()).
-  for (const t of tables) {
-    const [px, py, pw, ph] = tileRect(t.x, t.y, 2, 2);
-    ctx.fillStyle = t.available ? BAR_PALETTE.tableFelt : BAR_PALETTE.tableFeltReserved;
-    ctx.fillRect(px, py, pw, ph);
-    ctx.strokeStyle = BAR_PALETTE.textOutline;
-    ctx.lineWidth = 2;
-    ctx.strokeRect(px, py, pw, ph);
-
-    ctx.font = `${Math.round(tileSize * 0.32)}px monospace`;
-    ctx.textAlign = "center";
-    ctx.fillStyle = BAR_PALETTE.tableLabel;
-    const label = t.available ? t.label : t.label.split(" — ")[0];
-    ctx.fillText(label, px + pw / 2, py + ph / 2 - 2);
-    if (!t.available) {
-      ctx.font = `${Math.round(tileSize * 0.22)}px monospace`;
-      ctx.fillStyle = "#c9c9c0";
-      ctx.fillText("not yet open", px + pw / 2, py + ph / 2 + tileSize * 0.3);
-    }
-  }
-
-  // Patrons
-  for (const p of state.players) {
-    const cx = p.x * tileSize + tileSize / 2;
-    const cy = p.y * tileSize + tileSize / 2;
-    ctx.fillStyle = BAR_SWATCH_HEX[p.color] ?? "#ffffff";
-    ctx.beginPath();
-    ctx.arc(cx, cy, tileSize * 0.36, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = BAR_PALETTE.textOutline;
-    ctx.lineWidth = 2;
-    ctx.stroke();
-
-    ctx.font = `${Math.round(tileSize * 0.3)}px sans-serif`;
-    ctx.textAlign = "center";
-    ctx.fillStyle = BAR_PALETTE.textOutline;
-    ctx.fillText(p.nickname, cx + 1, cy - tileSize * 0.45 + 1);
-    ctx.fillStyle = "#fff";
-    ctx.fillText(p.nickname, cx, cy - tileSize * 0.45);
-  }
-}
-
-async function renderBarIdentitySetup(container) {
-  let selectedColor = BAR_COLORS[0];
-  let nicknameValue = "";
-
-  function build() {
-    const nicknameInput = el("input", {
-      type: "text",
-      placeholder: "Your nickname",
-      maxlength: "20",
-      value: nicknameValue,
-      oninput: (e) => {
-        nicknameValue = e.target.value;
-      },
-    });
-    const swatchButtons = BAR_COLORS.map((c) =>
-      el("button", {
-        type: "button",
-        class: `color-swatch ${c}` + (c === selectedColor ? " selected" : ""),
-        "aria-label": c,
-        onclick: () => {
-          selectedColor = c;
-          swatchButtons.forEach((btn, i) => btn.classList.toggle("selected", BAR_COLORS[i] === selectedColor));
-        },
-      }),
-    );
-    const errorBox = el("p", { class: "error" });
-
-    const form = el(
-      "form",
-      {
-        onsubmit: async (e) => {
-          e.preventDefault();
-          const nickname = nicknameInput.value.trim();
-          if (!nickname) return;
-          try {
-            const session = await barApi("/join", { nickname, color: selectedColor });
-            saveBarSession({ playerId: session.playerId, sessionSecret: session.sessionSecret });
-            renderBarPage();
-          } catch (err) {
-            errorBox.textContent = err.message ?? "something went wrong";
-          }
-        },
-      },
-      [
-        el("h2", {}, "Walk into the bar"),
-        nicknameInput,
-        el("div", { class: "colors" }, swatchButtons),
-        el("button", { type: "submit" }, "Enter the bar"),
-      ],
-    );
-    container.replaceChildren(form, errorBox);
-  }
-
-  build();
-}
-
-// Mirrors the non-game furniture hardcoded in drawBarScene (the counter,
-// stools, dining tables aren't part of /api/bar/layout's response since
-// they're not interactive yet — see that function's own comment). Used
-// here so a click can be rejected locally, without a doomed round trip
-// to the server, for the same reason the server itself would reject it.
-const STATIC_FURNITURE_RECTS = [
-  { x: 3, y: 1, w: 14, h: 1 },
-  ...[3, 6, 9, 12, 15].map((x) => ({ x, y: 2, w: 1, h: 1 })),
-  ...[1, 8, 15].map((x) => ({ x, y: 4, w: 2, h: 2 })),
-];
-
-function tileCoveredByRect(x, y, rects) {
-  return rects.some((r) => x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h);
-}
-
-function renderBarCanvas(container, session) {
-  const canvasWrap = el("div", { class: "bar-canvas-wrap" });
-  const canvas = el("canvas");
-  const status = el("p", { class: "bar-status" }, "Tap a floor tile to walk there.");
-  canvasWrap.appendChild(canvas);
-  container.appendChild(canvasWrap);
-  container.appendChild(status);
-
-  getBarLayout().then((layout) => {
-    const { gridCols, gridRows, tileSize } = layout;
-    canvas.width = gridCols * tileSize;
-    canvas.height = gridRows * tileSize;
-    const ctx = canvas.getContext("2d");
-
-    const furnitureRects = [...STATIC_FURNITURE_RECTS, ...layout.tables.map((t) => ({ x: t.x, y: t.y, w: 2, h: 2 }))];
-    let latestState = { players: [] };
-    let myPos = null;
-
-    function redraw() {
-      drawBarScene(ctx, layout, latestState, tileSize);
-    }
-
-    function tick() {
-      getBarState()
-        .then((state) => {
-          latestState = state;
-          const mine = state.players.find((p) => p.id === session.playerId);
-          if (mine) myPos = { x: mine.x, y: mine.y };
-          redraw();
-        })
-        .catch(() => {});
-    }
-    barApi("/heartbeat", session).catch(() => {});
-    tick();
-    barHeartbeatHandle = setInterval(() => barApi("/heartbeat", session).catch(() => {}), BAR_HEARTBEAT_MS);
-    barPollHandle = setInterval(tick, BAR_POLL_MS);
-
-    canvas.addEventListener("click", async (e) => {
-      const rect = canvas.getBoundingClientRect();
-      const scaleX = canvas.width / rect.width;
-      const scaleY = canvas.height / rect.height;
-      const tx = Math.floor(((e.clientX - rect.left) * scaleX) / tileSize);
-      const ty = Math.floor(((e.clientY - rect.top) * scaleY) / tileSize);
-
-      const table = layout.tables.find((t) => tx >= t.x && tx < t.x + 2 && ty >= t.y && ty < t.y + 2);
-      if (table) {
-        status.textContent = table.available
-          ? `${table.label} — table selection and joining land in Phase 2.`
-          : `${table.label}.`;
-        return;
-      }
-
-      // Client-side pre-check against the exact same rules the server
-      // enforces (src/barLayout.ts's isValidStep) — not a replacement for
-      // server validation, just avoiding a doomed request for an
-      // obviously-invalid click (too far, or onto non-game furniture),
-      // which would otherwise still show up as a failed network request
-      // even though the app handles the resulting error gracefully.
-      if (tx < 0 || tx >= gridCols || ty < 0 || ty >= gridRows) {
-        status.textContent = "That's outside the bar.";
-        return;
-      }
-      if (tileCoveredByRect(tx, ty, furnitureRects)) {
-        status.textContent = "Can't stand there — try an open floor tile.";
-        return;
-      }
-      if (myPos) {
-        const dx = Math.abs(tx - myPos.x);
-        const dy = Math.abs(ty - myPos.y);
-        const isAdjacent = dx <= 1 && dy <= 1 && (dx !== 0 || dy !== 0);
-        if (!isAdjacent) {
-          status.textContent = "Too far — walk there one step at a time.";
-          return;
-        }
-      }
-
-      try {
-        await barApi("/move", { ...session, x: tx, y: ty });
-        status.textContent = "Tap a floor tile to walk there.";
-      } catch (err) {
-        if (err.code !== "invalid_move") status.textContent = err.message ?? "couldn't move there";
-      }
-    });
-  });
-}
-
-function renderBarPage() {
-  // barSection's *position* in the page is fixed synchronously, even
-  // though what fills it in (identity setup, or the canvas once rejoin
-  // resolves) arrives later via a promise — otherwise the classic panel
-  // below, appended synchronously at the end of this function, would
-  // render before the bar section's async content ever lands, putting
-  // it in the wrong place. Caught before shipping, not after.
-  const barSection = el("div");
-  const page = el("div", { class: "bar-page" }, [
-    el("h1", {}, "Vegas — The Bar"),
-    el(
-      "p",
-      { class: "note" },
-      "A shared table where friends walk in, order at the counter, and go play a game. Texas hold'em, dominoes, and blackjack tables are reserved, not yet open.",
-    ),
-    barSection,
-  ]);
-  render(page);
-
-  const session = loadBarSession();
-  if (!session) {
-    renderBarIdentitySetup(barSection);
-  } else {
-    // Confirm the saved identity is still valid before committing to it —
-    // same pattern as the game's rejoin check.
-    barApi("/rejoin", session)
-      .then(() => renderBarCanvas(barSection, session))
-      .catch(() => {
-        try {
-          localStorage.removeItem(BAR_SESSION_KEY);
-        } catch {
-          // nothing to do
-        }
-        renderBarIdentitySetup(barSection);
-      });
-  }
-
-  page.appendChild(buildClassicPanel());
 }
 
 // ---- Join (a code with no local session) --------------------------------
@@ -1118,4 +751,5 @@ function turnControls(code, session, state, isMyTurn) {
 
 // ---- Boot -------------------------------------------------------------
 
+const tavern = createTavern({ el, render, navigate, buildClassicPanel, lastActiveRoom });
 route();

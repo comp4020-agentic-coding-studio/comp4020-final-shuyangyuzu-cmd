@@ -7,7 +7,7 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import * as bar from "./bar.ts";
 import { BarError } from "./bar.ts";
-import { GRID_COLS, GRID_ROWS, TILE_SIZE } from "./barLayout.ts";
+import { FURNITURE, GRID_COLS, GRID_ROWS, TILE_SIZE } from "./barLayout.ts";
 import { dbPathFromEnv, openDb } from "./db.ts";
 import { renderReadme } from "./markdown.ts";
 import { RoomError } from "./rooms.ts";
@@ -169,22 +169,28 @@ function barSessionSecret(body: BarAuthedBody): string {
 }
 
 app.get("/api/bar/layout", (c) =>
-  c.json({ gridCols: GRID_COLS, gridRows: GRID_ROWS, tileSize: TILE_SIZE, tables: bar.getGameTables() }),
+  c.json({ gridCols: GRID_COLS, gridRows: GRID_ROWS, tileSize: TILE_SIZE, furniture: FURNITURE, tables: bar.getGameTables() }),
 );
 
 app.get("/api/bar/state", (c) => c.json(bar.getPublicBarState(db)));
 
 app.post("/api/bar/join", async (c) => {
-  const body = (await c.req.json().catch(() => ({}))) as CreateJoinBody;
+  const body = (await c.req.json().catch(() => ({}))) as CreateJoinBody & { skin?: unknown };
   // Deliberately not asColor() — the bar's palette is separate from and
   // larger than the Vegas table's 4 (bar.BAR_COLORS), per PLAN.md.
-  const result = bar.joinBar(db, asNickname(body), body.color as bar.BarColor);
+  const result = bar.joinBar(db, asNickname(body), body.color as bar.BarColor, typeof body.skin === "string" ? body.skin : "warm");
   return c.json(result, 201);
 });
 
 app.post("/api/bar/rejoin", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody;
   bar.rejoinBar(db, barPlayerId(body), barSessionSecret(body));
+  return c.json(bar.getPublicBarState(db));
+});
+
+app.post("/api/bar/appearance", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody & CreateJoinBody & { skin?: unknown };
+  bar.updateAppearance(db, barPlayerId(body), barSessionSecret(body), asNickname(body), body.color as bar.BarColor, typeof body.skin === "string" ? body.skin : "warm");
   return c.json(bar.getPublicBarState(db));
 });
 

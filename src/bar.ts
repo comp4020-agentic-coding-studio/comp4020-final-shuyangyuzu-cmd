@@ -61,10 +61,12 @@ export interface JoinedBar {
   y: number;
 }
 
-export function joinBar(db: Database.Database, nickname: string, color: BarColor): JoinedBar {
+export const BAR_SKINS = ["fair", "warm", "tan", "brown", "deep"] as const;
+export function joinBar(db: Database.Database, nickname: string, color: BarColor, skin = "warm"): JoinedBar {
   const trimmed = nickname.trim();
   if (!trimmed) throw new BarError("nickname is required", "nickname_required", 400);
   if (!BAR_COLORS.includes(color)) throw new BarError("not a valid color", "bad_color", 400);
+  if (!BAR_SKINS.includes(skin as typeof BAR_SKINS[number])) throw new BarError("not a valid skin tone", "bad_skin", 400);
 
   const id = randomUUID();
   const sessionSecret = newSessionSecret();
@@ -73,9 +75,9 @@ export function joinBar(db: Database.Database, nickname: string, color: BarColor
 
   const tx = db.transaction(() => {
     db.prepare(
-      `INSERT INTO bar_players (id, nickname, color, x, y, current_table_id, current_seat_id, created_at)
-       VALUES (?, ?, ?, ?, ?, NULL, NULL, ?)`,
-    ).run(id, trimmed, color, x, y, now);
+      `INSERT INTO bar_players (id, nickname, color, skin, x, y, current_table_id, current_seat_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
+    ).run(id, trimmed, color, skin, x, y, now);
     db.prepare(`INSERT INTO bar_sessions (player_id, session_secret) VALUES (?, ?)`).run(id, sessionSecret);
     recordBarHeartbeat(db, id, new Date(now));
   });
@@ -95,6 +97,15 @@ function requireBarSession(db: Database.Database, playerId: string, sessionSecre
 
 export function rejoinBar(db: Database.Database, playerId: string, sessionSecret: string): void {
   requireBarSession(db, playerId, sessionSecret);
+  recordBarHeartbeat(db, playerId);
+}
+
+export function updateAppearance(db: Database.Database, playerId: string, sessionSecret: string, nickname: string, color: BarColor, skin: string): void {
+  requireBarSession(db, playerId, sessionSecret);
+  if (!nickname.trim() || nickname.trim().length > 20) throw new BarError("nickname must be 1–20 characters", "nickname_required", 400);
+  if (!BAR_COLORS.includes(color)) throw new BarError("not a valid color", "bad_color", 400);
+  if (!BAR_SKINS.includes(skin as typeof BAR_SKINS[number])) throw new BarError("not a valid skin tone", "bad_skin", 400);
+  db.prepare("UPDATE bar_players SET nickname = ?, color = ?, skin = ? WHERE id = ?").run(nickname.trim(), color, skin, playerId);
   recordBarHeartbeat(db, playerId);
 }
 
@@ -124,6 +135,7 @@ export interface PublicBarPlayer {
   id: string;
   nickname: string;
   color: string;
+  skin: string;
   x: number;
   y: number;
 }
@@ -149,10 +161,11 @@ export interface PublicBarState {
  * membership, and any order survive; "离线后移除在线角色,但保留身份、
  * 订单和游戏进度" per PLAN.md). Nothing is deleted here, ever. */
 export function getPublicBarState(db: Database.Database): PublicBarState {
-  const rows = db.prepare(`SELECT id, nickname, color, x, y FROM bar_players`).all() as Array<{
+  const rows = db.prepare(`SELECT id, nickname, color, skin, x, y FROM bar_players`).all() as Array<{
     id: string;
     nickname: string;
     color: string;
+    skin: string;
     x: number;
     y: number;
   }>;
@@ -162,7 +175,7 @@ export function getPublicBarState(db: Database.Database): PublicBarState {
     const lastSeen = seen.get(p.id);
     return lastSeen !== undefined && isConnected(lastSeen, now);
   });
-  return { players: online.map((p) => ({ id: p.id, nickname: p.nickname, color: p.color, x: p.x, y: p.y })) };
+  return { players: online.map((p) => ({ id: p.id, nickname: p.nickname, color: p.color, skin: p.skin, x: p.x, y: p.y })) };
 }
 
 /** Static furniture, including the 6 game-table slots — fetched once by

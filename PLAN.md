@@ -804,3 +804,69 @@ the reflection are for, and they're the student's own writing.)
   nothing, independently reconfirming the settlement rule on the live
   deployment, not just in the test suite. Repo stayed private; no
   `/ship` run.
+# Interface correction — 6 October 2026 (Codex implementation)
+
+The user rejected the Phase 1 form-led homepage and requested a Gather-like
+spatial interface: a floating nickname/character editor, independently chosen
+clothes and skin tone, direct entry into a larger map, and a camera following
+the character. This replaces the earlier whole-map-in-a-webpage presentation.
+
+Implemented in the existing repository: original code-drawn pixel characters
+and tavern fixtures; full-screen viewport; 40×24 world definition served to the
+client; following camera; keyboard/touch steps and client-side path planning
+for click-to-walk; existing server adjacency checks; persisted skin tones with
+an old-schema regression check; classic game entry moved to a secondary overlay.
+Fixture coordinate updates preserve existing room pointers. New client module
+bytes are included in the asset hash and module URL versioning.
+
+This is a visual/navigation correction. Physical table-to-room binding,
+ordering and seating remain the previously planned subsequent phases. Clicking
+a Vegas fixture currently opens the existing game entry overlay, rather than
+claiming each fixture already has an independent room. No research narrative or
+reflection is authored here. User visual acceptance is still pending.
+
+Verification: Codex ran pnpm check (73 tests passing), checked the avatar editor, appearance changes, entry, click-to-walk, camera movement and desktop/mobile layouts in the browser. Deployed build feb2afbb5b and verified its editor and movement on the production HTTPS page. The original random-roll test assumed eight dice cannot show all six faces; corrected its setup to advance legal turns until a missing face is guaranteed, without changing game rules. No claim of user acceptance is made.
+
+The user subsequently confirmed the visual improvement and requested continuous
+movement while holding a direction button. Direction controls now start on
+pointerdown and reuse the existing animation-driven, server-confirmed stepping
+loop. Release, pointer cancellation, leaving the button, window blur and hidden
+document stop the hold; a normal tap retains one step. Touch controls suppress
+browser gestures and selection. Event listeners are removed on navigation.
+Verification: pnpm check passed 78 tests; the five new direction-control event
+tests also passed after refining cancellation cleanup. These are automated event
+tests, not a claim of a physical touchscreen long-press test.
+Deployed build 7da04fb5c3; production /version and /tavern.js confirmed the
+new version and hold handler. Fly machine health checks passed.
+
+## Claude's independent review of the above (6 October 2026)
+
+Picked this session back up on the student's instruction to read the
+workspace properly before touching anything — `git status`/`git diff`
+(including the two untracked files), this file, and `CLAUDE.md` — rather
+than assume or reset. Nothing above was altered; this is a second set of
+eyes on work already done, recorded separately so it's clear whose
+verification is whose.
+
+Independently re-ran `pnpm check` from a clean `rm -rf data`: 78/78,
+matching Codex's count exactly. Read `public/tavern.js` and
+`spec/direction-hold.test.ts` in full rather than taking the passing
+count on trust: the pathfinding is a real client-side BFS, but every
+tile along a found path is still submitted and awaited as its own
+`/api/bar/move` call — the server's per-step adjacency check (unchanged
+since Phase 1) is still what actually allows or refuses movement, not
+the client's path. The direction-hold cleanup (`bindDirectionHold`)
+covers pointerup anywhere, pointercancel, pointerleave, window blur, and
+document visibilitychange — matching CLAUDE.md's new constraint on this.
+
+Also drove it in a real (automated) browser, not just read the source:
+character editor renders correctly, "Step inside" enters the world,
+holding a d-pad arrow for ~1s visibly moved the character several tiles
+before release — confirming the hold mechanism produces real continuous
+movement, not just that its event listeners are wired correctly in
+isolation. **This is still an automated pointer-event simulation, the
+same caveat as above — not a physical touchscreen test**, and is not
+reported as one.
+
+No corrections needed to Codex's work or to the entry above — moving on
+to Phase 2 (per-table room binding) on this foundation.

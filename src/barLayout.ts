@@ -8,8 +8,8 @@
 // step to an adjacent, walkable tile. Walkable = not covered by any
 // furniture rectangle, and inside the grid.
 
-export const GRID_COLS = 20;
-export const GRID_ROWS = 10;
+export const GRID_COLS = 40;
+export const GRID_ROWS = 24;
 export const TILE_SIZE = 32;
 
 export type FurnitureKind = "counter" | "stool" | "dining_table" | "game_table";
@@ -30,7 +30,7 @@ export interface Furniture {
   available?: boolean;
 }
 
-export const FURNITURE: readonly Furniture[] = [
+const CORE_FURNITURE: readonly Furniture[] = [
   { id: "counter", kind: "counter", x: 3, y: 1, w: 14, h: 1, label: "Bar Counter" },
   { id: "stool-1", kind: "stool", x: 3, y: 2, w: 1, h: 1, label: "Stool" },
   { id: "stool-2", kind: "stool", x: 6, y: 2, w: 1, h: 1, label: "Stool" },
@@ -108,6 +108,12 @@ export const FURNITURE: readonly Furniture[] = [
   },
 ];
 
+// World coordinates remain independent of the viewport/camera. Leave room
+// around the central tavern fixtures for future rooms and extensions.
+export const FURNITURE: readonly Furniture[] = CORE_FURNITURE.map((f) => ({
+  ...f, x: f.x + 10, y: f.y + 6,
+}));
+
 export const GAME_TABLES: readonly Furniture[] = FURNITURE.filter((f) => f.kind === "game_table");
 
 function furnitureAt(x: number, y: number): Furniture | undefined {
@@ -143,5 +149,5 @@ export function interactiveAt(x: number, y: number): Furniture | undefined {
 /** An open floor tile for a newly-joined patron to spawn on — row 9 is
  * kept clear of furniture specifically so this is always available. */
 export function defaultSpawn(): { x: number; y: number } {
-  return { x: Math.floor(GRID_COLS / 2), y: GRID_ROWS - 1 };
+  return { x: Math.floor(GRID_COLS / 2), y: GRID_ROWS - 6 };
 }
