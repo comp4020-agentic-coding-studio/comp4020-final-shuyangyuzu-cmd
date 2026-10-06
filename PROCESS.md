@@ -1,80 +1,37 @@
-# Process overview
+# Process overview — Crit 8
 
-A factual record of what happened and who did it, kept separate from the
-student's own account of decisions and what they learned — that belongs
-in the reflection, not here. `PLAN.md` carries the full detail behind
-each entry below; this is the index a marker can follow by commit.
+## From a game to a place
 
-## Final-project pivot: Vegas → a shared bar (5–6 October 2026)
+I began by choosing a multiplayer board game that friends could learn quickly. I considered more complex games, then chose Las Vegas as a manageable starting point. My first scope was one complete round for two to four players, with invitations and recoverable browser identity. I directed Claude to ground the rules in the official rulebook rather than rely on summaries. `PLAN.md` records the rule interpretation, including tie cancellation, descending bill allocation and unclaimed bills returning to the draw pile. Scope and engineering constraints entered the repository in [960dd9c](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/commit/960dd9c).
 
-**User feedback and plan adjustment.** The student redirected the final
-project: the existing Vegas dice game becomes one table inside a shared
-virtual bar (Red Dead Redemption 2 saloon atmosphere, a Stardew Valley/
-Gather-style spatial interface). A full written proposal — lobby layout,
-how identity/physical-table/game-room/seat relate, how an invite link
-reaches the right table, a minimal additive data model, and a phased
-priority order — was reviewed and approved before any code changed:
-[`f981f28`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/commit/f981f28).
+I later wanted a shared tavern containing several game tables. Red Dead Redemption 2's saloons suggested the atmosphere; Stardew Valley and [Gather](https://www.gather.town/) suggested a readable space with visible characters. I wanted friends to enter somewhere together before choosing a game. These references informed my direction, not asset sourcing. I prioritised the bar, independent Vegas tables, then ordering and seating. The recorded proposal is [f981f28](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/commit/f981f28). I kept the working game reachable during the pivot so that new presentation work would not remove the core interaction.
 
-**Claude's Phase 1** — bar shell: server-validated grid-tile movement,
-a separate bar identity layer, heartbeat presence, an embedded-canvas
-scene drawn procedurally (no imported assets). Built, tested (`pnpm
-check`), deployed, and re-verified against the live production URL:
-[`f428d6a`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/commit/f428d6a),
-live verification in
-[`1edefae`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/commit/1edefae).
+## Stack and workflow choices
 
-**User feedback, round 2.** The student rejected Phase 1's embedded-
-canvas, form-led presentation and asked for a full-screen, Gather-like
-interface instead: a floating character editor with independently
-chosen clothing color and skin tone, a larger map, and a camera that
-follows the character.
+I accepted Node 24, TypeScript, Hono and better-sqlite3 for a small application running on the course's single Fly machine. SQLite keeps durable state in a file on `/data`, without another database service. Hono provides the HTTP routes; TypeScript helps the agent keep server state and request shapes consistent. The plain JavaScript client and canvas avoid a framework build pipeline while allowing a custom map. The scaffold and engine are recorded in [52085e8](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/commit/52085e8).
 
-**Codex's interface rework**, done directly against this repository
-(outside this agent session): a full-screen 40×24-tile world with a
-following camera; a floating character editor (nickname, clothing
-color, skin tone, live sprite preview) gating entry; client-side path
-planning for click-to-walk, with every individual tile along that path
-still submitted as its own server-validated move (the per-step
-adjacency check itself is unchanged from Phase 1); the classic
-create/join-by-code form moved to a secondary "Game rooms" overlay
-rather than stacked under the map; skin tone persisted through an
-additive migration. Reviewed by Claude before committing — re-ran the
-full test suite independently (clean `rm -rf data`, 78/78, matching
-Codex's own count), read the new client module and test file in full
-rather than trusting the count alone, and drove the editor and movement
-in a real (automated) browser. No corrections were needed.
-[`27713dc`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/commit/27713dc)
-(its own message records this authorship split in detail).
+The trade-offs are explicit. SQLite and synchronous database access fit this scale but do not establish capacity for a large public service. Browser storage makes joining easy but supplies no account recovery across devices. Polling avoids connection-management complexity, while its approximately 1.5-second interval leaves the final real-time requirement unfinished. Canvas supports the spatial design but requires deliberate input and viewport checks.
 
-**User feedback, round 3.** The student asked for continuous movement
-while holding a direction button, rather than one step per tap.
+I used Claude for staged implementation and another agent for the interface correction. I supplied product decisions, screenshots and objections, then asked for verification and records. `CLAUDE.md` converts those decisions into constraints: server authority, transactional writes, duplicate-action protection, private session credentials and recoverable identity. The development record is not uniformly test-first: Claude initially drove HTTP interactions before adding formal engine tests. I retain that sequence rather than describe every successful change as a red-to-green cycle.
 
-**Codex's long-press implementation** — the direction-pad buttons start
-stepping on press and repeat until release; pointer-up anywhere,
-pointer-cancel, pointer-leave, window blur, and the document going
-hidden (tab/app switch) all stop it; a plain tap still takes one step.
-Verified with automated event-simulation tests
-(`spec/direction-hold.test.ts`) and, separately, an automated-browser
-drive that held the button for about a second and watched the character
-move several tiles before releasing. **Neither of those is a physical
-touchscreen test, and neither is reported as one** — that check is still
-outstanding. Part of the same
-[`27713dc`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/commit/27713dc).
+## Corrections driven by use
 
-**Claude's Phase 2** — each Vegas table bound to its own independent
-game room: clicking one reads its live status and offers exactly the
-legal action (create/join), reusing the bar nickname automatically and
-a separate 4-colour game palette with taken colours disabled; the
-lobby's own copy was tightened to distinguish "back to the bar" (keeps
-your seat) from "leave table" (gives it up). One real bug — re-clicking
-your own active table would have minted a duplicate player — caught by
-writing the test case before trusting the function, not by luck.
-[`f091b43`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/commit/f091b43)
-(commit message has the detail; `PLAN.md` has the verification).
+My first attempts to enter and manage rooms exposed problems the initial checks missed. Invitation copying could claim success despite clipboard failure. Refreshing or navigating home provided no clear return route. I also asked for explicit leaving, host transfer, disbanding and a ready button. Claude reproduced the issues, then added a router, heartbeat-based lobby presence and server-enforced readiness. The client correction is [208c676](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/commit/208c676); the lifecycle work is [2b0278a](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/commit/2b0278a).
 
-**What's next**, continuing in this same repository: a counter menu
-with persisted, duplicate-proof ordering (Phase 3), and seating with
-server-arbitrated occupancy (Phase 4) — see `PLAN.md` for what's
-actually built and verified as each one lands, and this file for
-further entries as they do.
+A deployment then exposed an old-database migration failure. Widening a `CREATE TABLE IF NOT EXISTS` statement did not alter the existing production table. Claude added an explicit migration and an old-schema regression test in [43472a5](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/commit/43472a5). This became a harness rule: a fresh local database cannot prove that a deployed database will upgrade safely.
+
+I continued reporting unchanged behaviour after the agent reported successful deployment. Claude's investigation moved from release checks to browser caching. Response headers were added, followed by content-hashed asset URLs and a visible build identifier in [326173b](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/commit/326173b). The retained-browser verification record is [6232064](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/commit/6232064). I subsequently confirmed that the interface changed. The lesson was that a fresh automated browser and my returning browser were different test situations; an agent's passing report did not settle my experience.
+
+## Making the tavern match my direction
+
+Claude's first bar shell had shared movement and identity, recorded in [f428d6a](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/commit/f428d6a), but I rejected its form-led page. My request was more specific: a floating character editor, independently chosen clothing and skin tone, direct entry into a larger map, and a camera that follows the player. The agent replaced the presentation with a full-screen 40×24 world and original code-drawn artwork. Click-to-walk plans a path locally while the server still validates each adjacent step. Old game forms moved into a secondary overlay.
+
+After seeing the improvement, I requested continuous movement while holding a direction button. The agent added release and cancellation handling without replacing server validation. Claude reviewed and committed this work in [27713dc](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/commit/27713dc). Event tests and automated browser checks are recorded; neither establishes physical touchscreen verification. My approval of the appearance also does not establish that every game flow works.
+
+Claude then bound each Vegas fixture to an independent room in [f091b43](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/commit/f091b43). Re-entering an existing seat returns that seat instead of creating another player. Joining a different table while already seated is refused. Returning to the bar preserves a seat; leaving releases it. The production verification record is [d26506b](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/commit/d26506b), reporting 88 passing tests and live browser checks. These are the agent's checks, not a claim that I personally completed every scenario.
+
+## Current position and evidence
+
+I paused Claude because its usage allowance was nearly exhausted. Ordering exists only as an unconnected local `src/orders.ts`; no menu or ordering routes are live. Seating, further games and NPCs remain later work. For Crit 8 I am documenting the working tavern and Vegas interaction rather than promising those features.
+
+The [official rules](https://www.ravensburger.org/spielanleitungen/ecm/Spielanleitungen/26938_Vegas_EN.pdf), `PLAN.md`, linked commits, `CLAUDE.md` and `spec/` give different kinds of evidence: rules grounding, decisions, changes, constraints and executable checks. I asked an agent to draft this overview, README and reflection from my instructions and the recorded history. The first-person account represents my stated choices; the drafting assistance is part of the process. My next work is to check those descriptions against use and tighten synchronisation without losing recovery or clear controls.

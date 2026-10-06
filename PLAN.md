@@ -1,5 +1,14 @@
 # Final-project pivot (2026-10-05) — Vegas becomes one table in a shared bar
 
+Documentation update (6 October): at the student's explicit request, an agent
+drafted README.md, rewrote PROCESS.md and created reflections/crit-8.md in the
+first person from the student's recorded decisions and feedback. The documents
+separate agent verification from student acceptance, preserve implementation
+attribution and identify ordering/seating as unfinished. Drafting assistance is
+disclosed in PROCESS.md. README: 544 words; PROCESS: 946; reflection: 285.
+pnpm check passed 88 tests; pnpm check:evidence passed, including 12 commit
+references. No ship/publication action is included in this documentation work.
+
 The student is changing the final project's direction: the existing Las
 Vegas dice game becomes one game table inside a shared virtual bar,
 inspired by Red Dead Redemption 2's saloon — friends walk in, order at
@@ -7,9 +16,10 @@ the counter, sit at tables, and go play a game at one of several tables.
 Texas hold'em, dominoes, and blackjack are reserved table slots this
 week, clearly marked "not yet open," built out in later crit weeks (9–11,
 same repo, cutoffs Oct 12/19). Crit 8 itself (cutoff Wed 7 Oct 13:30, ~2
-days out at the time of this pivot) has already been satisfied by the
-deployed Vegas game as-is (alive, persists, deployed) — this pivot
-doesn't put that at risk, it's additional scope on top.
+days out at the time of this pivot) has its technical proof-of-life foundation
+in the deployed Vegas game (alive, persists, deployed). Submission additionally
+requires the README, process overview, reflection and publication; the deployed
+game alone does not satisfy every Crit 8 requirement.
 
 A full proposal (layout sketch, identity/table/room/seat relationships,
 invite-link handling, data model, phased priorities, open questions) was
