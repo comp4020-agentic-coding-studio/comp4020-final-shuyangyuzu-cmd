@@ -1395,3 +1395,8 @@ restarted server (an asset change needs a restart for `BUILD_VERSION`'s
 content hash to pick it up — caught this directly, from a real
 `caching.test.ts` failure against a stale process, not assumed).
 
+**Deployed and verified live**: pushed, CI's `check` and `deploy` jobs
+both passed. Re-ran the same 29-step BFS walk-in/walk-out driver against
+`https://comp4020-final-shuyangyuzu-cmd.fly.dev`: identical result, real
+server-confirmed steps the whole way in and back out, zero errors.
+
