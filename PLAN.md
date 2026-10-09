@@ -1152,3 +1152,63 @@ implementation plan for this work; this section will be filled in with
 what was actually built, measured, and found as each phase lands —
 matching how every earlier phase in this file was recorded only after
 being verified, not before.
+
+## Crit 9 implementation — phase 2: built: SSE transport, additive
+
+New `src/live.ts` (in-process pub-sub only — one Fly machine, no HA, no
+broker needed): `subscribeRoom`/`publishRoom` keyed by room code,
+`subscribeBar`/`publishBar` for the bar's single channel, plus a
+module-level `barSeq` counter (`currentBarSeq`/`bumpBarSeq`) since the
+bar has no single versioned row the way a game room's `rooms.version`
+column already is. `rooms.ts`/`bar.ts`/`tables.ts` are untouched — every
+`publish*` call lives in `src/server.ts`'s route handlers, right next to
+the `return c.json(...)` of the state each route already computes.
+
+Two new SSE endpoints (`hono/streaming`'s `streamSSE`, already inside the
+pinned `hono@4.13.12` — no new dependency): `GET /api/rooms/:code/events`
+and `GET /api/bar/events`. Each pushes a snapshot immediately on connect,
+then on every relevant mutation, with a 20s keep-alive ping comment.
+`GET /api/rooms/:code/events` on an unknown code synchronously throws the
+same `RoomError` every other room route already does, caught by the
+existing `app.onError` — 404, not a silently-open empty stream (verified
+directly). Every bar response (`/state`, `join`, `rejoin`, `appearance`,
+`move`) now carries `{seq, players, tables}` instead of just `{players}`
+— additive, not breaking: the existing polling clients (unchanged this
+phase) only ever read `.players`, so this is a safe, backward-compatible
+step before either client is rewired in phases 3-4. Room mutations
+(`join`, `start`, `leave`, `disband`, a `place` that ends the round) also
+bump and broadcast the bar channel, since those are exactly the moments a
+bound table's displayed status can change; `roll`, `ready`, and a `place`
+that doesn't end the round deliberately don't, since they're the only
+room mutations confirmed never to change what `tables.getTablesStatus()`
+reports (checked directly, not assumed).
+
+Manually verified before writing the automated test: `curl -N` against
+both new endpoints, confirming the initial snapshot arrives immediately
+on connect and a second, correctly-updated push arrives immediately after
+a separate request mutates state (same `version`/`seq` the mutating
+request's own response carries) — real streaming, not a buffered single
+response. New `spec/live.test.ts` (4 tests) codifies this: a room push
+after `ready`, a 404 on an unknown room's event stream, a bar push after
+`move`, and that an unrelated bar join still advances the bar's own `seq`
+monotonically. `pnpm check` (13 files, 92/92 tests) and `pnpm
+check:evidence` both green.
+
+**A real mistake, caught before committing, not after**: the first three
+runs of `pnpm test` after writing `spec/live.test.ts` failed with 404s on
+both new endpoints — not because the endpoints were broken, but because a
+stale server process from earlier manual testing this session (started
+*before* `src/live.ts`/the `server.ts` SSE changes existed) was still
+listening on port 8080, and vitest's `global-setup.ts` happily reused
+whatever was already there rather than noticing it was stale. Every
+`pnpm test`/`pnpm check` run reported as passing earlier in this
+session's Crit 9 work (including the settlement-test fix verification)
+was therefore actually run against that same pre-SSE process the whole
+time — it never saw any of the code written since. Found by checking
+`netstat`/`tasklist` directly rather than assuming the 404s meant a bug
+in the new code; killed every stray server process from this session
+(several, at different ports, from earlier manual smoke tests), started
+a genuinely fresh instance, and re-ran the full suite three times
+(92/92, stable) to re-confirm everything claimed above against real
+current code, not a stale process.
+
