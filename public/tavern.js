@@ -52,10 +52,25 @@ export function createTavern({ el, render, navigate, buildClassicPanel, lastActi
   }
   async function mount() {
     dispose(); document.body.classList.add('world-mode');
-    let active=true, session=null, state={players:[]}, mine=null, camera={x:0,y:0}, path=[], moving=false, frame=0, busyPoll=false;
+    let active=true, session=null, state={players:[],tables:[]}, mine=null, camera={x:0,y:0}, path=[], moving=false, frame=0;
     let keys=new Set(), lastTime=0, destination=null, cameraInitialized=false, movementEpoch=0, heldDirection=null;
+    // Crit 9: live updates arrive over SSE, not a fixed poll interval —
+    // see CLAUDE.md. `lastSeq` is this channel's staleness gate (every
+    // incoming payload — a push, a fallback fetch, a mutation's own
+    // response — goes through applyIncoming, which discards anything not
+    // strictly newer). `pendingMoveTarget` is the narrow exception: while
+    // this patron's own step is in flight, an update that predates it
+    // must not visually snap the local avatar back to its pre-move tile —
+    // every *other* player's position and the live table list still
+    // apply immediately regardless (continuous walking must not block
+    // receiving others' updates).
+    let lastSeq=-1, eventSource=null, pendingMoveTarget=null, visibilityHandler=null;
     const holdCleanups=[];
-    dispose=()=>{active=false;holdCleanups.forEach(cleanup=>cleanup());document.body.classList.remove('world-mode');};
+    dispose=()=>{
+      active=false;holdCleanups.forEach(cleanup=>cleanup());document.body.classList.remove('world-mode');
+      if(eventSource){eventSource.close();eventSource=null;}
+      if(visibilityHandler){document.removeEventListener('visibilitychange',visibilityHandler);window.removeEventListener('focus',visibilityHandler);visibilityHandler=null;}
+    };
     const displayPositions=new Map();
     const timers=[];
     const canvas=el('canvas',{'aria-label':'Shared tavern map',tabindex:'0'});
@@ -97,8 +112,33 @@ export function createTavern({ el, render, navigate, buildClassicPanel, lastActi
       if(!prev.has(end))return [];const result=[];let key=end;while(key!==start){result.unshift(key.split(',').map(Number));key=prev.get(key);}return result;
     }
     function queueStep(dx,dy){if(!mine||moving||overlay.childElementCount)return;const x=mine.x+dx,y=mine.y+dy;if(walkable(x,y)){path=[[x,y]];destination={x,y};}}
-    function reconcile(next){state=next;mine=state.players.find(p=>p.id===session?.playerId)||mine;online.textContent=`${state.players.length} here`;}
-    async function poll(){if(!session||busyPoll||moving)return;busyPoll=true;const epoch=movementEpoch;try{const next=await read('/state');if(active&&epoch===movementEpoch&&!moving)reconcile(next);}catch(e){toast.textContent='Connection interrupted — retrying…';}finally{busyPoll=false;}}
+    function reconcile(next){
+      state=next;
+      mine=state.players.find(p=>p.id===session?.playerId)||mine;
+      if(pendingMoveTarget&&mine)mine={...mine,x:pendingMoveTarget.x,y:pendingMoveTarget.y};
+      online.textContent=`${state.players.length} here`;
+    }
+    // The one staleness rule for this channel (same principle as the
+    // game room's own `version` check, CLAUDE.md): a payload only applies
+    // if it's strictly newer than the last one actually rendered. This
+    // alone handles a late-arriving stale response, a reconnect after a
+    // drop (a fresh fetch's seq is always >= anything missed), and two
+    // near-simultaneous updates racing each other.
+    function applyIncoming(next){
+      if(typeof next.seq==='number'){if(next.seq<=lastSeq)return;lastSeq=next.seq;}
+      reconcile(next);
+    }
+    async function fetchAndApply(){if(!session)return;try{applyIncoming(await read('/state'));}catch(e){toast.textContent='Connection interrupted — retrying…';}}
+    function connectEvents(){
+      if(eventSource)eventSource.close();
+      const es=new EventSource('/api/bar/events');
+      es.onmessage=ev=>{try{applyIncoming(JSON.parse(ev.data));}catch{}};
+      // Fires on first connect *and* every automatic reconnect — either
+      // way, one unconditional fresh fetch rather than trusting nothing
+      // was missed while the connection was down.
+      es.onopen=()=>{fetchAndApply();};
+      eventSource=es;
+    }
     function openGames(){
       path=[];
       overlay.replaceChildren(el('section',{class:'world-dialog game-dialog',role:'dialog','aria-label':'Game rooms'},[
@@ -170,7 +210,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, lastActi
       const enter=el('button',{type:'submit',class:'enter-world'},'Step inside  →');
       const form=el('form',{class:'world-dialog avatar-dialog',role:'dialog','aria-label':'Create your character',onsubmit:async e=>{
         e.preventDefault();enter.disabled=true;error.textContent='';
-        try{const appearance={nickname:input.value.trim(),color,skin};if(session){reconcile(await post('/appearance',{...session,...appearance}));session={...session,...appearance};}else{session={...await post('/join',appearance),...appearance};}try{localStorage.setItem(sessionKey,JSON.stringify(session));}catch{}overlay.replaceChildren();reconcile(await read('/state'));begin();}
+        try{const appearance={nickname:input.value.trim(),color,skin};if(session){applyIncoming(await post('/appearance',{...session,...appearance}));session={...session,...appearance};}else{session={...await post('/join',appearance),...appearance};}try{localStorage.setItem(sessionKey,JSON.stringify(session));}catch{}overlay.replaceChildren();applyIncoming(await read('/state'));begin();}
         catch(err){error.textContent=err.message||'Could not enter';enter.disabled=false;}
       }},[
         el('p',{class:'eyebrow'},'THE AMBER ROOM · OPEN ALL EVENING'),el('h1',{},'Come as you are.'),el('p',{class:'dialog-subtitle'},'Make yourself a little character. Your friends are inside.'),
@@ -185,7 +225,23 @@ export function createTavern({ el, render, navigate, buildClassicPanel, lastActi
       enteredThisPage=true;
       if(timers.length||!active)return;
       if(mine){session={...session,nickname:mine.nickname,color:mine.color,skin:mine.skin};try{localStorage.setItem(sessionKey,JSON.stringify(session));}catch{}}
-      post('/heartbeat',session).catch(()=>{});poll();timers.push(setInterval(poll,1500),setInterval(()=>post('/heartbeat',session).catch(()=>{}),5000));
+      post('/heartbeat',session).catch(()=>{});
+      connectEvents();fetchAndApply();
+      // 10s fallback poll — cheap insurance if the stream silently
+      // stalls without EventSource noticing; gated through the same
+      // seq check above, so it's a no-op whenever the stream is doing
+      // its job.
+      timers.push(setInterval(()=>post('/heartbeat',session).catch(()=>{}),5000),setInterval(fetchAndApply,10000));
+      visibilityHandler=()=>{
+        if(document.visibilityState!=='visible')return;
+        // A backgrounded tab can have its EventSource suspended by the
+        // browser; coming back is exactly when a stale view would
+        // otherwise sit unnoticed.
+        if(!eventSource||eventSource.readyState===EventSource.CLOSED)connectEvents();
+        fetchAndApply();
+      };
+      document.addEventListener('visibilitychange',visibilityHandler);
+      window.addEventListener('focus',visibilityHandler);
       const last=lastActiveRoom();if(last){hud.querySelector('.hud-actions').appendChild(el('button',{class:'hud-button',onclick:()=>navigate(`/?room=${last}`)},'Return to your game'));}
       toast.textContent='Welcome in. WASD / arrows to walk · click a destination';canvas.focus();
     }
@@ -199,9 +255,9 @@ export function createTavern({ el, render, navigate, buildClassicPanel, lastActi
       path=findPath(x,y);destination=path.length?{x,y}:null;
     });
     async function step(x,y){
-      moving=true;movementEpoch++;
-      try{const next=await post('/move',{playerId:session.playerId,sessionSecret:session.sessionSecret,x,y});if(active)reconcile(next);}
-      catch(e){path=[];destination=null;toast.textContent=e.status===403?'Your session could not be restored. Reload to rejoin.':'Could not move — try again.';await poll();}
+      moving=true;movementEpoch++;pendingMoveTarget={x,y};
+      try{const next=await post('/move',{playerId:session.playerId,sessionSecret:session.sessionSecret,x,y});pendingMoveTarget=null;if(active)applyIncoming(next);}
+      catch(e){pendingMoveTarget=null;path=[];destination=null;toast.textContent=e.status===403?'Your session could not be restored. Reload to rejoin.':'Could not move — try again.';await fetchAndApply();}
       finally{moving=false;}
     }
     // A static world layer is painted once, not rebuilt on every animation frame.
@@ -265,6 +321,25 @@ export function createTavern({ el, render, navigate, buildClassicPanel, lastActi
       const target=mine||{x:20,y:12};const desiredX=Math.max(0,Math.min(Math.max(0,worldW-vw),(target.x+.5)*tile-vw/2)),desiredY=Math.max(0,Math.min(Math.max(0,worldH-vh),(target.y+.5)*tile-vh/2));
       if(!cameraInitialized){camera={x:desiredX,y:desiredY};cameraInitialized=true;}else{camera.x+=(desiredX-camera.x)*.12;camera.y+=(desiredY-camera.y)*.12;}
       ctx.clearRect(0,0,vw,vh);ctx.imageSmoothingEnabled=false;ctx.drawImage(floor,-Math.round(camera.x),-Math.round(camera.y));
+      // Crit 9: each playable table's capacity and live occupancy, drawn
+      // fresh every frame from the continuously-updated state.tables
+      // (streamed over the bar's own SSE channel) — so a bystander can
+      // "see whether it has room" from across the room, without walking
+      // over and clicking (README's own definition of good). Up to 4
+      // seat markers always drawn, matching MAX_PLAYERS in src/rooms.ts —
+      // this doesn't change that rule, just makes it visible.
+      for(const f of fixtures){
+        if(f.kind!=='game_table'||!f.available)continue;
+        const t=state.tables.find(tb=>tb.id===f.id);
+        if(!t)continue;
+        const cx=(f.x+f.w/2)*tile-camera.x,seatY=(f.y+f.h)*tile-camera.y+8;
+        for(let i=0;i<4;i++){
+          const sx=cx-33+i*22;
+          ctx.beginPath();ctx.arc(sx,seatY,6,0,Math.PI*2);
+          ctx.fillStyle=i<t.playerCount?(colors[t.takenColors[i]]||'#ddba65'):'#00000030';
+          ctx.fill();ctx.strokeStyle='#1c1620';ctx.lineWidth=1;ctx.stroke();
+        }
+      }
       if(destination){ctx.strokeStyle='#ecd29b';ctx.lineWidth=2;ctx.strokeRect(destination.x*tile-camera.x+8,destination.y*tile-camera.y+8,tile-16,tile-16);}
       for(const p of [...state.players].sort((a,b)=>a.y-b.y)){
         let pos=displayPositions.get(p.id);if(!pos){pos={x:p.x,y:p.y};displayPositions.set(p.id,pos);}
@@ -280,7 +355,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, lastActi
     frame=requestAnimationFrame(animate);
     dispose=()=>{active=false;cancelAnimationFrame(frame);timers.forEach(clearInterval);holdCleanups.forEach(cleanup=>cleanup());window.removeEventListener('resize',resize);window.removeEventListener('keydown',keyDown);window.removeEventListener('keyup',keyUp);window.removeEventListener('blur',blur);document.body.classList.remove('world-mode');};
     try{session=JSON.parse(localStorage.getItem(sessionKey)||'null');}catch{}
-    if(session){try{reconcile(await post('/rejoin',session));if(active){if(enteredThisPage)begin();else chooseCharacter();}}catch(e){if(e.status===403){session=null;localStorage.removeItem(sessionKey);chooseCharacter();}else toast.textContent='Unable to reconnect. Reload to retry.';}}
+    if(session){try{applyIncoming(await post('/rejoin',session));if(active){if(enteredThisPage)begin();else chooseCharacter();}}catch(e){if(e.status===403){session=null;localStorage.removeItem(sessionKey);chooseCharacter();}else toast.textContent='Unable to reconnect. Reload to retry.';}}
     else chooseCharacter();
   }
   return {mount,stop:()=>dispose()};

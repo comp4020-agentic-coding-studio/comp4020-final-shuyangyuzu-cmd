@@ -1279,3 +1279,59 @@ consistent with the local numbers, confirming the stream survives Fly's
 proxy in front of it under real conditions, not just in a local dev
 process.
 
+## Crit 9 implementation — phase 4: built: public/tavern.js is SSE-driven
+
+`public/tavern.js`'s `poll()`/`setInterval(poll,1500)` is replaced by
+`EventSource('/api/bar/events')`, gated by the same kind of staleness
+rule as the room view — a `seq`-based `applyIncoming`, since the bar has
+no single versioned row the way a game room's `version` column already
+is (`src/live.ts`'s `bumpBarSeq`/`currentBarSeq`).
+
+The old `moving` flag's full poll-skip is **removed outright** — this was
+the specific, named problem (continuous walking silently blocking receipt
+of everyone else's updates). In its place: a narrow `pendingMoveTarget`,
+set only while *this* patron's own step request is in flight. `reconcile`
+still applies every incoming payload immediately — every other player's
+position, every table's live status — but while `pendingMoveTarget` is
+set, it overrides just the local avatar's displayed x/y to the pending
+destination, so an update that predates this patron's own in-flight move
+doesn't visually snap their own sprite back to its pre-move tile. `moving`
+itself is kept, narrowed to its original, separate purpose: preventing a
+second step request from starting before the first one resolves — never
+again used to gate what's received or rendered.
+
+Table occupancy, previously fetched only on-click (`openTableDialog`'s own
+`read('/tables')`), is now part of the continuously-streamed bar payload
+and drawn every frame: up to 4 small seat markers per playable table,
+filled with the occupying player's actual color as `state.tables` updates
+live, empty otherwise — a bystander can now see a table fill up from
+across the room, not just by walking over and clicking (the dialog still
+re-fetches `/tables` fresh at click time as the authoritative check before
+acting — unchanged, defense in depth). This doesn't change the 4-player
+cap itself (`MAX_PLAYERS` in `src/rooms.ts`, untouched) — it makes the
+existing rule visible.
+
+`onopen`/`visibilitychange`/`focus` handling mirrors phase 3's app.js:
+one unconditional fresh fetch on connect, reconnect, or a backgrounded
+tab resuming. `dispose()` now also closes the EventSource and removes the
+visibility/focus listeners — nothing left bound after leaving the bar.
+
+**Verified, not asserted**: a second throwaway Playwright driver, using
+only real app code paths (a real patron's real `EventSource`, real
+`reconcile()`, and a plain, observable signal — the HUD's own
+`.online-count` text) rather than reaching into internal JS state. Three
+runs each:
+- **Stationary** (patron A idle, a second real patron joins via a direct
+  API call): A's online count updated in **57-61ms**.
+- **Continuous movement** (A holding a direction key the *entire* time,
+  via real keyboard events driving the real walk loop, while a third
+  patron joins mid-walk): A's online count still updated, in
+  **10-14ms** — if anything faster than stationary, since each of A's
+  own in-flight steps already carries a fresh snapshot independent of
+  the push. This is the direct, measured answer to "does continuous
+  walking block receiving other updates": no.
+
+`pnpm check` (13 files, 92/92) stayed green throughout, re-run against a
+freshly-started server after both Playwright passes. No console errors
+observed during either run (listened for directly, not assumed absent).
+
