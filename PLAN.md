@@ -1212,3 +1212,19 @@ a genuinely fresh instance, and re-ran the full suite three times
 (92/92, stable) to re-confirm everything claimed above against real
 current code, not a stale process.
 
+**Deployed and verified live**: pushed, CI's `check` and `deploy` jobs
+both passed (`gh run watch`). Then checked the actual transport against
+production directly — not inferred from CI being green — since Fly's
+proxy sits in front of this app and a reverse proxy can buffer or
+mishandle a streaming response even when the app itself streams
+correctly: joined the live bar, opened `GET /api/bar/events` against
+`https://comp4020-final-shuyangyuzu-cmd.fly.dev` with `curl -N`, and
+confirmed both the immediate on-connect snapshot (`seq:1`) and a second,
+correctly-updated push (`seq:2`, matching position) arriving in real time
+after a separate `move` request — streaming genuinely works through
+Fly's proxy, not just on localhost. (Also incidentally confirmed, from
+the snapshot's own `tables` field, that real rooms already exist on
+production from the student's own prior use — this phase's probe
+patron is harmless and will simply drop out of the live view once its
+heartbeat goes stale, the same as any other disconnected patron.)
+
