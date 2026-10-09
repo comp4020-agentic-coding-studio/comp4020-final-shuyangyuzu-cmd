@@ -67,9 +67,51 @@ exist.
 ## Scope discipline
 
 No chat, no matchmaking beyond a single room's own link/code, no AI
-player, no neutral white-dice variant, no more than one round, no
-sub-second real-time sync. These are explicitly deferred to the final
-project (see `PLAN.md`) — do not build ahead of what crit 8 asks for.
+player, no neutral white-dice variant, no more than one round. These
+remain explicitly deferred (see `PLAN.md`) — do not build ahead of what
+the current crit asks for.
+
+Sub-second real-time sync — listed here as deferred all the way through
+Crit 8 — is Crit 9's own explicit requirement instead: a change one
+person makes must reach every other open session in about a second, with
+no reload. See `PLAN.md`'s Crit 9 section for what was actually built
+(the transport decision, the architecture, what was measured) and the
+section immediately below for the authority rule that transport has to
+follow. This is the one deferred item in this file ever superseded by a
+later crit's own spec; it's recorded here as a deliberate edit, not left
+as a silent contradiction with the paragraph above.
+
+## Real-time push is a transport, not a new authority
+
+SSE (`src/live.ts`, `GET /api/rooms/:code/events`, `GET /api/bar/events`)
+only ever carries server-computed public state *outward*. No client ever
+writes anything over it, and no server-authority rule above is relaxed
+for it — every state-changing request still arrives as its own
+authenticated POST, checked exactly as it was before this transport
+existed; the push channel just broadcasts what that request's own
+transaction already committed, to everyone else who's watching.
+
+Staleness is resolved by a monotonic sequence number, not arrival order:
+a game room reuses its existing `version` column (the same optimistic-
+concurrency counter idempotency already depends on); the bar — which has
+no single versioned row, since its state is many independently-updated
+player rows — gets its own in-memory counter in `src/live.ts`. Every
+receiver (a stream push, a mutating action's own response, a fallback
+poll, a post-reconnect fetch) goes through the same rule: apply a payload
+only if its sequence number is strictly greater than the last one
+actually applied, otherwise discard it. This is what keeps a late-
+arriving stale response, or two near-simultaneous updates racing each
+other, from ever regressing what's on screen — the same principle as the
+version check above, just extended to a channel the client didn't
+explicitly request.
+
+A dropped connection is never trusted to have delivered everything that
+happened while it was down. `EventSource`'s own `onopen` (which fires on
+the initial connect *and* every automatic reconnect) and a
+`visibilitychange`/`focus` handler both force one unconditional fresh
+fetch of the current state — a resumed session's correctness depends on
+asking the server what's true now, never on replaying whatever the
+stream happens to send next.
 
 ## Presence: heartbeat, not unload
 

@@ -1400,3 +1400,60 @@ both passed. Re-ran the same 29-step BFS walk-in/walk-out driver against
 `https://comp4020-final-shuyangyuzu-cmd.fly.dev`: identical result, real
 server-confirmed steps the whole way in and back out, zero errors.
 
+## Crit 9 implementation — phase 6: decision record, reconnect, CLAUDE.md
+
+**The decision record**: `ADR-last-seat.md` (repo root). Investigated the
+last-seat race properly before writing anything, per the explicit
+instruction not to conflate two different latencies: a dedicated script
+fires two real, simultaneous `POST /join` requests at a room already at
+3/4 players with exactly one color left (a genuine single-slot race, not
+a test artifact), while a third, idle session watches the room's SSE
+channel. Three local runs, two production runs:
+
+| | Local | Production |
+|---|---|---|
+| Loser's own `409 room_full` | 8-10ms | 86-230ms |
+| Winner's own `201` | 6-7ms | 80-224ms |
+| Idle bystander's SSE push showing the room full | ~0ms after the winning commit | ~0ms (sub-ms) after the winning commit |
+
+Confirms what reading the code already suggested (but didn't assume
+without measuring): the loser's own latency was never poll-bound — it's
+plain network RTT, same before and after this week's work. The
+bystander's number is what actually changed: ~1.5s-bound before, now
+effectively instant via the same SSE push as everything else. The ADR
+documents the existing (unchanged) server-side resolution, the
+alternatives considered (client-side optimistic reservation — rejected,
+violates server authority; a waitlist/queue — rejected as more than this
+week needs, not as a bad idea), the required argument *against* the
+chosen path (a queue would arguably be more socially fair than "whoever's
+request wins," which is a genuine, named cost — not a strawman), and how
+it ties to README's own "good."
+
+**Reconnect, measured**: a Playwright driver has guest B's tab go
+"hidden" (simulating a dropped/backgrounded connection), has host A ready
+up and start the game while B is away (including readying B server-side,
+since a real disconnect wouldn't stop the room from moving on), confirms
+the server's actual current state directly over the API, then has B's
+tab become visible again and measures convergence. Three runs (2 local,
+1 production): B's view reached the correct, current game-started state
+in **10-47ms** after resuming — via the `visibilitychange`/`focus`
+handler's forced fresh fetch (CLAUDE.md), not by trusting any event that
+might have been missed while B's stream was down.
+
+**`CLAUDE.md`**: the "Scope discipline" section's "no sub-second
+real-time sync" clause (listed there as deferred through Crit 8) is
+replaced with a note that Crit 9 supersedes it, pointing at this file's
+own record above. A new "Real-time push is a transport, not a new
+authority" section states the rule actually built: SSE carries
+server-computed state outward only, every write still goes through the
+existing authenticated POST path unchanged, staleness is resolved by the
+version/seq rule (same principle as the existing optimistic-concurrency
+check), and a reconnect is never trusted to have delivered everything
+missed — only a fresh fetch is.
+
+**README/PROCESS**: not edited this round, per the explicit instruction
+to propose facts and arguments for the student's own review rather than
+rewrite these in their voice, and not to draft `reflections/crit-9.md` on
+their behalf. The specific proposed facts/arguments were given directly
+in this session's final report rather than written into the repo.
+
