@@ -1228,3 +1228,46 @@ production from the student's own prior use — this phase's probe
 patron is harmless and will simply drop out of the live view once its
 heartbeat goes stale, the same as any other disconnected patron.)
 
+## Crit 9 implementation — phase 3: built: public/app.js is SSE-driven
+
+`public/app.js`'s room/lobby view swapped its flat 1.5s `setInterval`
+poll for `EventSource('/api/rooms/:code/events')` as the primary update
+path. A single staleness rule (`state.version <= lastVersion` → discard)
+is now the one gate every source of state goes through: the stream's
+pushes, a mutating action's own response (now applied directly via a new
+`applyIncoming`, rather than discarded in favor of a separate `getState`
+call the old `refreshNow()` made — removing a redundant request on every
+Ready/Start/Roll/Place click), and a slow 10s fallback poll kept as cheap
+insurance against a silently-stalled connection. `EventSource.onopen`
+(fires on the initial connect *and* every automatic reconnect) and a new
+`visibilitychange`/`focus` handler both trigger one unconditional fresh
+fetch, so a backgrounded tab resuming — or a dropped connection coming
+back — resyncs to the server's actual current state rather than trusting
+whatever the stream happens to deliver next. `stopPolling`/`pollHandle`
+are gone, replaced by `stopLive`/`startLive`, which also tears down the
+visibility listener on route change (no listener left bound after
+navigating away). The heartbeat loop is untouched — still a separate
+5s interval, still unrelated to this transport, per CLAUDE.md's existing
+presence/state separation.
+
+**Verified, not just asserted**: a throwaway Playwright driver (outside
+the repo, matching the pattern already used earlier in this project)
+drove two real browser contexts against the locally-running app — host A
+creates a room, guest B joins, A clicks Ready, and B's page is watched
+(no reload, no action on B's part) until its own DOM shows A as ready.
+Three runs: B's view reflected A's change **51-71ms** after A's own click
+started, of which only **5-8ms** was propagation *beyond* A's own
+click-to-response round trip — the rest is A's own request latency, not
+sync lag. Comfortably under the "~1 second" requirement, measured with
+real timestamps (`Date.now()` before/after, logged), not inferred from
+the fact that SSE pushes exist in the code. `pnpm check` (13 files,
+92/92) stayed green throughout, re-run against a freshly-started server
+after the Playwright pass.
+
+**A real tooling gap found and fixed along the way**: no Playwright
+install existed in this environment yet (only a cached, mismatched
+browser binary version from some earlier, unrelated install) — `npx
+playwright install chromium` pulled the matching one (~120MB) before the
+driver could actually launch a browser. Noted since it's a real step
+anyone reproducing this verification would also hit, not a given.
+

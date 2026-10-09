@@ -14,8 +14,13 @@
 const assetVersion = new URL(document.querySelector('script[type="module"]').src).searchParams.get('v');
 const { createTavern } = await import(`./tavern.js?v=${assetVersion}`);
 const COLORS = ["red", "blue", "green", "yellow"];
-const POLL_MS = 1500;
 const HEARTBEAT_MS = 5000; // comfortably under the server's default PRESENCE_STALE_MS (15s)
+// Cheap insurance only, not the primary path (Crit 9: live updates come
+// from GET /api/rooms/:code/events over SSE, below) — in case a stream
+// silently stalls without EventSource noticing. Gated through the same
+// staleness check as everything else, so it's a no-op whenever the
+// stream is doing its job.
+const FALLBACK_POLL_MS = 10000;
 
 const root = document.getElementById("app");
 
@@ -133,7 +138,7 @@ window.addEventListener("popstate", route);
 
 function route() {
   stopHeartbeat();
-  stopPolling();
+  stopLive();
 
   tavern.stop();
   const code = codeFromUrl();
@@ -402,9 +407,11 @@ function enterRoom(code, session) {
   // way out, not a silent dead end (CLAUDE.md: identity recovery is
   // browser-local and has no fallback once that's gone; the UI says so).
   api(`/rooms/${code}/rejoin`, session)
-    .then(() => {
+    .then((state) => {
       startHeartbeat(code, session);
-      startPolling(code, session);
+      // rejoin's own response is already the room's current state —
+      // hand it straight to startLive instead of fetching it again.
+      startLive(code, session, state);
     })
     .catch(() => {
       render(
@@ -421,19 +428,35 @@ function enterRoom(code, session) {
     });
 }
 
-let pollHandle = null;
+let eventSource = null;
+let fallbackPollHandle = null;
 let heartbeatHandle = null;
-// Set by startPolling to its own tick function, so an action handler
-// (ready/start/roll/place/...) can force an immediate state refresh
-// right after its own request succeeds, rather than leaving the player
-// looking at a stale view for up to POLL_MS until the next scheduled
-// tick — which is both confusing and was caught producing a flaky-
-// looking "the button didn't work" moment during verification.
+let lastVersion = -1;
+let visibilityHandler = null;
+// Set by startLive to its own staleness-gated apply function, so an
+// action handler (ready/start/roll/place/...) can hand its own request's
+// already-fresh response straight to the live view instead of discarding
+// it and waiting on the stream's next push.
+let applyIncoming = () => {};
+// A plain "go fetch the current state and apply it" — used for the
+// fallback poll, the on-reconnect/on-visible resync, and as a safety net;
+// always goes through the same staleness gate as everything else.
 let refreshNow = () => {};
 
-function stopPolling() {
-  if (pollHandle) clearInterval(pollHandle);
-  pollHandle = null;
+function stopLive() {
+  if (eventSource) {
+    eventSource.close();
+    eventSource = null;
+  }
+  if (fallbackPollHandle) clearInterval(fallbackPollHandle);
+  fallbackPollHandle = null;
+  if (visibilityHandler) {
+    document.removeEventListener("visibilitychange", visibilityHandler);
+    window.removeEventListener("focus", visibilityHandler);
+    visibilityHandler = null;
+  }
+  lastVersion = -1;
+  applyIncoming = () => {};
   refreshNow = () => {};
 }
 
@@ -449,34 +472,90 @@ function startHeartbeat(code, session) {
   heartbeatHandle = setInterval(tick, HEARTBEAT_MS);
 }
 
-function startPolling(code, session) {
-  stopPolling();
-  const tick = () =>
-    getState(code)
-      .then((state) => {
-        const stillSeated = state.players.some((p) => p.id === session.playerId);
-        if (!state.closed && !stillSeated) {
-          // Swept out while we weren't looking (disconnect grace
-          // expired) — this browser's seat is just gone, same as a
-          // voluntary leave from elsewhere.
-          stopPolling();
-          stopHeartbeat();
-          clearSession(code);
-          render(
-            el("div", { class: "entry" }, [
-              el("h1", {}, "Vegas"),
-              el("p", {}, "You were removed from this room after being disconnected too long."),
-              backToHomeButton(),
-            ]),
-          );
-          return;
-        }
-        renderTable(code, session, state);
-      })
-      .catch(() => {});
-  refreshNow = tick;
-  tick();
-  pollHandle = setInterval(tick, POLL_MS);
+// Crit 9: live updates via SSE rather than a fixed poll interval — see
+// CLAUDE.md for what this push transport is and isn't allowed to carry
+// (server-computed state outward only). `initialState`, when given
+// (rejoin's own response), is applied immediately instead of waiting on
+// a first fetch or the stream's first frame.
+function startLive(code, session, initialState) {
+  stopLive();
+
+  function apply(state) {
+    // The one staleness rule, used for every source of state below
+    // (the stream, a fallback fetch, and an action's own response): a
+    // payload only ever applies if it's strictly newer than the last one
+    // this view actually rendered. This is what keeps a late-arriving
+    // stale response (or two near-simultaneous updates racing each
+    // other) from ever rendering something older than what's already
+    // on screen.
+    if (state.version <= lastVersion) return;
+    lastVersion = state.version;
+
+    const stillSeated = state.players.some((p) => p.id === session.playerId);
+    if (!state.closed && !stillSeated) {
+      // Swept out while we weren't looking (disconnect grace expired) —
+      // this browser's seat is just gone, same as a voluntary leave.
+      stopLive();
+      stopHeartbeat();
+      clearSession(code);
+      render(
+        el("div", { class: "entry" }, [
+          el("h1", {}, "Vegas"),
+          el("p", {}, "You were removed from this room after being disconnected too long."),
+          backToHomeButton(),
+        ]),
+      );
+      return;
+    }
+    renderTable(code, session, state);
+  }
+  applyIncoming = apply;
+
+  async function fetchAndApply() {
+    try {
+      apply(await getState(code));
+    } catch {
+      // transient — the fallback poll or the next stream event will retry
+    }
+  }
+  refreshNow = fetchAndApply;
+
+  function connect() {
+    const es = new EventSource(`/api/rooms/${code}/events`);
+    es.onmessage = (ev) => {
+      try {
+        apply(JSON.parse(ev.data));
+      } catch {
+        // malformed/ping frame — ignore
+      }
+    };
+    // Fires on the initial connect *and* on every automatic reconnect —
+    // either way, do one unconditional fresh fetch rather than trust
+    // that nothing was missed while the connection was down (a fresh
+    // read's version is always >= anything missed, so this always wins
+    // the staleness gate above when it matters).
+    es.onopen = () => {
+      fetchAndApply();
+    };
+    eventSource = es;
+  }
+
+  visibilityHandler = () => {
+    if (document.visibilityState !== "visible") return;
+    // A backgrounded tab can have its EventSource silently suspended by
+    // the browser; coming back to the tab is exactly when a stale view
+    // would otherwise sit unnoticed, so reconnect if needed and always
+    // force one fresh read regardless.
+    if (!eventSource || eventSource.readyState === EventSource.CLOSED) connect();
+    fetchAndApply();
+  };
+  document.addEventListener("visibilitychange", visibilityHandler);
+  window.addEventListener("focus", visibilityHandler);
+
+  if (initialState) apply(initialState);
+  connect();
+  if (!initialState) fetchAndApply();
+  fallbackPollHandle = setInterval(fetchAndApply, FALLBACK_POLL_MS);
 }
 
 function copyInviteLinkControl(shareLink) {
@@ -510,7 +589,7 @@ function copyInviteLinkControl(shareLink) {
 
 function renderTable(code, session, state) {
   if (state.closed) {
-    stopPolling();
+    stopLive();
     stopHeartbeat();
     clearSession(code);
     render(
@@ -587,8 +666,10 @@ function lobbyControls(code, session, state, isHost, me) {
     {
       onclick: async () => {
         try {
-          await api(`/rooms/${code}/ready`, { ...session, ready: !me.ready });
-          refreshNow();
+          // The action's own response is already the room's fresh,
+          // versioned state — apply it directly rather than discarding
+          // it and waiting on a separate fetch or the stream's next push.
+          applyIncoming(await api(`/rooms/${code}/ready`, { ...session, ready: !me.ready }));
         } catch (err) {
           alert(err.message);
         }
@@ -610,7 +691,7 @@ function lobbyControls(code, session, state, isHost, me) {
           alert(err.message);
           return;
         }
-        stopPolling();
+        stopLive();
         stopHeartbeat();
         clearSession(code);
         navigate("/");
@@ -641,8 +722,7 @@ function lobbyControls(code, session, state, isHost, me) {
           disabled: !everyoneReady,
           onclick: async () => {
             try {
-              await api(`/rooms/${code}/start`, session);
-              refreshNow();
+              applyIncoming(await api(`/rooms/${code}/start`, session));
             } catch (err) {
               alert(err.message);
             }
@@ -665,7 +745,7 @@ function lobbyControls(code, session, state, isHost, me) {
               alert(err.message);
               return;
             }
-            stopPolling();
+            stopLive();
             stopHeartbeat();
             clearSession(code);
             navigate("/");
@@ -716,8 +796,7 @@ function turnControls(code, session, state, isMyTurn) {
       {
         onclick: async () => {
           try {
-            await api(`/rooms/${code}/roll`, session);
-            refreshNow();
+            applyIncoming(await api(`/rooms/${code}/roll`, session));
           } catch (err) {
             alert(err.message);
           }
@@ -741,8 +820,7 @@ function turnControls(code, session, state, isMyTurn) {
             {
               onclick: async () => {
                 try {
-                  await api(`/rooms/${code}/place`, { ...session, value });
-                  refreshNow();
+                  applyIncoming(await api(`/rooms/${code}/place`, { ...session, value }));
                 } catch (err) {
                   alert(err.message);
                 }
