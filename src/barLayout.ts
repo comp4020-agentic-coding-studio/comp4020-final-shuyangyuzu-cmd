@@ -12,7 +12,7 @@ export const GRID_COLS = 40;
 export const GRID_ROWS = 24;
 export const TILE_SIZE = 32;
 
-export type FurnitureKind = "counter" | "stool" | "dining_table" | "game_table";
+export type FurnitureKind = "counter" | "stool" | "dining_table" | "game_table" | "restroom";
 export type GameType = "vegas" | "texas" | "dominoes" | "blackjack";
 
 export interface Furniture {
@@ -28,6 +28,14 @@ export interface Furniture {
   /** Only set for kind === "game_table" — false for the reserved
    * Texas/dominoes/blackjack slots, true for the 3 Vegas tables. */
   available?: boolean;
+  /** Defaults to true (every existing kind blocks movement, unchanged)
+   * — set false for a fixture that's a walkable zone marker rather than
+   * an obstacle (the restroom: a sign/entrance the player can walk
+   * through, not a table they walk around). Read by both isWalkable
+   * below and the client's own mirror of the same rule (public/tavern.js
+   * fetches this same FURNITURE list via GET /api/bar/layout), so the
+   * two can't drift into "client says walkable, server says no". */
+  blocksMovement?: boolean;
 }
 
 const CORE_FURNITURE: readonly Furniture[] = [
@@ -106,6 +114,24 @@ const CORE_FURNITURE: readonly Furniture[] = [
     gameType: "blackjack",
     available: false,
   },
+  // A map-edge, walkable-only fixture — clear of the furniture cluster
+  // above (roughly x11-28/y7-15 after the +10/+6 offset below) and of
+  // the main south walkway/rug area patrons actually use (y15-23), in
+  // the empty space to the right of the room's own painted back wall.
+  // No queueing, no occupancy, no server route of its own this round —
+  // see CLAUDE.md: it's a walkable zone, not a game or a seat.
+  // x:23,y:-4 here becomes x:33,y:2 after the +10/+6 offset below — top-
+  // right corner of the 40x24 grid, a 3x3 tile zone.
+  {
+    id: "restroom",
+    kind: "restroom",
+    x: 23,
+    y: -4,
+    w: 3,
+    h: 3,
+    label: "Restroom",
+    blocksMovement: false,
+  },
 ];
 
 // World coordinates remain independent of the viewport/camera. Leave room
@@ -125,7 +151,13 @@ export function inBounds(x: number, y: number): boolean {
 }
 
 export function isWalkable(x: number, y: number): boolean {
-  return inBounds(x, y) && furnitureAt(x, y) === undefined;
+  if (!inBounds(x, y)) return false;
+  const f = furnitureAt(x, y);
+  // No furniture at all, or furniture that's explicitly a walkable zone
+  // marker (blocksMovement: false) rather than an obstacle — every
+  // existing kind leaves this unset, so f.blocksMovement !== false stays
+  // "blocks" for every fixture that already relies on that behavior.
+  return f === undefined || f.blocksMovement === false;
 }
 
 /** A move is valid if the destination is walkable and at most one tile

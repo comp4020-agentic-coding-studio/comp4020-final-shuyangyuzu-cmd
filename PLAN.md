@@ -1335,3 +1335,63 @@ runs each:
 freshly-started server after both Playwright passes. No console errors
 observed during either run (listened for directly, not assumed absent).
 
+## Crit 9 implementation — phase 5: built: 4-seat visuals + a restroom
+
+Both supplementary requirements, kept clearly separate from each other
+and from the real-time work above.
+
+**4-seat capacity**: already true in the rules (`MAX_PLAYERS = 4` in
+`src/rooms.ts`, confirmed unchanged — this phase adds no new rule). What
+landed in phase 4 already draws it: 4 seat markers per playable table,
+live from the streamed `state.tables`. One real gap found in that
+drawing, from an actual screenshot, not just reading the code: an empty
+seat's fill (`#00000030`) was nearly invisible against the floor's own
+dark wood tones. Fixed to a clearly visible hollow ring (light stroke,
+translucent dark fill) — re-screenshotted against a table with a real
+2/4 and 1/4 occupancy to confirm the fix reads correctly at a glance, not
+just that the color value changed.
+
+**Restroom**: `src/barLayout.ts` gets a new `blocksMovement?: boolean`
+field on `Furniture` (every existing entry leaves it unset, so nothing
+that exists today changes behavior) and one new `"restroom"` fixture,
+3x3 tiles, placed in the empty space top-right of the grid — clear of
+both the furniture cluster (`x11-28/y7-15`) and the main south
+walkway/rug area patrons actually use (`y15-23`), confirmed by an
+automated overlap check against every other fixture
+(`spec/barLayout.test.ts`), not just eyeballing the coordinates.
+`isWalkable` (server) and `tavern.js`'s own `walkable()` (client) both
+changed in the same one-line way, from the same underlying rule and the
+same shared `FURNITURE` data served by `GET /api/bar/layout` — a fixture
+with `blocksMovement: false` is a walkable zone marker, not an obstacle,
+so client and server can't disagree about which tiles are walkable. The
+canvas click handler's existing "clicking a fixture intercepts the click
+for its own dialog" behavior is narrowed to only fixtures that actually
+are both non-walkable *and* interactive (a table, the counter) — a
+restroom-tile click now falls through to ordinary walk/pathfinding, same
+as any other floor tile. Drawn with the same `box()`-primitive pixel
+style as every other fixture (a floor patch, a door frame, a hanging
+"RESTROOM" sign) — no new assets, no occupancy, no queueing, no server
+route of its own, exactly as asked: a walkable space this round, nothing
+more.
+
+New `spec/barLayout.test.ts` cases (4 added, 1 existing one adjusted to
+exclude the restroom from "every fixture blocks movement" since that's
+no longer universally true): the restroom exists, doesn't overlap any
+other fixture, every one of its tiles is walkable, and a single-step
+sequence into and back out of it is legal.
+
+**Verified by actually walking there, not just unit-testing the
+geometry**: a throwaway Playwright driver computed a real BFS path (the
+same 4-directional, one-tile-at-a-time shape `tavern.js`'s own
+`findPath` uses) from the spawn point into the restroom's interior and
+back out, submitting each step through the real `POST /api/bar/move`
+endpoint — 29 real, individually-server-confirmed steps in, and a
+matching path back out, zero console/page errors. Screenshots confirm
+the door/sign render legibly and the 4-seat rings are now clearly
+visible against a table with real occupancy (2/4 at one Vegas table,
+1/4 at another, both from genuine earlier test games, not staged).
+`pnpm check` (13 files, 96/96) green throughout, against a freshly-
+restarted server (an asset change needs a restart for `BUILD_VERSION`'s
+content hash to pick it up — caught this directly, from a real
+`caching.test.ts` failure against a stale process, not assumed).
+

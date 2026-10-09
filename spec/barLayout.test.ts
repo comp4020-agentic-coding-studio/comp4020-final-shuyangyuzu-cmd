@@ -14,8 +14,11 @@ describe("isWalkable", () => {
     expect(isWalkable(GRID_COLS - 1, GRID_ROWS - 1)).toBe(true);
   });
 
-  it("is false for every tile a piece of furniture covers", () => {
-    for (const f of FURNITURE) {
+  it("is false for every tile a blocking piece of furniture covers", () => {
+    // Excludes any fixture explicitly marked blocksMovement: false (the
+    // restroom) — covered separately below, since that's the one
+    // intentional exception to "furniture blocks movement".
+    for (const f of FURNITURE.filter((f) => f.blocksMovement !== false)) {
       for (let dx = 0; dx < f.w; dx++) {
         for (let dy = 0; dy < f.h; dy++) {
           expect(isWalkable(f.x + dx, f.y + dy), `${f.id} tile (${f.x + dx},${f.y + dy})`).toBe(false);
@@ -29,6 +32,44 @@ describe("isWalkable", () => {
     expect(isWalkable(0, -1)).toBe(false);
     expect(isWalkable(GRID_COLS, 0)).toBe(false);
     expect(isWalkable(0, GRID_ROWS)).toBe(false);
+  });
+});
+
+describe("the restroom (Crit 9: a walkable zone, not an obstacle)", () => {
+  const restroom = FURNITURE.find((f) => f.id === "restroom")!;
+
+  it("exists, is at a map edge, and doesn't overlap any other fixture", () => {
+    expect(restroom).toBeDefined();
+    expect(restroom.blocksMovement).toBe(false);
+    for (const other of FURNITURE) {
+      if (other.id === restroom.id) continue;
+      const overlapsX = restroom.x < other.x + other.w && other.x < restroom.x + restroom.w;
+      const overlapsY = restroom.y < other.y + other.h && other.y < restroom.y + restroom.h;
+      expect(overlapsX && overlapsY, `${restroom.id} overlaps ${other.id}`).toBe(false);
+    }
+  });
+
+  it("every one of its tiles is walkable — client and server share this exact fixture list, so they can't disagree", () => {
+    for (let dx = 0; dx < restroom.w; dx++) {
+      for (let dy = 0; dy < restroom.h; dy++) {
+        expect(isWalkable(restroom.x + dx, restroom.y + dy), `restroom tile (${restroom.x + dx},${restroom.y + dy})`).toBe(true);
+      }
+    }
+  });
+
+  it("stepping into and back out of it is a sequence of valid single steps", () => {
+    const entryX = restroom.x, entryY = restroom.y + restroom.h; // just south of it, open floor
+    expect(isWalkable(entryX, entryY)).toBe(true);
+    expect(isValidStep(entryX, entryY, restroom.x, restroom.y + restroom.h - 1)).toBe(true);
+    expect(isValidStep(restroom.x, restroom.y + restroom.h - 1, entryX, entryY)).toBe(true);
+  });
+
+  it("doesn't change walkability of the tiles immediately around it (no accidental widening of the walkable area)", () => {
+    // One tile further out than the restroom's own footprint, on each
+    // side still inside the grid, should be exactly what it was before
+    // this fixture existed: open floor, not specially affected.
+    const aboveY = restroom.y - 1;
+    if (aboveY >= 0) expect(isWalkable(restroom.x, aboveY)).toBe(true);
   });
 });
 

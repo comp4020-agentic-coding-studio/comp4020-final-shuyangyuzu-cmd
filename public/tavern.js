@@ -100,7 +100,11 @@ export function createTavern({ el, render, navigate, buildClassicPanel, lastActi
     let vw=window.innerWidth,vh=window.innerHeight;
     const resize=()=>{vw=window.innerWidth;vh=window.innerHeight;const dpr=Math.min(devicePixelRatio||1,2);canvas.width=vw*dpr;canvas.height=vh*dpr;canvas.style.width=vw+'px';canvas.style.height=vh+'px';ctx.setTransform(dpr,0,0,dpr,0,0);};resize();
     window.addEventListener('resize',resize);
-    function walkable(x,y) {return x>=0&&x<layout.gridCols&&y>=0&&y<layout.gridRows&&!fixtures.some(f=>x>=f.x&&x<f.x+f.w&&y>=f.y&&y<f.y+f.h);}
+    // Mirrors src/barLayout.ts's isWalkable exactly, from the same
+    // FURNITURE list (fetched via GET /api/bar/layout) — a fixture with
+    // blocksMovement:false (the restroom) is a walkable zone marker, not
+    // an obstacle, same rule server-side, so the two can't disagree.
+    function walkable(x,y) {return x>=0&&x<layout.gridCols&&y>=0&&y<layout.gridRows&&!fixtures.some(f=>f.blocksMovement!==false&&x>=f.x&&x<f.x+f.w&&y>=f.y&&y<f.y+f.h);}
     // Breadth-first path on a small grid; each submitted step is still checked
     // server-side. No client teleport, no optimistic persistent positions.
     function findPath(tx,ty) {
@@ -251,7 +255,12 @@ export function createTavern({ el, render, navigate, buildClassicPanel, lastActi
     canvas.addEventListener('click',e=>{
       if(!mine||overlay.childElementCount)return;const rect=canvas.getBoundingClientRect(),x=Math.floor((e.clientX-rect.left+camera.x)/tile),y=Math.floor((e.clientY-rect.top+camera.y)/tile);
       const f=fixtures.find(f=>x>=f.x&&x<f.x+f.w&&y>=f.y&&y<f.y+f.h);
-      if(f){if(f.kind==='game_table'){if(f.available)openTableDialog(f);else toast.textContent=`${f.label}`;}else if(f.kind==='counter')toast.textContent='The kitchen is not open yet. Grab a game while you wait.';return;}
+      // A walkable-zone fixture (blocksMovement:false — the restroom)
+      // falls through to the normal walk/pathfinding below, same as any
+      // other floor tile; only a genuinely non-walkable, interactive
+      // fixture (a table, the counter) intercepts the click for its own
+      // dialog/message instead.
+      if(f&&f.blocksMovement!==false){if(f.kind==='game_table'){if(f.available)openTableDialog(f);else toast.textContent=`${f.label}`;}else if(f.kind==='counter')toast.textContent='The kitchen is not open yet. Grab a game while you wait.';return;}
       path=findPath(x,y);destination=path.length?{x,y}:null;
     });
     async function step(x,y){
@@ -298,6 +307,17 @@ export function createTavern({ el, render, navigate, buildClassicPanel, lastActi
         fc.font='bold 17px monospace';fc.textAlign='center';fc.fillStyle='#e4bf7e';fc.fillText('THE AMBER ROOM',x+w/2,y-43);
       }else if(f.kind==='stool'){
         box(fc,x+18,y+30,8,25,'#352b2d');box(fc,x+40,y+30,8,25,'#352b2d');box(fc,x+10,y+9,45,29,'#9f7153');box(fc,x+14,y+8,37,22,'#b78163');box(fc,x+18,y+9,27,3,'#dbab7c');
+      }else if(f.kind==='restroom'){
+        // A walkable alcove, not an obstacle — a floor-level marker only
+        // (no raised/blocking shape like a table): a faint floor patch,
+        // a door frame on the south edge patrons actually approach from,
+        // and a hanging sign. Same box()-primitive pixel style as every
+        // other fixture here, nothing imported (CLAUDE.md).
+        box(fc,x-4,y-4,w+8,h+8,'#352b2d2e');
+        const doorX=x+w/2-14;
+        box(fc,doorX,y+h-6,28,10,'#43302d');box(fc,doorX+4,y+h-4,20,6,'#1c1620');
+        box(fc,x+w/2-34,y-18,68,16,'#37282b');box(fc,x+w/2-30,y-15,60,10,'#e4bf7e');
+        fc.font='bold 10px monospace';fc.textAlign='center';fc.fillStyle='#352b2d';fc.fillText('RESTROOM',x+w/2,y-7);
       }else{
         box(fc,x-5,y+12,w+10,h,'#382a2d');box(fc,x-6,y,w+12,h,'#b78a59');box(fc,x,y+6,w,h-12,f.kind==='game_table'?(f.available?'#487c69':'#665969'):'#9c6848');
         box(fc,x+6,y+12,w-12,3,'#ffffff19');
@@ -336,8 +356,15 @@ export function createTavern({ el, render, navigate, buildClassicPanel, lastActi
         for(let i=0;i<4;i++){
           const sx=cx-33+i*22;
           ctx.beginPath();ctx.arc(sx,seatY,6,0,Math.PI*2);
-          ctx.fillStyle=i<t.playerCount?(colors[t.takenColors[i]]||'#ddba65'):'#00000030';
-          ctx.fill();ctx.strokeStyle='#1c1620';ctx.lineWidth=1;ctx.stroke();
+          if(i<t.playerCount){ctx.fillStyle=colors[t.takenColors[i]]||'#ddba65';ctx.fill();ctx.strokeStyle='#1c1620';ctx.lineWidth=1;ctx.stroke();}
+          else{
+            // Empty seat: a clearly visible hollow ring rather than a
+            // near-invisible dark fill against the floor's own dark wood
+            // tones (an earlier version of this was too low-contrast to
+            // actually read as "empty" — caught in a live screenshot
+            // check, not just by reading the code).
+            ctx.fillStyle='#1c162066';ctx.fill();ctx.strokeStyle='#e4bf7ecc';ctx.lineWidth=1.5;ctx.stroke();
+          }
         }
       }
       if(destination){ctx.strokeStyle='#ecd29b';ctx.lineWidth=2;ctx.strokeRect(destination.x*tile-camera.x+8,destination.y*tile-camera.y+8,tile-16,tile-16);}
