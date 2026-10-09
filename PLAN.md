@@ -952,3 +952,203 @@ having clicked a table specifically on a small screen).
 Playwright run re-pointed at `https://comp4020-final-shuyangyuzu-cmd.fly.dev`:
 all 7 passed. Repo stayed private; no `/ship`. This is the agent's own
 re-verification, not the student's own check — 等待用户验收.
+
+# Crit 9 prep ("All at once") — 2026-10-09
+
+Setup only, no implementation. Confirmed via `/comp4020:start`: next
+deliverable is Crit 9, week 10, repo stays `comp4020-final-shuyangyuzu-cmd`
+(no new clone), cutoff **Mon 2026-10-12 13:30**, crit session **Mon
+15:30–17:00**, group **bada** — matches the student's own figures.
+
+## Official requirements (crit page spec)
+
+- Real-time, graded live: "a change one person makes reaches everyone else
+  within about a second, without a reload" — pods open the app on separate
+  devices simultaneously at the crit itself.
+- Exactly one multi-user-behavior decision, picked by the pod, resolved
+  against their own README's definition of "good," written down with
+  alternatives considered and tradeoffs — an ADR is the suggested format,
+  and the pod is expected to argue *against* the choice they made.
+  Example decision points offered: what's live vs. reload-only, presence
+  visibility, conflicting-edit resolution, what a returning user sees.
+- Process evidence: commits that "grew with the work," `PROCESS.md`,
+  `reflections/crit-9.md`.
+- Must be able to account for how the AI-assisted work was directed,
+  grounded and corrected.
+
+## Current baseline, as read this session (nothing changed)
+
+- Branch `main`, clean except untracked `src/orders.ts` — left exactly as
+  found. It's a self-contained, unconnected ordering module
+  (`placeOrder`/`getActiveOrder`/`MENU`): not imported by `src/server.ts`
+  or `src/db.ts`, and the `orders` table from this file's own earlier data
+  model section doesn't exist in `src/db.ts` yet either. Matches
+  `PROCESS.md`'s own note that it's "an unconnected local `src/orders.ts`".
+  Not touched, not wired in, not committed this session.
+- `crit-8` tag: annotated, still resolves to `a706408` (confirmed via
+  `git log --oneline --decorate`), untouched.
+- Repo visibility: already **public** (`gh repo view` → `isPrivate:false`),
+  carried over from the crit 8 ship.
+- Fly: app `comp4020-final-shuyangyuzu-cmd`, one machine `started` in
+  `syd`. Production `/`, `/version` (`58cee56238`, matching this file's
+  last recorded deploy, Fly release v12), `/readme/` all answer 200.
+  `Cache-Control: no-cache` present on `/`, `/app.js`, `/tavern.js`, per
+  `CLAUDE.md`.
+- `pnpm check` against an isolated temp `DATA_DIR`: 88/88. One
+  24-random-round settlement test hit vitest's default 5s timeout on this
+  machine on the first run; an isolated rerun of just that file passed in
+  5.5s — a timeout flake, not a regression, confirmed before writing it
+  down here rather than assumed.
+- `pnpm check:evidence`: PASS — `reflections/crit-8.md` present, all 12
+  commit references in `PROCESS.md` resolve.
+- `comp4020:doctor`: 21 pass / 2 warn / 1 fail. Real fail:
+  `core.hooksPath` unset (the committed-key guard is off — `pnpm install`
+  restores it). Warns: plugin `comp4020` 0.14.22 installed vs. 0.14.27
+  available; Git Bash platform warning (expected on this machine). Not
+  fixed this session — setup only.
+
+## Sync-path reality, read from the actual code (not yet changed)
+
+- **Game view** (`public/app.js`): flat `setInterval(tick, 1500)`
+  (`POLL_MS = 1500`), plus an immediate `refreshNow()` fired only after
+  *the local player's own* ready/start/roll/place request succeeds.
+  Another player's action is invisible to everyone else until the next
+  ~1.5s tick — already short of "~1 second" for anyone but the actor.
+- **Bar movement** (`public/tavern.js`): `poll()` explicitly returns early
+  whenever `moving` is true
+  (`if(!session||busyPoll||moving)return;`) — a patron's own in-flight
+  step suppresses *all* state polling for its duration, so another
+  patron's move, arrival, or (once wired up) order can be delayed well
+  past 1.5s specifically while anyone is mid-animation. The heartbeat
+  loop (5s, separate table per `CLAUDE.md`'s presence design) is
+  unaffected — presence isn't the gap, state propagation is.
+- **Last-seat race** (`joinRoom` in `src/rooms.ts`, and
+  `checkExistingSeat`/`joinTableRoom` in `src/tables.ts`): better-sqlite3
+  transactions run synchronously inside Node's single-threaded event
+  loop, so two concurrent join requests for the last seat are not
+  actually racy at the DB layer — whichever request's transaction runs
+  first (effectively arrival order) commits the version bump and the
+  seat; the second re-reads fresh state inside its *own* transaction and
+  gets a deterministic 409 (`room_full`, `seats_closed`, or
+  `color_taken` for a game room; the table's own occupied-elsewhere case
+  for a Vegas table). The loser's client already surfaces that exact
+  server message via the existing generic
+  `catch { errorBox.textContent = err.message }` / `alert(err.message)`
+  path (e.g. "this room already has its 4 players") — truthful, but not
+  phrased as "you lost a race," and it only reaches the loser on their
+  own join attempt's response or the next ~1.5s poll of a stale
+  almost-full room, not pushed to them proactively.
+
+## What ~1-second propagation would need, at minimum
+
+- Shrinking both poll intervals (game and bar) well below 1500ms, and/or
+- Changing the bar's "skip poll while moving" behavior so other players'
+  updates still arrive during a local step — only the player's *own*
+  locally-predicted tile needs protecting from being overwritten
+  mid-step, not the whole poll, and/or
+- A push transport (SSE), which `PLAN.md`'s own crit-8 stack section
+  already names as "the planned upgrade for the final project's faster
+  sync."
+- Whichever path is chosen, `CLAUDE.md`'s "Scope discipline" line — "no
+  sub-second real-time sync" listed there as explicitly deferred to the
+  final project — is the one sentence in the harness file that this
+  week's brief directly supersedes. It needs a deliberate edit once
+  implementation starts, not a silent contradiction.
+
+## The suggested decision question, checked against current code (not decided)
+
+"Two people simultaneously going for the last game seat": already
+resolved, deterministically, server-side — confirmed above, not assumed.
+The open question for Crit 9 is not "is it safe" (it is); it's whether
+~1.5–3s (poll interval, plus the bar's mid-move skip) before the loser
+*finds out* is acceptable against this README's own "good," and whether
+the existing message is sufficient or needs rewriting to name the race
+plainly. Nothing decided or written up this session — this is prep, not
+the decision record itself.
+
+## Suggested implementation order (not started)
+
+1. The transport change (shrink poll interval and/or move to SSE) first —
+   "~1 second, no reload" is tested live at the crit and gates everything
+   else.
+2. Fix the bar's poll-skip-while-moving in the same pass — it's the one
+   piece of code already confirmed to work against the ~1s goal.
+3. Pick and write the one multi-user decision. The seat-race question
+   above is a strong candidate precisely because it's already resolved in
+   code — the work is an ADR (alternatives, tradeoffs, the required
+   argument against the chosen path), not new logic.
+4. `PROCESS.md` update and `reflections/crit-9.md`, citing only commits
+   that exist once the above actually happens.
+5. Deploy, then live re-verification with two real sessions open at once
+   (matching how the brief says the crit itself will test it).
+6. Tag `crit-9` only at the very end, after the student's own acceptance.
+7. `src/orders.ts` stays untouched and disconnected unless the student
+   decides otherwise — it isn't part of this crit's spec.
+
+## Crit 9 implementation — phase 1: prep fixes (2026-10-09)
+
+Before touching sync: the three problems the prep pass above surfaced,
+investigated rather than papered over.
+
+- **Pre-commit key guard.** `git config core.hooksPath` was unset despite
+  `pnpm install` having just been run. Root cause: `pnpm install` reported
+  "Already up to date" (nothing to install) and, on this pnpm version,
+  skipped the `prepare` lifecycle script entirely when it has nothing to
+  do — so the guard was never actually restored by the step the FAIL
+  message implies. Running the `prepare` script directly
+  (`pnpm run prepare`) then failed too, with "the system cannot find the
+  path specified": pnpm runs `package.json` scripts through `cmd.exe` on
+  Windows regardless of which shell invoked `pnpm`, and the script's
+  POSIX syntax (`git rev-parse --git-dir >/dev/null 2>&1 && ... || true`)
+  isn't valid there. Fixed directly with `git config core.hooksPath
+  .githooks`, then verified for real — not just by reading the script —
+  by staging a fake key and confirming the hook actually blocked the
+  commit (`commit blocked: something staged looks like an API key`). Not
+  proposing a fix to the template's own `prepare` script: it's shared
+  course infrastructure, not this repo's code, and out of this week's
+  scope.
+- **`spec/settlement.test.ts` timing out at 5s.** Measured before
+  changing anything: a dedicated timing probe against the running app
+  showed the 24-round loop makes ~300+ real sequential HTTP round-trips
+  (every roll/place turn of every player, until every hand is empty,
+  repeated across 24 full games), and that running the 24 rounds
+  concurrently (they're independent — each plays in its own room) cuts
+  wall-clock by roughly half. The remaining variance came from
+  contention: this test shares one single-threaded dev server with every
+  *other* spec file's traffic in the same `pnpm test`/`pnpm check`
+  invocation (vitest runs test files in parallel by default) — a real
+  environment cost, not randomness in the test's own pass/fail logic
+  (its assertions are deterministic; the only probabilistic part, "did 24
+  rounds produce at least one tie," is a near-certainty and was never
+  what was timing out). Fixed by parallelizing the 24 rounds with
+  `Promise.all` and giving just this one test an explicit, commented 15s
+  timeout sized for the realistic contended case — not a blind global
+  bump. Verified stable at ~3.7–4.0s across three repeated full-`pnpm
+  test` runs (12/12 files, 88/88 tests passing each time), down from
+  timing out at the 5s default.
+- **`comp4020` plugin.** Updated 0.14.22 → 0.14.27
+  (`claude plugin update comp4020@comp4020`); the CLI reports this
+  requires a session restart to take effect. Not restarted mid-task —
+  nothing in the work below depends on the newer plugin version, and
+  restarting would lose this session's context. Recorded here as the
+  explicit handoff note the student asked for, in case a restart happens
+  before this work is finished: prep fixes (this section) are done and
+  committed; real-time sync, the spatial additions, and the decision
+  record are not yet started as of this entry.
+
+## Crit 9 implementation — phase 2 onward
+
+Transport decision: **SSE** (`hono/streaming`'s `streamSSE`, already
+available in the pinned `hono@4.13.12` — no new dependency), chosen over
+WebSocket (bidirectional capability this app doesn't need, since every
+write already goes through existing authenticated POST endpoints; would
+need a new dependency and a hand-rolled reconnect) and over faster
+polling alone (can't guarantee the "~1 second" worst case, and doesn't by
+itself fix the bar's poll-skip-while-moving problem). Full comparison,
+architecture (`src/live.ts` pub-sub, version/seq staleness rule, SSE
+endpoints, client rewrites), the restroom/seat-visual spatial additions,
+and the last-seat decision-record approach are recorded in the approved
+implementation plan for this work; this section will be filled in with
+what was actually built, measured, and found as each phase lands —
+matching how every earlier phase in this file was recorded only after
+being verified, not before.

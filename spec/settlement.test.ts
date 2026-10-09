@@ -100,21 +100,41 @@ function checkCasinoContract(casino: PublicCasino, dealtBills: readonly number[]
   return { sawTie };
 }
 
-it("pays out every casino per the official tie-cancellation and descending-bill rule", async () => {
-  let sawAnyTie = false;
+// 24 full rounds, each hundreds of real sequential HTTP round-trips
+// (roll+place per turn until every hand is empty), is the slowest thing in
+// this suite by a wide margin — investigated directly (not just raising the
+// timeout to make a red test green): each of the 24 rounds plays in its own
+// room, so they're mutually independent and were only sequential because
+// that was the simplest way to write the loop, not because anything here
+// requires it. A timing probe against this same running app measured ~2x
+// wall-clock reduction from running them concurrently (vs. one at a time),
+// which is where the actual cost was — request/await round-trip overhead
+// repeated ~300+ times, not server-side work (each transaction is a fast,
+// synchronous better-sqlite3 write). The explicit 15s timeout below is sized
+// for the realistic worst case even after that fix: this test still shares
+// one single-threaded dev server with every other spec file running
+// concurrently in the same `pnpm check`/`pnpm test` invocation (vitest runs
+// test files in parallel by default), so its own wall-clock varies with
+// how busy that shared server is at the time — a contention cost the
+// in-isolation timing probe doesn't see, not test-logic flakiness.
+it(
+  "pays out every casino per the official tie-cancellation and descending-bill rule",
+  async () => {
+    const playerCounts = Array.from({ length: 24 }, (_, i) => ((i % 3) + 2) as 2 | 3 | 4);
+    const rounds = await Promise.all(playerCounts.map((playerCount) => playOneRandomRound(playerCount)));
 
-  for (let i = 0; i < 24; i++) {
-    const playerCount = ((i % 3) + 2) as 2 | 3 | 4;
-    const { final, dealtBillsByCasino } = await playOneRandomRound(playerCount);
-    expect(final.phase).toBe("round_end");
+    let sawAnyTie = false;
+    for (const { final, dealtBillsByCasino } of rounds) {
+      expect(final.phase).toBe("round_end");
+      final.casinos.forEach((casino, index) => {
+        const { sawTie } = checkCasinoContract(casino, dealtBillsByCasino[index]);
+        sawAnyTie ||= sawTie;
+      });
+    }
 
-    final.casinos.forEach((casino, index) => {
-      const { sawTie } = checkCasinoContract(casino, dealtBillsByCasino[index]);
-      sawAnyTie ||= sawTie;
-    });
-  }
-
-  expect(sawAnyTie, "24 random rounds never produced a single tie at any casino — suspiciously unlikely").toBe(
-    true,
-  );
-});
+    expect(sawAnyTie, "24 random rounds never produced a single tie at any casino — suspiciously unlikely").toBe(
+      true,
+    );
+  },
+  15000,
+);
