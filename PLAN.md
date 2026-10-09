@@ -1271,3 +1271,11 @@ playwright install chromium` pulled the matching one (~120MB) before the
 driver could actually launch a browser. Noted since it's a real step
 anyone reproducing this verification would also hit, not a given.
 
+**Deployed and verified live**: pushed, CI's `check` and `deploy` jobs
+both passed. Re-ran the exact same Playwright driver against
+`https://comp4020-final-shuyangyuzu-cmd.fly.dev` (not just localhost):
+three runs, **58-121ms** total, **6ms** propagation delta each time —
+consistent with the local numbers, confirming the stream survives Fly's
+proxy in front of it under real conditions, not just in a local dev
+process.
+
