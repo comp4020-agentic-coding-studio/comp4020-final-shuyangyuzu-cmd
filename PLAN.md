@@ -2450,3 +2450,12 @@ either run.
 `pnpm check` (21 files, 159/159) green, fresh `DATA_DIR`, run twice;
 `pnpm typecheck` and `pnpm check:evidence` green.
 
+**Deployed and verified live**: pushed (commit `62a2bbd`); CI's `check`
+and `deploy` jobs both passed. `/version` on
+`https://comp4020-final-shuyangyuzu-cmd.fly.dev` matches a fresh local
+hash. A throwaway probe room (created and disbanded by this check alone,
+never touching the student's own real tables) exercised the full
+request→approve round trip directly against production: a request came
+back `pending: true`, and approving it returned a state with both
+players genuinely seated. 等待用户验收.
+
