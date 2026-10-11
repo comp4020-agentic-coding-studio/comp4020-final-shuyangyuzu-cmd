@@ -7,6 +7,7 @@ import type Database from "better-sqlite3";
 import { randomBytes, randomInt, randomUUID } from "node:crypto";
 import { freshDeck } from "./deck.ts";
 import { applyPlacement, applyRoll, GameError, startGame as startGameLogic } from "./game.ts";
+import { chooseNpcPlacement } from "./npc.ts";
 import {
   forgetPresence,
   isConnected,
@@ -461,6 +462,108 @@ export function handoffToNpc(db: Database.Database, code: string, playerId: stri
   tx();
 }
 
+/** Internal, server-scheduled turn-taking for an NPC-controlled seat —
+ * never called from an HTTP handler with a client-supplied playerId:
+ * there is no session to check, because the caller (src/server.ts's
+ * scheduler) already decided *which* room needs a nudge, and this acts
+ * on whoever `state.currentPlayerId` actually is right now. Re-checks
+ * phase and controller again here, inside the same transaction, rather
+ * than trusting an earlier read — state can change between the
+ * scheduler's own check and this call (CLAUDE.md: a write is only
+ * applied if it's still valid at commit time). Returns whether it
+ * actually acted, so the caller knows whether there's anything new to
+ * broadcast; a `false` return (wrong phase, no longer NPC-controlled, no
+ * dice, room gone) is a silent no-op, not an error — the scheduler calls
+ * this speculatively, on a timer, not in response to a specific request
+ * it needs to answer. Idempotent by construction: a second call against
+ * state that's already moved past `awaiting_roll` simply finds nothing
+ * to do, which is what makes "never double-execute a turn" hold even if
+ * the scheduler's own in-memory in-flight guard were ever bypassed (e.g.
+ * by a restart mid-wait). */
+export function npcRoll(db: Database.Database, code: string): boolean {
+  const row = loadRoomAfterSweep(db, code);
+  if (row.closed_at) return false;
+
+  let acted = false;
+  const tx = db.transaction(() => {
+    const fresh = db.prepare(`SELECT state_json, version, closed_at FROM rooms WHERE id = ?`).get(row.id) as {
+      state_json: string;
+      version: number;
+      closed_at: string | null;
+    };
+    if (fresh.closed_at) return;
+    const state: RoomState = JSON.parse(fresh.state_json);
+    if (state.phase !== "awaiting_roll" || !state.currentPlayerId) return;
+    const player = state.players[state.currentPlayerId];
+    if (!player || player.controller !== "npc") return;
+
+    let next: RoomState;
+    try {
+      next = applyRoll(state, player.id, systemRng);
+    } catch {
+      return; // e.g. no dice left — shouldn't happen (findNextPlayerWithDice already skips that), but never crash the scheduler over it
+    }
+    db.prepare(`UPDATE rooms SET state_json = ?, version = version + 1 WHERE id = ? AND version = ?`).run(
+      JSON.stringify(next),
+      row.id,
+      fresh.version,
+    );
+    logEvent(db, row.id, "rolled", { playerId: player.id, values: next.lastRoll?.values, controller: "npc" });
+    acted = true;
+  });
+  tx();
+  return acted;
+}
+
+/** The NPC placement counterpart to npcRoll above — same reasoning
+ * throughout. Uses src/npc.ts's chooseNpcPlacement against the *already
+ * rolled* values sitting in state.lastRoll; never rolls again, never
+ * reads anything about the deck's future order. */
+export function npcPlace(db: Database.Database, code: string): boolean {
+  const row = loadRoomAfterSweep(db, code);
+  if (row.closed_at) return false;
+
+  let acted = false;
+  const tx = db.transaction(() => {
+    const fresh = db.prepare(`SELECT state_json, version, closed_at FROM rooms WHERE id = ?`).get(row.id) as {
+      state_json: string;
+      version: number;
+      closed_at: string | null;
+    };
+    if (fresh.closed_at) return;
+    const state: RoomState = JSON.parse(fresh.state_json);
+    if (state.phase !== "awaiting_placement" || !state.currentPlayerId) return;
+    const player = state.players[state.currentPlayerId];
+    if (!player || player.controller !== "npc") return;
+    if (!state.lastRoll || state.lastRoll.playerId !== player.id) return;
+
+    const value = chooseNpcPlacement(state.lastRoll.values);
+    let next: RoomState;
+    try {
+      next = applyPlacement(state, player.id, value);
+    } catch {
+      return;
+    }
+    db.prepare(`UPDATE rooms SET state_json = ?, version = version + 1 WHERE id = ? AND version = ?`).run(
+      JSON.stringify(next),
+      row.id,
+      fresh.version,
+    );
+    logEvent(db, row.id, "placed", { playerId: player.id, value, controller: "npc" });
+    // state.phase is already narrowed to "awaiting_placement" above, so
+    // (unlike the human place() below) next.phase === "round_end" alone
+    // is enough to mean "this placement is what ended it."
+    if (next.phase === "round_end") {
+      logEvent(db, row.id, "round_settled", {
+        wonBills: Object.fromEntries(Object.values(next.players).map((p) => [p.id, p.wonBills])),
+      });
+    }
+    acted = true;
+  });
+  tx();
+  return acted;
+}
+
 export function startGame(db: Database.Database, code: string, playerId: string, sessionSecret: string): void {
   const row = loadOpenRoom(db, code);
   requireSession(db, row.id, playerId, sessionSecret);
@@ -500,6 +603,25 @@ export function startGame(db: Database.Database, code: string, playerId: string,
   tx();
 }
 
+/** A player whose seat has been handed to NPC control (CLAUDE.md's
+ * leave/exit states) keeps their session row — it's never deleted, since
+ * nothing about their identity or history is erased — but that session
+ * can no longer act for this seat. Checked inside roll/place themselves,
+ * not just left to applyRoll/applyPlacement's own currentPlayerId check:
+ * once handed off, this player's id can still legitimately be
+ * `currentPlayerId` when it's genuinely this seat's turn, so the
+ * ordinary "is it your turn" check alone would NOT catch a since-departed
+ * human's old session trying to act for it again. */
+function refuseIfNpcControlled(state: RoomState, playerId: string): void {
+  if (state.players[playerId]?.controller === "npc") {
+    throw new RoomError(
+      "this seat is now played by the table, not your session — it was handed off after being away too long",
+      "npc_controlled",
+      403,
+    );
+  }
+}
+
 export function roll(db: Database.Database, code: string, playerId: string, sessionSecret: string): void {
   const row = loadOpenRoom(db, code);
   requireSession(db, row.id, playerId, sessionSecret);
@@ -509,6 +631,7 @@ export function roll(db: Database.Database, code: string, playerId: string, sess
       .prepare(`SELECT state_json, version FROM rooms WHERE id = ?`)
       .get(row.id) as { state_json: string; version: number };
     const state: RoomState = JSON.parse(fresh.state_json);
+    refuseIfNpcControlled(state, playerId);
 
     let next: RoomState;
     try {
@@ -543,6 +666,7 @@ export function place(
       .prepare(`SELECT state_json, version FROM rooms WHERE id = ?`)
       .get(row.id) as { state_json: string; version: number };
     const state: RoomState = JSON.parse(fresh.state_json);
+    refuseIfNpcControlled(state, playerId);
 
     let next: RoomState;
     try {

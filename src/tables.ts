@@ -358,17 +358,20 @@ export function departActiveTable(db: Database.Database, barPlayerId: string, ba
   ).run(barPlayerId, row.current_table_id, new Date().toISOString());
 }
 
-/** Clears any pending departure for whichever bar identity (if any) this
- * room-player id belongs to — called from src/server.ts's room
- * heartbeat/rejoin handlers, the two "I'm actually back, engaging with
- * the game again" signals. A no-op if there's no pending departure, or
- * no bar identity currently points at this game-player id at all (a
- * player seated via the classic direct-room flow, with no bar identity
- * behind them, is simply never subject to this clock). */
-export function clearDepartureForGamePlayer(db: Database.Database, gamePlayerId: string): void {
-  db.prepare(
-    `DELETE FROM table_departures WHERE bar_player_id IN (SELECT id FROM bar_players WHERE current_game_player_id = ?)`,
-  ).run(gamePlayerId);
+/** Explicitly marks "I've just gone back to my table" — the one thing
+ * that clears a pending departure. Deliberately NOT triggered by a room
+ * heartbeat or rejoin: an independent review caught that an earlier
+ * version did exactly that, and both are passive signals that only prove
+ * a browser/tab is still connected — they fire automatically even from a
+ * room view left open in the background while this same identity's bar
+ * avatar is sitting somewhere else entirely. This is called instead from
+ * deliberate bar-world actions only (`public/tavern.js`: the "Return to
+ * your game" button, and navigating into a table's room via the table
+ * dialog), right before the navigation that's actually heading back to
+ * the table. A no-op if there's no pending departure at all. */
+export function resumeActiveTable(db: Database.Database, barPlayerId: string, barSessionSecret: string): void {
+  requireBarSession(db, barPlayerId, barSessionSecret);
+  db.prepare(`DELETE FROM table_departures WHERE bar_player_id = ?`).run(barPlayerId);
 }
 
 /** Resolves every table_departures row older than `awayMs` — pre-start,

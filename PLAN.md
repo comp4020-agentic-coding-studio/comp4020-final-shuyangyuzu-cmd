@@ -2103,14 +2103,15 @@ directly from `localStorage`, the same pattern `buildClassicPanel`
 already uses for the nickname prefill) — the explicit away-from-table
 trigger, independent of sitting-elsewhere's own trigger in `sitAtSeat`.
 
-**What this phase does not yet do**: `rooms.handoffToNpc` flips
-`controller` correctly and is exercised by a real test, but nothing yet
-*acts* on a handed-off seat's turn — there is no NPC decision engine
-until phase 4, so a started game with a handed-off seat simply waits
-there, turn-stalled, until phase 4 lands. This is recorded here
-deliberately, not discovered as a surprise later. The approval queue
-(phase 3) doesn't exist yet either, so every current table seat is still
-"first click wins," unchanged from before this phase.
+**What this phase does not yet do** *(update: fixed in the very next
+entry below — the student flagged this as a live production risk before
+it ever shipped with real traffic, and it was fixed before anything else
+proceeded)*: `rooms.handoffToNpc` flips `controller` correctly and is
+exercised by a real test, but nothing yet *acts* on a handed-off seat's
+turn — a started game with a handed-off seat simply waits there,
+turn-stalled. The approval queue (phase 3) doesn't exist yet either, so
+every current table seat is still "first click wins," unchanged from
+before this phase.
 
 **Regression tests**: `spec/barSeats.test.ts` (8 cases — sit requires
 being at the tile, double-occupancy refused, re-sitting the same seat is
@@ -2158,4 +2159,184 @@ individually-server-validated steps, sat successfully
 (`seatId: null`) — the full real-server round trip, not just a local
 check. This is the agent's own re-verification, not the student's own
 check — 等待用户验收.
+
+## A follow-up review's two real findings in phase 2's own work — fixed before any other phase proceeded
+
+The student, reviewing phase 2 directly, flagged a genuine production
+risk and a genuine correctness bug before either shipped with real
+traffic. Both were fixed first, ahead of phases 3/5, per the student's
+own explicit priority.
+
+### Finding 1: a handed-off seat was flagged but never actually played — a started game would simply stall
+
+Phase 2's `rooms.handoffToNpc` flips `controller` to `"npc"` correctly,
+but nothing read that flag and did anything with it — a real game where
+a departed human's seat got handed off would sit there, forever waiting
+on a turn nobody could take. Calling this "NPC takeover" at that point
+overstated what existed; the student explicitly asked that it not be
+described that way again until something actually plays the seat's turns.
+
+**Fix — a minimal, real turn-taking engine**, not a scaffold:
+
+- `src/npc.ts`: a pure `chooseNpcPlacement(values)` — the most-frequent
+  rolled value, ties broken low, fully deterministic and directly unit
+  tested. Never reads deck order, never bends a rule a human couldn't
+  also follow.
+- `src/rooms.ts`: `npcRoll`/`npcPlace` — internal, server-triggered
+  counterparts to a human's `roll`/`place`, with no session to check
+  (the caller already decided the room needs a nudge; these act on
+  whoever `currentPlayerId` actually is, re-checking phase and controller
+  again inside the same transaction rather than trusting an earlier
+  read). Both return whether they actually acted and are idempotent by
+  construction — calling either again against state that's already moved
+  past the phase it would act on is a silent no-op. This is what makes
+  "never double-execute a turn" hold even if the in-memory scheduler
+  guard below were ever bypassed (e.g. a restart mid-wait), not just a
+  claim resting on the guard alone.
+- `src/server.ts`: a scheduler on the same ticker as presence/departure
+  enforcement, under the identical "only while something's actually
+  watching" gate — an NPC-only game with nobody watching simply pauses
+  and resumes the moment it's watched again, no new unconditional
+  background timer. On noticing the current player is NPC-controlled, it
+  waits a short, configurable `NPC_TURN_DELAY_MS` (a visible pause, not
+  an instant resolution) before calling `npcRoll`/`npcPlace` and
+  publishing the result over the room's existing SSE channel.
+- `src/rooms.ts`'s `roll`/`place` now explicitly refuse any call for a
+  seat whose `controller` is `"npc"` — **even from the original human's
+  still-valid session**. This was a real gap, not a hypothetical: the
+  ordinary "is it your turn" check alone doesn't catch it, because a
+  handed-off seat's id can still legitimately be `currentPlayerId` when
+  it's genuinely that seat's turn — a departed human's old credentials
+  would otherwise still work. The session itself is never deleted
+  (nothing about the person's identity or history is erased), it simply
+  can no longer act for this seat.
+
+**The two scenarios the student asked to see verified separately** (both
+as direct, deterministic tests against `rooms.npcRoll`/`npcPlace`, in
+`spec/npcTurn.test.ts` — not a live multi-minute wait):
+1. **The current-turn player's departure expires mid-turn.** Handed off
+   while `awaiting_roll`: the engine rolls, then places, legally,
+   continuing the exact turn order. Handed off while `awaiting_placement`
+   with their own roll already pending: the engine places using that
+   *exact* roll — verified by checking the roll's values are unchanged
+   across the handoff — never re-rolling.
+2. **A non-current player's departure expires, and only later does it
+   become their turn.** Handed off immediately (the flag flips right
+   away, regardless of whose turn it is) but `npcRoll`/`npcPlace` are
+   confirmed to no-op the whole time it's someone else's turn; once the
+   human ahead of them completes a real turn and the engine's own turn
+   order naturally advances to the handed-off seat, the NPC engine picks
+   it up correctly from there.
+
+**No duplicate execution**: asserted directly (a second `npcRoll` call
+after the phase has moved on returns `false` and leaves state
+unchanged) and, separately, defended in depth (idempotent functions, not
+just a scheduler guard, per above).
+
+**Survives a restart — verified twice, at two different levels**: (a) a
+fast, deterministic test that closes and reopens the same database file
+mid-scenario and confirms `npcRoll` still acts correctly against the
+reopened connection; (b) a real, live process kill-and-restart: started a
+dedicated instance, created and started a 2-player game, sat the host at
+a real seat (recording a departure), confirmed the room was still
+human-controlled, then **killed the actual OS process** and started a
+fresh one against the same `DATA_DIR`. With an SSE connection opened
+against the *new* process, the departure enforcement and NPC scheduler
+both ran correctly there — flip to `npc`, roll, place, turn advances —
+exactly as if nothing had happened. (Note on why the first kill-timing
+attempt showed no change at all before the restart: with no SSE
+subscriber connected during that window, the "only while watched" gate
+correctly did nothing — a real demonstration of that design working as
+intended, not a flaw in the test.)
+
+**Live, end-to-end verification against a real running server** (not
+just the direct function tests above): a dedicated short-interval
+instance, a real 2-player Vegas game created through the bar, the host
+seated at a real dining-area seat (the actual user-facing trigger), and
+an open SSE connection on the room the entire time. Measured over one
+real `collectSseEvents`-style window: the departure expired, `controller`
+flipped to `"npc"` (still `awaiting_roll`), the NPC rolled
+(`awaiting_placement`), then placed (dice count dropped, turn correctly
+advanced to the human guest) — four real, timestamped pushes, zero
+manual intervention.
+
+### Finding 2: a room heartbeat or rejoin was wrongly clearing the away-from-table clock
+
+**The exact bug**: phase 2's heartbeat/rejoin handlers cleared a pending
+departure on the reasoning "this player is actively engaging with the
+game." That reasoning doesn't hold — both fire automatically for as long
+as a room view/tab is simply *open*, including one left open in the
+background while that same identity's bar avatar is sitting at a
+completely different seat or has walked off entirely. A browser staying
+connected proves the browser is connected; it proves nothing about where
+the *person* is. Left as shipped, a departed player could keep an old
+game tab open indefinitely and never actually be timed out, defeating
+the clock's entire purpose.
+
+**Fix**: removed both clearing calls. The only thing that clears a
+departure now is an explicit, deliberate bar-world action —
+`src/tables.ts`'s new `resumeActiveTable`, called from
+`public/tavern.js` immediately before navigating back into a table's
+room (both the "Return to your game" button and the table dialog's own
+join/create success path, which also covers re-clicking into an already-
+active seat). A new `POST /api/bar/resume` endpoint carries it.
+
+**Verified, not just reasoned about**: `spec/tableDeparture.test.ts`
+gained direct tests that a room heartbeat does *not* clear a pending
+departure, that a rejoin doesn't either, and an explicit end-to-end case
+matching the student's own described scenario: a patron sits at a real
+seat (recording a departure), an old game tab's heartbeat fires
+*repeatedly* (five times, simulating a tab left open for a while), the
+departure is still there afterward, and once it's actually back-dated
+past the threshold, enforcement still exits/hands off the seat exactly
+as the rule requires — the old tab's heartbeats never rescued it.
+
+### The identity-recovery fix, re-verified the way the student specifically asked — same browser, same storage, not a fresh context
+
+The earlier Crit 9 phase 8 verification used a second, entirely separate
+Playwright browser context for the "new identity" side of the check —
+real, but not what the original bug report actually described (the
+student's own words: used the site in Edge previously, then "entered
+with a new identity" in the *same* browser). A separate context trivially
+has no shared storage at all, so it couldn't have caught a bug where
+stale keys linger *in the same storage* the new identity is also reading
+from. Redone properly: one browser context throughout. Alice binds to a
+real table; `vegas:lastRoom` and `vegas:room:<code>` are set, exactly as
+the real client does. Only `vegas:bar:session` is then removed —
+simulating the exact partial loss the report describes — leaving the
+other, stale keys deliberately intact. Reloading (still the same
+tab/context/storage) shows the character-creation form fresh; creating
+"Bob" there does **not** show "Return to your game," confirmed to be a
+genuinely different bar identity, with the stale `vegas:lastRoom` key
+independently re-read afterward to confirm it was really still sitting
+there unclaimed — not cleared by coincidence. This is the faithful
+reproduction of the reported scenario; the earlier separate-context
+check remains valid as an *additional* case (a different identity on a
+different device should also never see it), not a replacement for this one.
+
+### A small UX polish, from the student's own further clarification on seating
+
+The dining/stool seating flow (walk-then-auto-sit-on-arrival, one click)
+already matched the student's follow-up spec exactly as built in phase 2
+— confirmed by re-reading it against that message's own itemized list
+rather than assumed. One real gap found and fixed: if a seat a patron is
+mid-walk toward gets taken by someone else, the client previously kept
+walking the rest of the way before finding out (the server's own refusal
+at arrival was always correct, just a late signal). `public/tavern.js`'s
+`animate()` loop now checks the target seat's live occupancy on every
+remaining step of that walk and aborts immediately with a toast the
+moment it's taken, rather than walking there for nothing. Game-table
+seating (dialog-based, color-to-seat assignment, no walking to a chair
+required) was already built exactly this way in phase 2 and is
+unchanged; the seat-preview-at-approval-time detail is folded into
+phase 3's own design below, not built separately here.
+
+**Verification**: `pnpm check` (20 files, 149/149) green, fresh
+`DATA_DIR`, run twice; `pnpm typecheck` and `pnpm check:evidence` green.
+New tests: `spec/npc.test.ts` (4 cases, the pure decision function),
+`spec/npcTurn.test.ts` (6 cases, the two required scenarios plus no-
+double-execution, restart survival, and the old-session-blocked check),
+3 new cases in `spec/tableDeparture.test.ts`. Live: the real process-
+restart test and the real end-to-end SSE-observed NPC turn sequence
+above, plus the same-browser-context identity re-verification.
 

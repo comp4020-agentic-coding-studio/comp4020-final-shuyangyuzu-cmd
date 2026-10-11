@@ -251,6 +251,11 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
             const endpoint=t.status==='empty'?'create':'join';
             const result=await post(`/tables/${f.id}/${endpoint}`,{...session,color:selected});
             try{saveSession(result.code,{playerId:result.playerId,sessionSecret:result.sessionSecret});}catch{}
+            // A deliberate, explicit "heading back to this table" action —
+            // clears any pending away-from-table departure (see
+            // src/tables.ts's resumeActiveTable for why only an explicit
+            // action like this one, never a passive heartbeat, may do so).
+            post('/resume',session).catch(()=>{});
             overlay.replaceChildren();
             navigate(`/?room=${result.code}`);
           }catch(err){error.textContent=err.message||'Could not join that table';btn.disabled=false;}
@@ -303,7 +308,14 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       // Driven by the server's own re-validated activeSeat, never a
       // locally-cached room code — a closed, left, or expired room, or a
       // different character's game entirely, is never offered here.
-      if(activeSeat){hud.querySelector('.hud-actions').appendChild(el('button',{class:'hud-button',onclick:()=>navigate(`/?room=${activeSeat.roomCode}`)},'Return to your game'));}
+      if(activeSeat){hud.querySelector('.hud-actions').appendChild(el('button',{class:'hud-button',onclick:()=>{
+        // Clicking this is exactly "I'm deliberately going back to my
+        // table" — clears any pending away-from-table departure (see
+        // src/tables.ts's resumeActiveTable: only an explicit action like
+        // this one may do so, never a passive heartbeat).
+        post('/resume',session).catch(()=>{});
+        navigate(`/?room=${activeSeat.roomCode}`);
+      }},'Return to your game'));}
       toast.textContent='Welcome in. WASD / arrows to walk · click a destination';canvas.focus();
     }
     const keyDown=e=>{if(['INPUT','TEXTAREA'].includes(e.target.tagName)||overlay.childElementCount)return;const key=e.key.toLowerCase();if(['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright'].includes(key)){e.preventDefault();keys.add(key);path=[];pendingSitSeat=null;}if(e.key==='Escape'){path=[];destination=null;pendingSitSeat=null;}};
@@ -427,7 +439,19 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         if(keys.has('a')||keys.has('arrowleft'))dx=-1;else if(keys.has('d')||keys.has('arrowright'))dx=1;
         if(heldDirection){dx=heldDirection.dx;dy=heldDirection.dy;}
         if(dx||dy){path=[];pendingSitSeat=null;if(walkable(mine.x+dx,mine.y+dy)){lastTime=now;step(mine.x+dx,mine.y+dy);}}
-        else if(path.length){lastTime=now;const [x,y]=path.shift();step(x,y);}else destination=null;
+        else if(path.length){
+          // A seat this patron is walking toward can be taken by someone
+          // else mid-journey — stop the attempt and say so rather than
+          // walking the rest of the way for nothing (the server would
+          // refuse the final sit anyway, but catching it here is a
+          // clearer, earlier signal than an error only at arrival).
+          if(pendingSitSeat&&state.players.some(p=>p.seatId===pendingSitSeat.id&&p.id!==mine.id)){
+            path=[];destination=null;pendingSitSeat=null;toast.textContent='Someone sat down there first.';
+          }else{
+            lastTime=now;const [x,y]=path.shift();step(x,y);
+          }
+        }
+        else destination=null;
       }
       const target=mine||{x:20,y:12};const desiredX=Math.max(0,Math.min(Math.max(0,worldW-vw),(target.x+.5)*tile-vw/2)),desiredY=Math.max(0,Math.min(Math.max(0,worldH-vh),(target.y+.5)*tile-vh/2));
       if(!cameraInitialized){camera={x:desiredX,y:desiredY};cameraInitialized=true;}else{camera.x+=(desiredX-camera.x)*.12;camera.y+=(desiredY-camera.y)*.12;}

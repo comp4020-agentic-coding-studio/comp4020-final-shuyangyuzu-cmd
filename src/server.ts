@@ -149,6 +149,61 @@ const LIVE_PRESENCE_TICK_MS = Number(process.env.LIVE_PRESENCE_TICK_MS ?? 1000);
 // is — a dedicated short-interval instance can verify this for real.
 const AWAY_FROM_TABLE_MS = Number(process.env.AWAY_FROM_TABLE_MS ?? 120000);
 
+// A short, human-readable pause between an NPC's roll and its placement
+// (and between one NPC's turn and whoever's next) — "a brief display
+// pause," not an instant back-to-back resolution. Env-overridable like
+// everything else time-based in this file.
+const NPC_TURN_DELAY_MS = Number(process.env.NPC_TURN_DELAY_MS ?? 700);
+
+// Rooms with an NPC turn already scheduled (a setTimeout in flight) —
+// the in-memory guard against double-scheduling from this process. Not
+// the only thing preventing a double-execution: rooms.npcRoll/npcPlace
+// are themselves idempotent (a second call against state that's already
+// moved on is a no-op), so even a restart mid-wait — which clears this
+// Set, same as every other in-memory thing in this file — can't actually
+// double-apply a turn, only at worst schedule a redundant check that
+// finds nothing to do.
+const npcTurnInFlight = new Set<string>();
+
+/** Checks whether `code`'s current player is NPC-controlled and, if so,
+ * schedules the one pending action (a roll or a placement) after a short
+ * display pause. Called from the same ticker as the presence/departure
+ * checks below, for the same reason and under the same gate — an NPC
+ * seat with nobody watching the room simply pauses, exactly like
+ * presence detection already does, and picks back up the moment the room
+ * is watched again (no separate, unconditional background timer). */
+function scheduleNpcTurnIfNeeded(code: string): void {
+  if (npcTurnInFlight.has(code)) return;
+  let state: PublicState;
+  try {
+    state = rooms.getPublicState(db, code);
+  } catch {
+    return; // room gone — nothing to schedule
+  }
+  if (state.closed) return;
+  if (state.phase !== "awaiting_roll" && state.phase !== "awaiting_placement") return;
+  const current = state.players.find((p) => p.id === state.currentPlayerId);
+  if (!current || current.controller !== "npc") return;
+
+  npcTurnInFlight.add(code);
+  setTimeout(() => {
+    try {
+      const acted = state.phase === "awaiting_roll" ? rooms.npcRoll(db, code) : rooms.npcPlace(db, code);
+      if (acted) {
+        const after = publishRoomState(code, rooms.getPublicState(db, code));
+        // A placement can end the round, which flips the bound table's
+        // displayed status for anyone watching from the bar — same as a
+        // human's own place handler already accounts for.
+        if (after.phase === "round_end") publishBarSnapshot();
+      }
+    } catch {
+      // Room closed in the meantime, etc. — fine, there's nothing left to act on.
+    } finally {
+      npcTurnInFlight.delete(code);
+    }
+  }, NPC_TURN_DELAY_MS);
+}
+
 const db = openDb(dbPathFromEnv());
 const app = new Hono();
 
@@ -233,11 +288,16 @@ app.post("/api/rooms/:code/rejoin", async (c) => {
   const code = c.req.param("code");
   const body = (await c.req.json().catch(() => ({}))) as AuthedBody;
   rooms.rejoin(db, code, playerId(body), sessionSecret(body));
-  // A rejoin is exactly "I'm actually back, engaging with the game
-  // again" — clears any pending away-from-table departure for whichever
-  // bar identity (if any) is behind this player (CLAUDE.md's leave/exit
-  // states; a no-op if there isn't one or this seat has no bar identity).
-  tables.clearDepartureForGamePlayer(db, playerId(body));
+  // Deliberately does NOT clear any pending away-from-table departure —
+  // a follow-up review caught that an earlier version of this handler
+  // did, which is wrong: rejoin fires from a room view that may simply
+  // have been left open the whole time (an old tab's own mount, not a
+  // deliberate return), and a passive "the browser/tab is still here"
+  // signal proves nothing about whether the *person* physically went
+  // back to the table. Clearing a departure now requires an explicit
+  // bar-world action (src/tables.ts's resumeActiveTable, called from
+  // public/tavern.js before navigating back into a table's room) —
+  // CLAUDE.md's leave/exit states.
   // The sweep that rejoin() already ran can itself change the presence
   // signature (e.g. this read finally pushes a since-stale player's
   // removal past the point every other viewer last saw) — recheck before
@@ -283,10 +343,16 @@ app.post("/api/rooms/:code/heartbeat", async (c) => {
   const code = c.req.param("code");
   const body = (await c.req.json().catch(() => ({}))) as AuthedBody;
   rooms.heartbeat(db, code, playerId(body), sessionSecret(body));
-  // A room heartbeat means this player is actually present at the game —
-  // clears any pending away-from-table departure the same way rejoin
-  // does, for the same reason.
-  tables.clearDepartureForGamePlayer(db, playerId(body));
+  // Deliberately does NOT clear a pending away-from-table departure — the
+  // exact bug a follow-up review caught: a heartbeat fires automatically
+  // every few seconds for as long as a room tab is open, including one
+  // left open in the background while that same identity's bar avatar
+  // sits at a completely different table or dining chair. "The browser
+  // is still connected" proves nothing about whether the person actually
+  // went back to *this* table — only an explicit bar-world action does
+  // (src/tables.ts's resumeActiveTable). See CLAUDE.md's leave/exit
+  // states for the reasoning and PLAN.md's product-direction-update
+  // entry for the reproduction this fixes.
   // Deliberately minimal response — a heartbeat fires every few seconds
   // per player; it doesn't need to carry the full room state back each
   // time. But this heartbeat can be exactly what flips someone's own
@@ -456,6 +522,17 @@ app.post("/api/bar/depart", async (c) => {
   return c.json({ ok: true });
 });
 
+// The one thing that clears a pending departure — see
+// tables.resumeActiveTable's own doc comment for why this has to be a
+// deliberate, explicit bar-world action and not a passive room
+// heartbeat/rejoin (a follow-up review caught an earlier version doing
+// exactly that, which was wrong).
+app.post("/api/bar/resume", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody;
+  tables.resumeActiveTable(db, barPlayerId(body), barSessionSecret(body));
+  return c.json({ ok: true });
+});
+
 // ---- Phase 2: each Vegas table bound to its own independent room ----
 
 app.get("/api/bar/tables", (c) => c.json(tables.getTablesStatus(db)));
@@ -576,6 +653,13 @@ setInterval(() => {
     for (const code of affectedCodes) publishRoomState(code, rooms.getPublicState(db, code));
     if (affectedCodes.length > 0) publishBarSnapshot();
   }
+
+  // Minimal viable NPC turn-taking (Crit 9 phase 8's production-risk
+  // fix): a departure handoff alone only flips `controller` — without
+  // this, a started game with a handed-off seat would simply sit
+  // turn-stalled forever. Scoped to rooms someone's actually watching,
+  // same reasoning as everything else in this ticker.
+  for (const code of live.subscribedRoomCodes()) scheduleNpcTurnIfNeeded(code);
 }, LIVE_PRESENCE_TICK_MS);
 
 // No `index` option — "/" is handled explicitly above (it needs

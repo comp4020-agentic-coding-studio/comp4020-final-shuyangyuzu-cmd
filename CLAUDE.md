@@ -283,22 +283,50 @@ than a heartbeat does — the same reasoning presence already established).
 Two triggers start or refresh it: sitting at a real seat (`src/bar.ts`'s
 `sitAtSeat`) while still bound to a table, and an explicit "back to the
 bar" navigation (`public/app.js`'s `backToHomeButton`, a best-effort
-fire-and-forget POST to `/api/bar/depart`). Two triggers clear it: a room
-heartbeat or rejoin succeeding for that seat (`src/tables.ts`'s
-`clearDepartureForGamePlayer`) — "I'm actually back, engaging with the
-game again," not merely standing up from an unrelated rest seat.
+fire-and-forget POST to `/api/bar/depart`).
+
+**Only one thing clears it, and a passive connection is never enough to
+be that thing.** A follow-up review caught a real bug in the first
+version of this: room `heartbeat`/`rejoin` succeeding were wired to clear
+a pending departure, reasoned as "I'm actually back, engaging with the
+game again." That's wrong — both fire automatically for as long as a
+room view/tab is open, including one left open in the background while
+that same identity's bar avatar is sitting at a completely different
+seat. A browser being connected proves the browser is connected, nothing
+about where the person actually is. The fix: clearing a departure now
+requires one explicit, deliberate bar-world action —
+`src/tables.ts`'s `resumeActiveTable`, called from `public/tavern.js`
+right before navigating back into a table's room (the "Return to your
+game" button, and the table dialog's own join/create success path) —
+never from a passive signal. Reproduced and verified directly: an old
+room tab kept heartbeating for several cycles while the character sat at
+a real seat, and the departure was still there, unmoved, confirming the
+fix (`spec/tableDeparture.test.ts`).
+
 Enforcement (`src/tables.ts`'s `enforceExpiredDepartures`) runs on the
 same short interval as the presence ticker above, gated the same way
 (only while something's actually watching bar or room channels) — a
 lobby-phase expiry reuses `rooms.leaveRoom` exactly as a voluntary leave
 would (host transfer, room close, unchanged); a started game calls
-`rooms.handoffToNpc` instead. As of Crit 9 phase 8 (this round), that
-handoff function exists and flips `controller` correctly, but nothing yet
-*acts* on an NPC-controlled seat's turn — that's a later phase's own
-scheduler, landing once an NPC decision engine exists; until then, a
-handed-off seat simply waits for its turn with no one able to take it,
-which is a known, temporary, explicitly recorded gap (PLAN.md), not an
-oversight.
+`rooms.handoffToNpc` instead, which flips `controller` to `"npc"`.
+
+**A handed-off seat's turns are actually taken, not just flagged.**
+`src/server.ts`'s scheduler (same ticker, same "only while watched" gate)
+notices when the room's current player is NPC-controlled and, after a
+short display pause (`NPC_TURN_DELAY_MS`), calls `rooms.npcRoll` or
+`rooms.npcPlace` — the same `applyRoll`/`applyPlacement` engine a human's
+turn already uses, choosing only among values already rolled
+(`src/npc.ts`'s `chooseNpcPlacement`, the most-frequent value, ties
+broken low — never future deck order, never a rule a human couldn't also
+follow). Both functions are idempotent (a second call against state
+that's already moved past the phase they'd act on is a silent no-op),
+which is what keeps "never double-execute a turn" true even if the
+scheduler's own in-memory in-flight guard were ever bypassed by a
+restart mid-wait. `rooms.roll`/`rooms.place` separately refuse any call
+for a seat whose `controller` has become `"npc"`, even from the original
+human's still-valid session — the ordinary "is it your turn" check alone
+doesn't catch this, since the handed-off seat's id can still legitimately
+be `currentPlayerId` when it's genuinely that seat's turn.
 
 ## Ready-gating is a server check, not a disabled button
 
