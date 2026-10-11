@@ -7,7 +7,7 @@
 
 import type Database from "better-sqlite3";
 import { randomBytes, randomUUID } from "node:crypto";
-import { defaultSpawn, FURNITURE, isValidStep } from "./barLayout.ts";
+import { BAR_SEATS, defaultSpawn, FURNITURE, isValidStep } from "./barLayout.ts";
 import { isConnected } from "./presence.ts";
 
 // A separate, larger palette from the Vegas table's 4 (PLAN.md decision:
@@ -129,8 +129,91 @@ export function moveBar(db: Database.Database, playerId: string, sessionSecret: 
       throw new BarError("not a valid move from your current tile", "invalid_move", 409);
     }
     db.prepare(`UPDATE bar_players SET x = ?, y = ? WHERE id = ?`).run(x, y, playerId);
+    // Moving away is an implicit stand-up — a seat's occupancy must never
+    // outlive the patron actually being on that tile (PLAN.md Phase 2:
+    // "standing up and moving must not trap the character inside
+    // furniture," and more basically, a chair can't show "occupied" once
+    // its occupant has visibly walked off).
+    db.prepare(`UPDATE bar_seats SET occupied_by = NULL WHERE occupied_by = ?`).run(playerId);
   });
   tx();
+  recordBarHeartbeat(db, playerId);
+}
+
+export interface PublicSeat {
+  id: string;
+  furnitureId: string;
+  x: number;
+  y: number;
+}
+
+/** Every real seat's static layout — fetched once by the client via
+ * GET /api/bar/layout, same as FURNITURE already is. Live occupancy is
+ * read from each PublicBarPlayer's own `seatId` in the streamed bar
+ * state, not duplicated here. */
+export function getSeatLayout(): PublicSeat[] {
+  return BAR_SEATS.map((s) => ({ id: s.id, furnitureId: s.furnitureId, x: s.x, y: s.y }));
+}
+
+/** Sitting requires actually standing on the seat's own tile — ordinary
+ * movement gets you there, so there's no separate walkability exception
+ * to maintain (src/barLayout.ts's BAR_SEATS doc comment). One real seat
+ * at a time per patron; sitting back down in the same seat you're
+ * already in is a harmless no-op, not an error (re-clicking your own
+ * chair shouldn't surface a confusing refusal). */
+export function sitAtSeat(db: Database.Database, playerId: string, sessionSecret: string, seatId: string): void {
+  requireBarSession(db, playerId, sessionSecret);
+  const seat = BAR_SEATS.find((s) => s.id === seatId);
+  if (!seat) throw new BarError("no such seat", "seat_not_found", 404);
+
+  const tx = db.transaction(() => {
+    const player = db.prepare(`SELECT x, y, current_table_id FROM bar_players WHERE id = ?`).get(playerId) as
+      | { x: number; y: number; current_table_id: string | null }
+      | undefined;
+    if (!player) throw new BarError("no such bar identity", "player_not_found", 404);
+    if (player.x !== seat.x || player.y !== seat.y) {
+      throw new BarError("walk to the seat before sitting down", "not_at_seat", 409);
+    }
+
+    const mine = db.prepare(`SELECT id FROM bar_seats WHERE occupied_by = ?`).get(playerId) as
+      | { id: string }
+      | undefined;
+    if (mine) {
+      if (mine.id === seatId) return; // already sitting here
+      throw new BarError("stand up from your current seat first", "already_seated_elsewhere", 409);
+    }
+
+    const row = db.prepare(`SELECT occupied_by FROM bar_seats WHERE id = ?`).get(seatId) as
+      | { occupied_by: string | null }
+      | undefined;
+    if (!row) throw new BarError("no such seat", "seat_not_found", 404);
+    if (row.occupied_by) throw new BarError("someone is already sitting there", "seat_taken", 409);
+
+    db.prepare(`UPDATE bar_seats SET occupied_by = ? WHERE id = ?`).run(playerId, seatId);
+
+    // Sitting at a real seat while bound to a game table means stepping
+    // away from it, physically — starts (or refreshes) the 2-minute
+    // away-from-table clock (CLAUDE.md's leave/exit states). Standing
+    // back up from this seat does NOT clear the clock on its own — only
+    // actually re-engaging with the game (a heartbeat/rejoin/action
+    // there) does, so briefly sitting down somewhere else and standing
+    // right back up can't be used to silently reset a departure that's
+    // already ticking.
+    if (player.current_table_id) {
+      db.prepare(
+        `INSERT INTO table_departures (bar_player_id, table_id, left_at) VALUES (?, ?, ?)
+         ON CONFLICT(bar_player_id) DO UPDATE SET table_id = excluded.table_id, left_at = excluded.left_at`,
+      ).run(playerId, player.current_table_id, new Date().toISOString());
+    }
+  });
+  tx();
+  recordBarHeartbeat(db, playerId);
+}
+
+/** Idempotent: standing when not seated anywhere is a harmless no-op. */
+export function standFromSeat(db: Database.Database, playerId: string, sessionSecret: string): void {
+  requireBarSession(db, playerId, sessionSecret);
+  db.prepare(`UPDATE bar_seats SET occupied_by = NULL WHERE occupied_by = ?`).run(playerId);
   recordBarHeartbeat(db, playerId);
 }
 
@@ -141,6 +224,12 @@ export interface PublicBarPlayer {
   skin: string;
   x: number;
   y: number;
+  /** The real seat (dining/stool) this patron currently occupies, if
+   * any — null otherwise. A game table's own chairs are never reported
+   * here (src/tables.ts's getTablesStatus reports those, from the bound
+   * room's own player roster, since that's a different occupancy
+   * concept entirely — PLAN.md's product-direction-update entry). */
+  seatId: string | null;
 }
 
 export interface PublicGameTable {
@@ -178,7 +267,23 @@ export function getPublicBarState(db: Database.Database): PublicBarState {
     const lastSeen = seen.get(p.id);
     return lastSeen !== undefined && isConnected(lastSeen, now);
   });
-  return { players: online.map((p) => ({ id: p.id, nickname: p.nickname, color: p.color, skin: p.skin, x: p.x, y: p.y })) };
+  const seatedBy = new Map(
+    (db.prepare(`SELECT id, occupied_by FROM bar_seats WHERE occupied_by IS NOT NULL`).all() as Array<{
+      id: string;
+      occupied_by: string;
+    }>).map((s) => [s.occupied_by, s.id]),
+  );
+  return {
+    players: online.map((p) => ({
+      id: p.id,
+      nickname: p.nickname,
+      color: p.color,
+      skin: p.skin,
+      x: p.x,
+      y: p.y,
+      seatId: seatedBy.get(p.id) ?? null,
+    })),
+  };
 }
 
 /** Static furniture, including the 6 game-table slots — fetched once by

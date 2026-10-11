@@ -81,6 +81,15 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     // table list still apply immediately regardless (continuous walking
     // must not block receiving others' updates).
     let liveCursor=null, eventSource=null, pendingMoveTarget=null, visibilityHandler=null;
+    // Phase 2 (product-direction-update): the seat a click/tap is walking
+    // this patron toward, if any — set by beginSit, consumed once step()
+    // confirms arrival at that exact tile (see step() below). Click-a-
+    // chair-then-walk-then-sit is one gesture from the player's point of
+    // view, but still two real, separately-validated server calls: a
+    // normal adjacent-step /move for each tile of the walk, then one
+    // /seats/:id/sit once actually standing there — never a shortcut
+    // around either check.
+    let pendingSitSeat=null;
     const holdCleanups=[];
     dispose=()=>{
       active=false;holdCleanups.forEach(cleanup=>cleanup());document.body.classList.remove('world-mode');
@@ -92,9 +101,17 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     const canvas=el('canvas',{'aria-label':'Shared tavern map',tabindex:'0'});
     const toast=el('div',{class:'world-toast','role':'status'},'WASD / arrows to walk · click the floor to explore');
     const online=el('span',{class:'online-count'},'Connecting…');
+    // Phase 2: visible only while mine.seatId is set (toggled in
+    // reconcile below) — standing up is always available from the HUD,
+    // not just by walking away (which also stands you up, via the
+    // server's own moveBar — src/bar.ts).
+    const standBtn=el('button',{class:'hud-button',onclick:async()=>{
+      try{const resp=await post('/stand',session);applyIncoming(resp);}catch(e){toast.textContent=e.message||'Could not stand up';}
+    }},'Stand up');
+    standBtn.style.display='none';
     const hud=el('header',{class:'world-hud'},[
       el('div',{class:'world-brand'},[el('span',{class:'brand-mark'},'◆'),el('div',{},[el('strong',{},'THE AMBER ROOM'),el('small',{},'A little place to be together')])]),
-      el('div',{class:'hud-actions'},[online,el('button',{class:'hud-button',onclick:()=>{path=[];chooseCharacter();}},'Your character'),el('button',{class:'hud-button',onclick:()=>openGames()},'Join by code')]),
+      el('div',{class:'hud-actions'},[online,standBtn,el('button',{class:'hud-button',onclick:()=>{path=[];chooseCharacter();}},'Your character'),el('button',{class:'hud-button',onclick:()=>openGames()},'Join by code')]),
     ]);
     const directions=el('div',{class:'world-dpad','aria-label':'Movement controls'});
     for(const [label,dx,dy] of [['↑',0,-1],['←',-1,0],['↓',0,1],['→',1,0]]) {
@@ -131,12 +148,27 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       }
       if(!prev.has(end))return [];const result=[];let key=end;while(key!==start){result.unshift(key.split(',').map(Number));key=prev.get(key);}return result;
     }
-    function queueStep(dx,dy){if(!mine||moving||overlay.childElementCount)return;const x=mine.x+dx,y=mine.y+dy;if(walkable(x,y)){path=[[x,y]];destination={x,y};}}
+    function queueStep(dx,dy){if(!mine||moving||overlay.childElementCount)return;const x=mine.x+dx,y=mine.y+dy;if(walkable(x,y)){pendingSitSeat=null;path=[[x,y]];destination={x,y};}}
+    // Phase 2 (product-direction-update): "click an empty chair, walk
+    // there, sit down" is one gesture — if already standing exactly on
+    // the seat's own tile, sit immediately; otherwise path there first
+    // (ordinary, server-validated step by step) and let step() below
+    // finish the gesture once it confirms arrival.
+    function beginSit(seat){
+      if(!mine||overlay.childElementCount)return;
+      if(mine.x===seat.x&&mine.y===seat.y){
+        post(`/seats/${seat.id}/sit`,session).then(applyIncoming).catch(e=>{toast.textContent=e.message||'Could not sit down';});
+        return;
+      }
+      pendingSitSeat=seat;path=findPath(seat.x,seat.y);destination=path.length?{x:seat.x,y:seat.y}:null;
+      if(!path.length)pendingSitSeat=null;
+    }
     function reconcile(next){
       state=next;
       mine=state.players.find(p=>p.id===session?.playerId)||mine;
       if(pendingMoveTarget&&mine)mine={...mine,x:pendingMoveTarget.x,y:pendingMoveTarget.y};
       online.textContent=`${state.players.length} here`;
+      standBtn.style.display=mine?.seatId?'':'none';
     }
     // The staleness rule for this channel: public/liveSync.js's
     // shouldApplyLiveUpdate, shared with app.js (see this file's own doc
@@ -274,8 +306,8 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       if(activeSeat){hud.querySelector('.hud-actions').appendChild(el('button',{class:'hud-button',onclick:()=>navigate(`/?room=${activeSeat.roomCode}`)},'Return to your game'));}
       toast.textContent='Welcome in. WASD / arrows to walk · click a destination';canvas.focus();
     }
-    const keyDown=e=>{if(['INPUT','TEXTAREA'].includes(e.target.tagName)||overlay.childElementCount)return;const key=e.key.toLowerCase();if(['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright'].includes(key)){e.preventDefault();keys.add(key);path=[];}if(e.key==='Escape'){path=[];destination=null;}};
-    const keyUp=e=>keys.delete(e.key.toLowerCase());const blur=()=>{keys.clear();heldDirection=null;path=[];};
+    const keyDown=e=>{if(['INPUT','TEXTAREA'].includes(e.target.tagName)||overlay.childElementCount)return;const key=e.key.toLowerCase();if(['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright'].includes(key)){e.preventDefault();keys.add(key);path=[];pendingSitSeat=null;}if(e.key==='Escape'){path=[];destination=null;pendingSitSeat=null;}};
+    const keyUp=e=>keys.delete(e.key.toLowerCase());const blur=()=>{keys.clear();heldDirection=null;path=[];pendingSitSeat=null;};
     window.addEventListener('keydown',keyDown);window.addEventListener('keyup',keyUp);window.addEventListener('blur',blur);
     canvas.addEventListener('click',e=>{
       if(!mine||overlay.childElementCount)return;const rect=canvas.getBoundingClientRect(),x=Math.floor((e.clientX-rect.left+camera.x)/tile),y=Math.floor((e.clientY-rect.top+camera.y)/tile);
@@ -285,13 +317,47 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       // other floor tile; only a genuinely non-walkable, interactive
       // fixture (a table, the counter) intercepts the click for its own
       // dialog/message instead.
-      if(f&&f.blocksMovement!==false){if(f.kind==='game_table'){if(f.available)openTableDialog(f);else toast.textContent=`${f.label}`;}else if(f.kind==='counter')toast.textContent='The kitchen is not open yet. Grab a game while you wait.';return;}
-      path=findPath(x,y);destination=path.length?{x,y}:null;
+      if(f&&f.blocksMovement!==false){
+        if(f.kind==='game_table'){if(f.available)openTableDialog(f);else toast.textContent=`${f.label}`;}
+        else if(f.kind==='counter')toast.textContent='The kitchen is not open yet. Grab a game while you wait.';
+        else if(f.kind==='stool'||f.kind==='dining_table'){
+          // Phase 2: a real seat — pick the nearest free one belonging to
+          // this fixture (its own x/y distance to where this patron is
+          // standing right now, not path length, which is a reasonable,
+          // cheap approximation for "nearest" on this small a grid).
+          const seats=(layout.seats||[]).filter(s=>s.furnitureId===f.id);
+          const free=seats.filter(s=>!state.players.some(p=>p.seatId===s.id));
+          if(!free.length){toast.textContent='No free seat there.';return;}
+          free.sort((a,b)=>(Math.abs(a.x-mine.x)+Math.abs(a.y-mine.y))-(Math.abs(b.x-mine.x)+Math.abs(b.y-mine.y)));
+          beginSit(free[0]);
+        }
+        return;
+      }
+      // A bare seat tile, clicked directly rather than via its furniture —
+      // still sittable (the same tile beginSit would compute), as long as
+      // it's actually free.
+      const seat=(layout.seats||[]).find(s=>s.x===x&&s.y===y);
+      if(seat){
+        if(state.players.some(p=>p.seatId===seat.id&&p.id!==mine.id)){toast.textContent='Someone is already sitting there.';return;}
+        beginSit(seat);
+        return;
+      }
+      pendingSitSeat=null;path=findPath(x,y);destination=path.length?{x,y}:null;
     });
     async function step(x,y){
       moving=true;movementEpoch++;pendingMoveTarget={x,y};
-      try{const next=await post('/move',{playerId:session.playerId,sessionSecret:session.sessionSecret,x,y});pendingMoveTarget=null;if(active)applyIncoming(next);}
-      catch(e){pendingMoveTarget=null;path=[];destination=null;toast.textContent=e.status===403?'Your session could not be restored. Reload to rejoin.':'Could not move — try again.';await fetchAndApply();}
+      try{
+        const next=await post('/move',{playerId:session.playerId,sessionSecret:session.sessionSecret,x,y});
+        pendingMoveTarget=null;if(active)applyIncoming(next);
+        // Arrived at the tile a click-to-sit gesture was walking toward —
+        // finish it with the real, separately-validated sit call (beginSit).
+        if(pendingSitSeat&&pendingSitSeat.x===x&&pendingSitSeat.y===y){
+          const seat=pendingSitSeat;pendingSitSeat=null;
+          try{applyIncoming(await post(`/seats/${seat.id}/sit`,session));}
+          catch(err){toast.textContent=err.message||'Could not sit down';}
+        }
+      }
+      catch(e){pendingMoveTarget=null;path=[];destination=null;pendingSitSeat=null;toast.textContent=e.status===403?'Your session could not be restored. Reload to rejoin.':'Could not move — try again.';await fetchAndApply();}
       finally{moving=false;}
     }
     // A static world layer is painted once, not rebuilt on every animation frame.
@@ -360,19 +426,26 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         let dx=0,dy=0;if(keys.has('w')||keys.has('arrowup'))dy=-1;else if(keys.has('s')||keys.has('arrowdown'))dy=1;
         if(keys.has('a')||keys.has('arrowleft'))dx=-1;else if(keys.has('d')||keys.has('arrowright'))dx=1;
         if(heldDirection){dx=heldDirection.dx;dy=heldDirection.dy;}
-        if(dx||dy){path=[];if(walkable(mine.x+dx,mine.y+dy)){lastTime=now;step(mine.x+dx,mine.y+dy);}}
+        if(dx||dy){path=[];pendingSitSeat=null;if(walkable(mine.x+dx,mine.y+dy)){lastTime=now;step(mine.x+dx,mine.y+dy);}}
         else if(path.length){lastTime=now;const [x,y]=path.shift();step(x,y);}else destination=null;
       }
       const target=mine||{x:20,y:12};const desiredX=Math.max(0,Math.min(Math.max(0,worldW-vw),(target.x+.5)*tile-vw/2)),desiredY=Math.max(0,Math.min(Math.max(0,worldH-vh),(target.y+.5)*tile-vh/2));
       if(!cameraInitialized){camera={x:desiredX,y:desiredY};cameraInitialized=true;}else{camera.x+=(desiredX-camera.x)*.12;camera.y+=(desiredY-camera.y)*.12;}
       ctx.clearRect(0,0,vw,vh);ctx.imageSmoothingEnabled=false;ctx.drawImage(floor,-Math.round(camera.x),-Math.round(camera.y));
-      // Crit 9: each playable table's capacity and live occupancy, drawn
-      // fresh every frame from the continuously-updated state.tables
-      // (streamed over the bar's own SSE channel) — so a bystander can
-      // "see whether it has room" from across the room, without walking
-      // over and clicking (README's own definition of good). Up to 4
-      // seat markers always drawn, matching MAX_PLAYERS in src/rooms.ts —
-      // this doesn't change that rule, just makes it visible.
+      // Each playable table's capacity and live occupancy, drawn fresh
+      // every frame from the continuously-updated state.tables (streamed
+      // over the bar's own SSE channel) — so a bystander can "see whether
+      // it has room" from across the room, without walking over and
+      // clicking (README's own definition of good). Up to 4 chairs
+      // always drawn, matching MAX_PLAYERS in src/rooms.ts — this doesn't
+      // change that rule, just makes it visible. Phase 2
+      // (product-direction-update): an occupied chair now draws an
+      // actual small seated figure (the same sprite() every patron uses,
+      // not a distinct seated illustration — a simplified but honest
+      // stand-in, not a claim of bespoke seated art) using that seat's
+      // real color/nickname/controller from the bound room's own player
+      // roster (src/tables.ts's getTablesStatus), rather than a bare
+      // colored dot.
       for(const f of fixtures){
         if(f.kind!=='game_table'||!f.available)continue;
         const t=state.tables.find(tb=>tb.id===f.id);
@@ -380,14 +453,20 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         const cx=(f.x+f.w/2)*tile-camera.x,seatY=(f.y+f.h)*tile-camera.y+8;
         for(let i=0;i<4;i++){
           const sx=cx-33+i*22;
-          ctx.beginPath();ctx.arc(sx,seatY,6,0,Math.PI*2);
-          if(i<t.playerCount){ctx.fillStyle=colors[t.takenColors[i]]||'#ddba65';ctx.fill();ctx.strokeStyle='#1c1620';ctx.lineWidth=1;ctx.stroke();}
-          else{
+          const occupant=t.seats&&t.seats[i];
+          if(occupant){
+            sprite(ctx,sx,seatY+2,colors[occupant.color]||colors.green,skins.warm,.62,0);
+            if(occupant.controller==='npc'){
+              ctx.font='bold 8px monospace';ctx.textAlign='center';ctx.fillStyle='#1c1620cc';ctx.fillRect(sx-10,seatY-20,20,10);
+              ctx.fillStyle='#e4bf7e';ctx.fillText('NPC',sx,seatY-12);
+            }
+          }else{
             // Empty seat: a clearly visible hollow ring rather than a
             // near-invisible dark fill against the floor's own dark wood
             // tones (an earlier version of this was too low-contrast to
             // actually read as "empty" — caught in a live screenshot
             // check, not just by reading the code).
+            ctx.beginPath();ctx.arc(sx,seatY,6,0,Math.PI*2);
             ctx.fillStyle='#1c162066';ctx.fill();ctx.strokeStyle='#e4bf7ecc';ctx.lineWidth=1.5;ctx.stroke();
           }
         }
@@ -395,9 +474,13 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       if(destination){ctx.strokeStyle='#ecd29b';ctx.lineWidth=2;ctx.strokeRect(destination.x*tile-camera.x+8,destination.y*tile-camera.y+8,tile-16,tile-16);}
       for(const p of [...state.players].sort((a,b)=>a.y-b.y)){
         let pos=displayPositions.get(p.id);if(!pos){pos={x:p.x,y:p.y};displayPositions.set(p.id,pos);}
-        const walking=Math.abs(pos.x-p.x)+Math.abs(pos.y-p.y)>.02;pos.x+=(p.x-pos.x)*.22;pos.y+=(p.y-pos.y)*.22;
+        const walking=!p.seatId&&Math.abs(pos.x-p.x)+Math.abs(pos.y-p.y)>.02;pos.x+=(p.x-pos.x)*.22;pos.y+=(p.y-pos.y)*.22;
         const x=(pos.x+.5)*tile-camera.x,y=(pos.y+.75)*tile-camera.y;
-        sprite(ctx,x,y,colors[p.color]||colors.green,skins[p.skin]||skins.warm,1.15,walking?now/90:0);
+        // A seated patron (p.seatId set) gets the same sprite at rest —
+        // no walk animation, and a touch smaller/lower to read as sitting
+        // at the chair rather than standing over it. Still the one
+        // sprite() primitive, not a distinct seated illustration.
+        sprite(ctx,x,p.seatId?y+4:y,colors[p.color]||colors.green,skins[p.skin]||skins.warm,p.seatId?1.0:1.15,walking?now/90:0);
         ctx.font='12px monospace';ctx.textAlign='center';const label=p.nickname+(p.id===mine?.id?' · you':'');const width=ctx.measureText(label).width+14;
         box(ctx,x-width/2,y-72,width,20,'#292635dc');ctx.fillStyle='#f5e7d2';ctx.fillText(label,x,y-58);
       }

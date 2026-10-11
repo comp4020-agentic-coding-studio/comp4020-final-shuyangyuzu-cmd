@@ -24,6 +24,12 @@ export interface Player {
    * until their first heartbeat lands, so nobody is swept as stale in the
    * first few seconds after joining. */
   joinedAt: string;
+  /** "human" for every join/create today; flips to "npc" one-way, either
+   * when the host adds a Vegas-NPC seat directly (a later phase) or when
+   * a departed human's started-game seat is handed off (CLAUDE.md's
+   * leave/exit states) — never deleted, never reclaimed by the original
+   * human. Defaults "human" everywhere a Player is constructed. */
+  controller: "human" | "npc";
 }
 
 export interface Casino {
@@ -80,6 +86,7 @@ export interface PublicPlayer {
   /** Derived at read time from how recently a heartbeat landed — never
    * stored, so it's never stale (CLAUDE.md). */
   connected: boolean;
+  controller: "human" | "npc";
 }
 
 export interface PublicCasino {

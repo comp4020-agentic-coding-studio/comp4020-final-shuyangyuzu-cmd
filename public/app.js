@@ -125,7 +125,38 @@ function backToHomeButton() {
   // Navigates only — never calls /leave. Phase 2: this is explicitly
   // *not* the same action as the Leave room button in the lobby, and
   // the two must not be confused in the copy (PLAN.md).
-  return el("button", { type: "button", class: "secondary", onclick: () => navigate("/") }, "Back to the bar");
+  return el(
+    "button",
+    {
+      type: "button",
+      class: "secondary",
+      onclick: () => {
+        // Returning to the bar while a table binding is still active
+        // starts the 2-minute away-from-table clock (CLAUDE.md's
+        // leave/exit states) — a best-effort, fire-and-forget signal
+        // alongside the navigation itself, not something this click
+        // blocks on. Reads the bar session directly from localStorage
+        // (same pattern buildClassicPanel already uses for the nickname
+        // prefill) since this view only otherwise holds the game room's
+        // own session, a different identity space (CLAUDE.md).
+        try {
+          const barSession = JSON.parse(localStorage.getItem("vegas:bar:session") || "null");
+          if (barSession?.playerId && barSession?.sessionSecret) {
+            fetch("/api/bar/depart", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(barSession),
+            }).catch(() => {});
+          }
+        } catch {
+          // No bar identity on this browser, or storage unavailable —
+          // nothing to depart from.
+        }
+        navigate("/");
+      },
+    },
+    "Back to the bar",
+  );
 }
 
 // ---- Router -------------------------------------------------------------

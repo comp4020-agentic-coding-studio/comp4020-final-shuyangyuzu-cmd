@@ -6,7 +6,7 @@
 // from the fixed spawn point alone.
 
 import { describe, expect, it } from "vitest";
-import { FURNITURE, GAME_TABLES, GRID_COLS, GRID_ROWS, isValidStep, isWalkable } from "../src/barLayout.ts";
+import { BAR_SEATS, FURNITURE, GAME_TABLES, GRID_COLS, GRID_ROWS, isValidStep, isWalkable } from "../src/barLayout.ts";
 
 describe("isWalkable", () => {
   it("is true for open floor", () => {
@@ -110,6 +110,34 @@ describe("isValidStep", () => {
 
   it("refuses a zero-distance 'step'", () => {
     expect(isValidStep(5, 5, 5, 5)).toBe(false);
+  });
+});
+
+describe("BAR_SEATS (Phase 2: real dining/stool seating)", () => {
+  it("every seat is on an ordinary walkable tile — sitting never needs a walkability exception", () => {
+    for (const s of BAR_SEATS) {
+      expect(isWalkable(s.x, s.y), `${s.id} at (${s.x},${s.y})`).toBe(true);
+    }
+  });
+
+  it("no two seats share the same tile, even across different furniture", () => {
+    const seen = new Set<string>();
+    for (const s of BAR_SEATS) {
+      const key = `${s.x},${s.y}`;
+      expect(seen.has(key), `${s.id} collides with an earlier seat at (${s.x},${s.y})`).toBe(false);
+      seen.add(key);
+    }
+  });
+
+  it("has one seat per stool and 4 per dining table", () => {
+    const stools = FURNITURE.filter((f) => f.kind === "stool");
+    const diningTables = FURNITURE.filter((f) => f.kind === "dining_table");
+    for (const f of stools) {
+      expect(BAR_SEATS.filter((s) => s.furnitureId === f.id)).toHaveLength(1);
+    }
+    for (const f of diningTables) {
+      expect(BAR_SEATS.filter((s) => s.furnitureId === f.id)).toHaveLength(4);
+    }
   });
 });
 

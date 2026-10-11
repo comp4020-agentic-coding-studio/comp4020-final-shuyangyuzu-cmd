@@ -144,6 +144,11 @@ function tickBarPresence(): void {
 // the production default for real in an automated check.
 const LIVE_PRESENCE_TICK_MS = Number(process.env.LIVE_PRESENCE_TICK_MS ?? 1000);
 
+// The 2-minute away-from-table clock (CLAUDE.md's leave/exit states).
+// Env-overridable for the same reason every other threshold in this file
+// is — a dedicated short-interval instance can verify this for real.
+const AWAY_FROM_TABLE_MS = Number(process.env.AWAY_FROM_TABLE_MS ?? 120000);
+
 const db = openDb(dbPathFromEnv());
 const app = new Hono();
 
@@ -228,6 +233,11 @@ app.post("/api/rooms/:code/rejoin", async (c) => {
   const code = c.req.param("code");
   const body = (await c.req.json().catch(() => ({}))) as AuthedBody;
   rooms.rejoin(db, code, playerId(body), sessionSecret(body));
+  // A rejoin is exactly "I'm actually back, engaging with the game
+  // again" — clears any pending away-from-table departure for whichever
+  // bar identity (if any) is behind this player (CLAUDE.md's leave/exit
+  // states; a no-op if there isn't one or this seat has no bar identity).
+  tables.clearDepartureForGamePlayer(db, playerId(body));
   // The sweep that rejoin() already ran can itself change the presence
   // signature (e.g. this read finally pushes a since-stale player's
   // removal past the point every other viewer last saw) — recheck before
@@ -273,6 +283,10 @@ app.post("/api/rooms/:code/heartbeat", async (c) => {
   const code = c.req.param("code");
   const body = (await c.req.json().catch(() => ({}))) as AuthedBody;
   rooms.heartbeat(db, code, playerId(body), sessionSecret(body));
+  // A room heartbeat means this player is actually present at the game —
+  // clears any pending away-from-table departure the same way rejoin
+  // does, for the same reason.
+  tables.clearDepartureForGamePlayer(db, playerId(body));
   // Deliberately minimal response — a heartbeat fires every few seconds
   // per player; it doesn't need to carry the full room state back each
   // time. But this heartbeat can be exactly what flips someone's own
@@ -332,7 +346,17 @@ function barSessionSecret(body: BarAuthedBody): string {
 }
 
 app.get("/api/bar/layout", (c) =>
-  c.json({ gridCols: GRID_COLS, gridRows: GRID_ROWS, tileSize: TILE_SIZE, furniture: FURNITURE, tables: bar.getGameTables() }),
+  c.json({
+    gridCols: GRID_COLS,
+    gridRows: GRID_ROWS,
+    tileSize: TILE_SIZE,
+    furniture: FURNITURE,
+    tables: bar.getGameTables(),
+    // Phase 2 (product-direction-update): static dining/stool seat
+    // positions — live occupancy comes from each streamed player's own
+    // seatId, the same split FURNITURE/tables already uses.
+    seats: bar.getSeatLayout(),
+  }),
 );
 
 // Every bar response below now carries {seq, players, tables} instead of
@@ -400,6 +424,36 @@ app.post("/api/bar/move", async (c) => {
   const snap = barSnapshot(live.bumpBarSeq());
   live.publishBar(snap);
   return c.json(snap);
+});
+
+// ---- Phase 2 (product-direction-update): real dining/stool seats ----
+
+app.post("/api/bar/seats/:seatId/sit", async (c) => {
+  const seatId = c.req.param("seatId");
+  const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody;
+  bar.sitAtSeat(db, barPlayerId(body), barSessionSecret(body), seatId);
+  const snap = barSnapshot(live.bumpBarSeq());
+  live.publishBar(snap);
+  return c.json(snap);
+});
+
+app.post("/api/bar/stand", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody;
+  bar.standFromSeat(db, barPlayerId(body), barSessionSecret(body));
+  const snap = barSnapshot(live.bumpBarSeq());
+  live.publishBar(snap);
+  return c.json(snap);
+});
+
+// Fired (best-effort — see public/app.js's backToHomeButton) when a
+// patron navigates from a table-bound game room's view back to the bar,
+// independent of src/bar.ts's sitAtSeat starting the same clock for the
+// "sat down somewhere else instead" trigger (CLAUDE.md's leave/exit
+// states).
+app.post("/api/bar/depart", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody;
+  tables.departActiveTable(db, barPlayerId(body), barSessionSecret(body));
+  return c.json({ ok: true });
 });
 
 // ---- Phase 2: each Vegas table bound to its own independent room ----
@@ -507,6 +561,21 @@ app.get("/api/bar/events", (c) => {
 setInterval(() => {
   if (live.hasBarSubscribers()) tickBarPresence();
   for (const code of live.subscribedRoomCodes()) tickRoomPresence(code);
+
+  // The 2-minute away-from-table clock (CLAUDE.md's leave/exit states):
+  // same "only while something's actually watching" gate as presence
+  // above, since there's no point enforcing a clock nobody can see the
+  // result of and the machine would otherwise be asleep anyway. Unlike
+  // the presence tick's own diff-before-publish, this always re-publishes
+  // whatever rooms tables.enforceExpiredDepartures actually changed
+  // (pre-start leave, or a started game's NPC handoff) — those are real
+  // mutations with their own version bump already, not a presence-only
+  // recompute, so there's nothing to diff against.
+  if (live.hasBarSubscribers() || live.subscribedRoomCodes().length > 0) {
+    const affectedCodes = tables.enforceExpiredDepartures(db, AWAY_FROM_TABLE_MS);
+    for (const code of affectedCodes) publishRoomState(code, rooms.getPublicState(db, code));
+    if (affectedCodes.length > 0) publishBarSnapshot();
+  }
 }, LIVE_PRESENCE_TICK_MS);
 
 // No `index` option — "/" is handled explicitly above (it needs

@@ -146,6 +146,32 @@ it("seeds the 6 fixed game tables exactly once, even across repeated opens", () 
   db.close();
 });
 
+// Phase 2 (product-direction-update): bar_seats/table_departures are
+// brand-new tables, so `CREATE TABLE IF NOT EXISTS` is genuinely
+// sufficient on its own (unlike the closed_at-column bug above) — still
+// verified against a real pre-existing database rather than assumed,
+// per this file's own established discipline.
+it("adds bar_seats and table_departures to a database that predates them, and seeds every real seat exactly once", () => {
+  const path = join(dir, "vegas.db");
+  createPreBarSchema(path);
+
+  const db = openDb(path);
+  const names = (
+    db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>
+  ).map((r) => r.name);
+  expect(names).toContain("bar_seats");
+  expect(names).toContain("table_departures");
+
+  const seatCount = (db.prepare(`SELECT COUNT(*) AS n FROM bar_seats`).get() as { n: number }).n;
+  expect(seatCount).toBeGreaterThan(0); // 5 stools + 4 per dining table, as of this write-up
+  db.close();
+
+  const reopened = openDb(path); // reopening must not duplicate the seed
+  const again = (reopened.prepare(`SELECT COUNT(*) AS n FROM bar_seats`).get() as { n: number }).n;
+  expect(again).toBe(seatCount);
+  reopened.close();
+});
+
 it("preserves a table's current_room_id across a reopen rather than resetting the seed", () => {
   const path = join(dir, "vegas.db");
   createPreBarSchema(path);

@@ -22,7 +22,7 @@ import { COLORS, type Color, type PublicState, type RoomState } from "./types.ts
 // aloud when a room code is being passed around a table.
 const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const CODE_LENGTH = 6;
-const MAX_PLAYERS = 4;
+export const MAX_PLAYERS = 4;
 
 export class RoomError extends Error {
   readonly code: string;
@@ -215,6 +215,7 @@ export function createRoom(db: Database.Database, nickname: string, color: Color
     wonBills: [],
     ready: false,
     joinedAt: now,
+    controller: "human",
   };
 
   const tx = db.transaction(() => {
@@ -277,6 +278,7 @@ export function joinRoom(db: Database.Database, code: string, nickname: string, 
       wonBills: [],
       ready: false,
       joinedAt: now,
+      controller: "human",
     };
 
     db.prepare(`UPDATE rooms SET state_json = ?, version = version + 1 WHERE id = ? AND version = ?`).run(
@@ -426,6 +428,39 @@ export function disbandRoom(
   tx();
 }
 
+/** Hands a seat to NPC control without touching its dice, winnings, or
+ * place in the turn order — called internally by src/tables.ts's
+ * departure enforcement once a started game's seat has been away from
+ * its table long enough (CLAUDE.md's leave/exit states: "a departed
+ * human's started-game seat is handed to NPC control, never deleted").
+ * Not an HTTP-authenticated action — there is no human session to check;
+ * the caller (server-side enforcement) already decided this seat's
+ * departure earned it. Idempotent: already-NPC or already-gone is a
+ * silent no-op, not an error, since enforcement can't fully serialize
+ * against every other concurrent change to this room. */
+export function handoffToNpc(db: Database.Database, code: string, playerId: string): void {
+  const row = getRoomRow(db, code);
+  if (row.closed_at) return;
+
+  const tx = db.transaction(() => {
+    const fresh = db.prepare(`SELECT state_json, version FROM rooms WHERE id = ?`).get(row.id) as {
+      state_json: string;
+      version: number;
+    };
+    const state: RoomState = JSON.parse(fresh.state_json);
+    const player = state.players[playerId];
+    if (!player || player.controller === "npc") return;
+    player.controller = "npc";
+    db.prepare(`UPDATE rooms SET state_json = ?, version = version + 1 WHERE id = ? AND version = ?`).run(
+      JSON.stringify(state),
+      row.id,
+      fresh.version,
+    );
+    logEvent(db, row.id, "npc_takeover", { playerId });
+  });
+  tx();
+}
+
 export function startGame(db: Database.Database, code: string, playerId: string, sessionSecret: string): void {
   const row = loadOpenRoom(db, code);
   requireSession(db, row.id, playerId, sessionSecret);
@@ -561,6 +596,7 @@ function toPublicState(db: Database.Database, row: RoomRow, state: RoomState): P
         moneyTotal: p.wonBills.reduce((sum, b) => sum + b, 0),
         ready: p.ready,
         connected: isConnected(seen.get(p.id) ?? p.joinedAt, now),
+        controller: p.controller,
       })),
     lastRoll: state.lastRoll,
     casinos: state.casinos.map((c) => ({

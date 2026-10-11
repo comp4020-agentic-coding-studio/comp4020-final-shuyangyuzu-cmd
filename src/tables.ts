@@ -31,6 +31,17 @@ export class TableError extends Error {
 
 export type TableLiveStatus = "reserved" | "empty" | "waiting" | "in_progress" | "finished";
 
+/** One of a game table's (up to 4) chairs, for real seated rendering —
+ * null for an empty chair. NOT a bar_seats row: this is a view of the
+ * bound room's own player roster, the one source of truth for "who's at
+ * this table" (PLAN.md's product-direction-update entry). */
+export interface TableSeatView {
+  color: string;
+  nickname: string;
+  connected: boolean;
+  controller: "human" | "npc";
+}
+
 export interface TableStatusView {
   id: string;
   gameType: string;
@@ -40,6 +51,10 @@ export interface TableStatusView {
   roomCode: string | null;
   playerCount: number;
   takenColors: string[];
+  /** Always length 4 (MAX_PLAYERS in src/rooms.ts), null where empty —
+   * kept separate from takenColors (which the table-dialog's own color
+   * picker already depends on) rather than replacing it. */
+  seats: Array<TableSeatView | null>;
 }
 
 function phaseToStatus(phase: PublicState["phase"]): "waiting" | "in_progress" | "finished" {
@@ -78,6 +93,10 @@ function lookupOpenRoom(db: Database.Database, roomId: string | null): OpenRoom 
   return { code: row.code, state };
 }
 
+function emptySeats(): Array<TableSeatView | null> {
+  return [null, null, null, null];
+}
+
 export function getTablesStatus(db: Database.Database): TableStatusView[] {
   return GAME_TABLES.map((t) => {
     if (!t.available) {
@@ -90,6 +109,7 @@ export function getTablesStatus(db: Database.Database): TableStatusView[] {
         roomCode: null,
         playerCount: 0,
         takenColors: [],
+        seats: emptySeats(),
       };
     }
     const row = db.prepare(`SELECT current_room_id FROM tables WHERE id = ?`).get(t.id) as
@@ -114,9 +134,16 @@ export function getTablesStatus(db: Database.Database): TableStatusView[] {
         roomCode: null,
         playerCount: 0,
         takenColors: [],
+        seats: emptySeats(),
       };
     }
     const players = open.state.players; // already an array — PublicState, not RoomState
+    const seats = emptySeats();
+    for (const p of players) {
+      if (p.seat >= 0 && p.seat < seats.length) {
+        seats[p.seat] = { color: p.color, nickname: p.nickname, connected: p.connected, controller: p.controller };
+      }
+    }
     return {
       id: t.id,
       gameType: t.gameType!,
@@ -126,6 +153,7 @@ export function getTablesStatus(db: Database.Database): TableStatusView[] {
       roomCode: open.code,
       playerCount: players.length,
       takenColors: players.map((p) => p.color),
+      seats,
     };
   });
 }
@@ -307,4 +335,90 @@ export function joinTableRoom(
     return { code: open.code, ...joined };
   });
   return tx();
+}
+
+// ---- The 2-minute away-from-table clock (CLAUDE.md's leave/exit states) ----
+
+/** Explicitly marks "I've just stepped away from my table" — called when
+ * a patron navigates from the game-room view back to the bar
+ * (`public/app.js`'s "Back to the bar" button), independent of sitting
+ * at a real seat (src/bar.ts's sitAtSeat starts/refreshes the same clock
+ * for that trigger). A no-op if this identity has no active table
+ * binding at all — never an error, since this is a best-effort signal
+ * fired alongside an ordinary navigation, not a request the UI blocks on. */
+export function departActiveTable(db: Database.Database, barPlayerId: string, barSessionSecret: string): void {
+  requireBarSession(db, barPlayerId, barSessionSecret);
+  const row = db.prepare(`SELECT current_table_id FROM bar_players WHERE id = ?`).get(barPlayerId) as
+    | { current_table_id: string | null }
+    | undefined;
+  if (!row?.current_table_id) return;
+  db.prepare(
+    `INSERT INTO table_departures (bar_player_id, table_id, left_at) VALUES (?, ?, ?)
+     ON CONFLICT(bar_player_id) DO UPDATE SET table_id = excluded.table_id, left_at = excluded.left_at`,
+  ).run(barPlayerId, row.current_table_id, new Date().toISOString());
+}
+
+/** Clears any pending departure for whichever bar identity (if any) this
+ * room-player id belongs to — called from src/server.ts's room
+ * heartbeat/rejoin handlers, the two "I'm actually back, engaging with
+ * the game again" signals. A no-op if there's no pending departure, or
+ * no bar identity currently points at this game-player id at all (a
+ * player seated via the classic direct-room flow, with no bar identity
+ * behind them, is simply never subject to this clock). */
+export function clearDepartureForGamePlayer(db: Database.Database, gamePlayerId: string): void {
+  db.prepare(
+    `DELETE FROM table_departures WHERE bar_player_id IN (SELECT id FROM bar_players WHERE current_game_player_id = ?)`,
+  ).run(gamePlayerId);
+}
+
+/** Resolves every table_departures row older than `awayMs` — pre-start,
+ * reuses rooms.leaveRoom exactly as a voluntary leave would (host
+ * transfer, room close, all unchanged); once a game has started, hands
+ * the seat to NPC control instead (rooms.handoffToNpc) rather than
+ * dropping dice, skipping a settlement, or stalling the turn order
+ * (CLAUDE.md). Returns the room codes actually changed, so the caller
+ * (src/server.ts) knows what to broadcast — this function never
+ * publishes anything itself, matching every other src/tables.ts function
+ * (publishing is server.ts's job alone). */
+export function enforceExpiredDepartures(db: Database.Database, awayMs: number): string[] {
+  const cutoff = new Date(Date.now() - awayMs).toISOString();
+  const stale = db.prepare(`SELECT bar_player_id, table_id FROM table_departures WHERE left_at < ?`).all(cutoff) as Array<{
+    bar_player_id: string;
+    table_id: string;
+  }>;
+  const affected = new Set<string>();
+
+  for (const dep of stale) {
+    db.prepare(`DELETE FROM table_departures WHERE bar_player_id = ?`).run(dep.bar_player_id);
+
+    const bp = db.prepare(`SELECT current_table_id, current_game_player_id FROM bar_players WHERE id = ?`).get(
+      dep.bar_player_id,
+    ) as BarPlayerLinkage | undefined;
+    // Moved on since this departure was recorded (switched tables,
+    // already left) — nothing to enforce.
+    if (!bp?.current_table_id || bp.current_table_id !== dep.table_id || !bp.current_game_player_id) continue;
+
+    const tableRow = db.prepare(`SELECT current_room_id FROM tables WHERE id = ?`).get(dep.table_id) as
+      | { current_room_id: string | null }
+      | undefined;
+    const open = lookupOpenRoom(db, tableRow?.current_room_id ?? null);
+    if (!open) continue; // the room's already gone
+
+    if (open.state.phase === "lobby") {
+      const sessionRow = db.prepare(`SELECT session_secret FROM sessions WHERE player_id = ?`).get(
+        bp.current_game_player_id,
+      ) as { session_secret: string } | undefined;
+      if (!sessionRow) continue;
+      try {
+        rooms.leaveRoom(db, open.code, bp.current_game_player_id, sessionRow.session_secret);
+        affected.add(open.code);
+      } catch {
+        // Already left, room closed in the meantime, etc. — fine.
+      }
+    } else {
+      rooms.handoffToNpc(db, open.code, bp.current_game_player_id);
+      affected.add(open.code);
+    }
+  }
+  return [...affected];
 }

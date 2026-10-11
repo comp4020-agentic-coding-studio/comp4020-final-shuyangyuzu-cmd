@@ -2040,3 +2040,111 @@ updating before asserting, and re-verified clean. No restart test needed
 for this phase (not restart-related); `pnpm check` (16 files, 119/119)
 green throughout, run fresh twice.
 
+## Phase 2 — built: real dining/stool seating, the 2-minute away-from-table clock, and real seated figures at game tables
+
+**Data model**: `bar_seats` (one row per real dining/stool seat, seeded
+once from `src/barLayout.ts`'s new `BAR_SEATS` — 5 stool seats, 4 per
+dining table, computed from the furniture layout rather than hand-typed)
+and `table_departures` (the away-from-table clock, keyed by bar identity,
+deliberately separate from `bar_presence` and `rooms.state_json` —
+CLAUDE.md). Both are brand-new tables, so `CREATE TABLE IF NOT EXISTS` is
+genuinely sufficient (unlike the `closed_at`-column bug), still verified
+with a regression test against a real pre-existing database
+(`spec/db-migration.test.ts`). `Player.controller: "human" | "npc"`
+added to `src/types.ts`, defaulted everywhere a `Player` is constructed,
+and exposed on `PublicPlayer` and `src/tables.ts`'s new `TableSeatView`
+— groundwork phase 4 will actually drive, not used for anything yet
+beyond this phase's own NPC-handoff flag.
+
+**A real geometry bug caught before it shipped, by the overlap test, not
+by eyeballing coordinates**: the first draft placed `dining-b`'s and
+`dining-c`'s seat tiles on the exact same tile as `stool-3`'s and
+`stool-5`'s own approach tiles respectively (both furniture happened to
+share a grid column). `spec/barLayout.test.ts`'s new "no two seats share
+a tile" check failed immediately against the actual computed geometry —
+fixed by shifting `dining-b`/`dining-c`'s x-position off the stools'
+columns, not by special-casing the collision.
+
+**Server**: `src/bar.ts` gained `sitAtSeat`/`standFromSeat`/
+`getSeatLayout`; sitting requires actually standing on the seat's own
+(ordinary, already-walkable) tile — no walkability exception needed,
+matching the existing movement model exactly. Moving away auto-stands
+(`moveBar`'s own transaction clears `occupied_by` for the mover) — a
+chair can never show occupied once its occupant has visibly walked off.
+`PublicBarPlayer` gained `seatId`. `src/tables.ts` gained
+`departActiveTable`, `clearDepartureForGamePlayer`, and
+`enforceExpiredDepartures` (reuses `rooms.leaveRoom` pre-start exactly as
+a voluntary leave would; calls the new `rooms.handoffToNpc` once a game
+has started — both wired into the existing presence-ticker interval in
+`src/server.ts`, gated the same "only while something's actually
+watching" way, per CLAUDE.md's updated "lobby disconnect grace" + new
+away-from-table sections). `GET /api/bar/layout` now also returns
+`seats`; `getTablesStatus` now returns a real `seats: (TableSeatView |
+null)[4]` per table (color/nickname/connected/controller), additive
+alongside the existing `takenColors` the table-dialog's color picker
+already depends on.
+
+**Client (`public/tavern.js`)**: clicking a stool or dining table picks
+its nearest free seat and either sits immediately (already standing
+there) or paths there first and sits automatically on arrival
+(`beginSit`/`pendingSitSeat`, mirroring the existing `pendingMoveTarget`
+pattern) — every tile of that walk is still its own separately-validated
+`/move` call, the sit itself a separate, final `/seats/:id/sit`; nothing
+shortcuts either check. A HUD "Stand up" button, shown only while seated.
+Game tables draw real small seated figures at each occupied chair (the
+same `sprite()` every patron already uses, at a smaller, non-animated
+scale — a simplified, honest stand-in, not a claim of distinct seated
+artwork) with an "NPC" tag for a non-human-controlled seat, replacing the
+previous plain colored dots; an empty chair keeps the existing, already-
+legible hollow-ring treatment. A seated bar patron's own sprite skips the
+walk-cycle animation. `public/app.js`'s "Back to the bar" button now
+fires a best-effort `POST /api/bar/depart` first (reading the bar session
+directly from `localStorage`, the same pattern `buildClassicPanel`
+already uses for the nickname prefill) — the explicit away-from-table
+trigger, independent of sitting-elsewhere's own trigger in `sitAtSeat`.
+
+**What this phase does not yet do**: `rooms.handoffToNpc` flips
+`controller` correctly and is exercised by a real test, but nothing yet
+*acts* on a handed-off seat's turn — there is no NPC decision engine
+until phase 4, so a started game with a handed-off seat simply waits
+there, turn-stalled, until phase 4 lands. This is recorded here
+deliberately, not discovered as a surprise later. The approval queue
+(phase 3) doesn't exist yet either, so every current table seat is still
+"first click wins," unchanged from before this phase.
+
+**Regression tests**: `spec/barSeats.test.ts` (8 cases — sit requires
+being at the tile, double-occupancy refused, re-sitting the same seat is
+a no-op, one-seat-at-a-time, standing frees it, moving auto-stands,
+standing-when-not-seated is a no-op), `spec/tableDeparture.test.ts` (7
+cases — sitting elsewhere records a departure, explicit depart, clearing
+on return, an unexpired departure is left alone, an expired lobby
+departure reuses the real leave path, an expired started-game departure
+hands off to NPC with dice/winnings/turn-order verified unchanged), 3 new
+cases in `spec/barLayout.test.ts` (seat-tile walkability, no seat
+collisions, correct seat counts per fixture), 1 new
+`spec/db-migration.test.ts` case. All against hand-built or direct-DB
+databases (like the Crit 9 phase 1 table-expiry test), not real multi-
+minute waits — the 2-minute default is far too slow for an automated
+suite, and this exercises the exact enforcement function directly rather
+than a restated copy of it.
+
+**Live verification, real browser** (same throwaway Playwright install):
+walked a patron step-by-step (server-validated moves, no teleporting) to
+a real stool seat, sat via the real endpoint, reloaded the page, and
+confirmed the "Stand up" button appears, then clicking it correctly
+hides it again. Separately, clicked directly on a stool fixture after
+walking adjacent to it and confirmed the click-to-sit gesture resolves to
+the correct `seatId` with zero console/page errors. Separately again,
+seated two real players at a Vegas table and confirmed the new seated-
+sprite rendering produces zero console/page errors over 1.5s of real
+animation frames. Not independently isolated in live browser testing:
+the specific "click far away from a seat, walk several tiles, sit
+automatically on arrival" sub-case (covered by the click-to-sit test
+above only in its single-tile-away form) — the underlying mechanism
+(`pendingSitSeat` + `step()`'s arrival check) is the same code path
+either way, but a longer walk specifically wasn't the one exercised live.
+
+`pnpm check` (18 files, 137/137) green, fresh `DATA_DIR`, run twice;
+`pnpm check:evidence` green. 等待用户验收 once deployed and
+production-verified below.
+

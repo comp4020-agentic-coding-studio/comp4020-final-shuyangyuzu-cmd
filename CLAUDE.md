@@ -274,6 +274,32 @@ state 3/4 safe to apply to a game already in progress without violating
 "never deletes dice, skips a settlement, or stalls a turn": the seat
 keeps playing, just not under that person's control anymore.
 
+**How the 2-minute clock is actually implemented**: a new `table_departures`
+table (one row per bar identity currently away from a table binding it
+still holds), deliberately separate from both `bar_presence` (a heartbeat
+timestamp, a different signal) and `rooms.state_json` (a frequently-
+changing clock has no business inside the versioned game blob any more
+than a heartbeat does — the same reasoning presence already established).
+Two triggers start or refresh it: sitting at a real seat (`src/bar.ts`'s
+`sitAtSeat`) while still bound to a table, and an explicit "back to the
+bar" navigation (`public/app.js`'s `backToHomeButton`, a best-effort
+fire-and-forget POST to `/api/bar/depart`). Two triggers clear it: a room
+heartbeat or rejoin succeeding for that seat (`src/tables.ts`'s
+`clearDepartureForGamePlayer`) — "I'm actually back, engaging with the
+game again," not merely standing up from an unrelated rest seat.
+Enforcement (`src/tables.ts`'s `enforceExpiredDepartures`) runs on the
+same short interval as the presence ticker above, gated the same way
+(only while something's actually watching bar or room channels) — a
+lobby-phase expiry reuses `rooms.leaveRoom` exactly as a voluntary leave
+would (host transfer, room close, unchanged); a started game calls
+`rooms.handoffToNpc` instead. As of Crit 9 phase 8 (this round), that
+handoff function exists and flips `controller` correctly, but nothing yet
+*acts* on an NPC-controlled seat's turn — that's a later phase's own
+scheduler, landing once an NPC decision engine exists; until then, a
+handed-off seat simply waits for its turn with no one able to take it,
+which is a known, temporary, explicitly recorded gap (PLAN.md), not an
+oversight.
+
 ## Ready-gating is a server check, not a disabled button
 
 `startGame` itself verifies every player is both `ready` and currently
@@ -349,6 +375,19 @@ points at, or which patron (if any) occupies a seat — never the fixture
 rows themselves. A finished, disbanded, or abandoned game room is never
 deleted and never overwritten; a table whose game ends just has its
 pointer cleared, and the next game started there is a new room row.
+
+**Real dining/stool seats (`bar_seats`, Crit 9 phase 8)** follow the exact
+same pattern: seeded once from `src/barLayout.ts`'s `BAR_SEATS` (computed
+from the furniture layout, never hand-typed coordinates), never created
+or deleted at runtime — only `occupied_by` changes. Each seat's tile is
+an ordinary, already-walkable floor tile next to its furniture, so
+sitting never needs a walkability exception: the server requires a
+patron to actually be standing on that exact tile before accepting
+`sit`, the same adjacent-step movement validates getting there as
+anywhere else. A game table's own 4 chairs are deliberately **not**
+`bar_seats` rows — sitting there is already being seat-index 0-3 in that
+room's own player roster, a different, pre-existing occupancy concept
+that a second one would only duplicate.
 
 ## A patron holds at most one open table at a time
 

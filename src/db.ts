@@ -6,7 +6,7 @@
 import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { GAME_TABLES } from "./barLayout.ts";
+import { BAR_SEATS, GAME_TABLES } from "./barLayout.ts";
 
 export function openDb(path: string): Database.Database {
   mkdirSync(dirname(path), { recursive: true });
@@ -15,6 +15,7 @@ export function openDb(path: string): Database.Database {
   db.pragma("foreign_keys = ON");
   migrate(db);
   seedBarFurniture(db);
+  seedBarSeats(db);
   return db;
 }
 
@@ -86,6 +87,30 @@ function migrate(db: Database.Database): void {
       y INTEGER NOT NULL,
       current_room_id TEXT REFERENCES rooms(id)
     );
+
+    -- Phase 2 (product-direction-update, PLAN.md): real dining/stool
+    -- seats, fixed furniture seeded once below, same pattern as the
+    -- tables table above. A game table's own 4 chairs are NOT rows here
+    -- -- sitting there is already being seat-index 0-3 in that room's
+    -- own player roster (src/tables.ts), not a new occupancy concept.
+    CREATE TABLE IF NOT EXISTS bar_seats (
+      id TEXT PRIMARY KEY,
+      furniture_id TEXT NOT NULL,
+      x INTEGER NOT NULL,
+      y INTEGER NOT NULL,
+      occupied_by TEXT REFERENCES bar_players(id)
+    );
+
+    -- The 2-minute away-from-table clock (CLAUDE.md's leave/exit states).
+    -- One row per bar identity currently away from a table binding it
+    -- still holds — separate from bar_presence (heartbeat) and from
+    -- rooms.state_json (a frequently-changing clock doesn't belong in the
+    -- versioned game blob any more than a heartbeat does).
+    CREATE TABLE IF NOT EXISTS table_departures (
+      bar_player_id TEXT PRIMARY KEY REFERENCES bar_players(id),
+      table_id TEXT NOT NULL,
+      left_at TEXT NOT NULL
+    );
   `);
 
   // Added after the first deploy. "CREATE TABLE IF NOT EXISTS" above is a
@@ -117,6 +142,20 @@ function seedBarFurniture(db: Database.Database): void {
     insert.run(t.id, t.gameType, t.available ? 1 : 0, t.x, t.y);
     // Layout revisions move fixtures without resetting their game pointer.
     db.prepare(`UPDATE tables SET x = ?, y = ? WHERE id = ?`).run(t.x, t.y, t.id);
+  }
+}
+
+/** Phase 2: dining/stool seats, same idempotent-seed-plus-reposition
+ * pattern as seedBarFurniture above, and for the same reason — a seat
+ * that already exists keeps whatever `occupied_by` it's accumulated, not
+ * reset to the seed's NULL on every restart. */
+function seedBarSeats(db: Database.Database): void {
+  const insert = db.prepare(
+    `INSERT OR IGNORE INTO bar_seats (id, furniture_id, x, y, occupied_by) VALUES (?, ?, ?, ?, NULL)`,
+  );
+  for (const s of BAR_SEATS) {
+    insert.run(s.id, s.furnitureId, s.x, s.y);
+    db.prepare(`UPDATE bar_seats SET x = ?, y = ?, furniture_id = ? WHERE id = ?`).run(s.x, s.y, s.furnitureId, s.id);
   }
 }
 

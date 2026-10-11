@@ -45,9 +45,16 @@ const CORE_FURNITURE: readonly Furniture[] = [
   { id: "stool-3", kind: "stool", x: 9, y: 2, w: 1, h: 1, label: "Stool" },
   { id: "stool-4", kind: "stool", x: 12, y: 2, w: 1, h: 1, label: "Stool" },
   { id: "stool-5", kind: "stool", x: 15, y: 2, w: 1, h: 1, label: "Stool" },
+  // x shifted off the stools' own columns (3,6,9,12,15 — see CORE_FURNITURE
+  // below) so each dining table's 4 seat tiles (BAR_SEATS, one tile north
+  // and one south of each of its 2 columns) never land on a stool's own
+  // approach tile (directly south of the stool) — an earlier draft of
+  // this layout had dining-b and dining-c sharing a column with a stool
+  // and their seats collided; spec/barLayout.test.ts's overlap check
+  // covers this permanently now, not just this one fix.
   { id: "dining-a", kind: "dining_table", x: 1, y: 4, w: 2, h: 2, label: "Table" },
-  { id: "dining-b", kind: "dining_table", x: 8, y: 4, w: 2, h: 2, label: "Table" },
-  { id: "dining-c", kind: "dining_table", x: 15, y: 4, w: 2, h: 2, label: "Table" },
+  { id: "dining-b", kind: "dining_table", x: 10, y: 4, w: 2, h: 2, label: "Table" },
+  { id: "dining-c", kind: "dining_table", x: 17, y: 4, w: 2, h: 2, label: "Table" },
   {
     id: "vegas-1",
     kind: "game_table",
@@ -141,6 +148,42 @@ export const FURNITURE: readonly Furniture[] = CORE_FURNITURE.map((f) => ({
 }));
 
 export const GAME_TABLES: readonly Furniture[] = FURNITURE.filter((f) => f.kind === "game_table");
+
+/** A real, sittable seat belonging to a dining table or stool — NOT a
+ * game table's own chairs (those are a rendering of that room's existing
+ * 0-3 seat index, never a new occupancy concept here; PLAN.md's
+ * product-direction-update entry). Each seat's (x, y) is an ordinary,
+ * already-walkable floor tile next to its furniture — sitting never
+ * requires a special walkability exception; a patron just has to
+ * actually be standing on that exact tile (reached by the same
+ * adjacent-step movement as anywhere else) before the sit action is
+ * allowed (src/bar.ts). Computed from FURNITURE rather than hand-typed
+ * coordinates so a layout change can't silently drift the two apart. */
+export interface Seat {
+  id: string;
+  furnitureId: string;
+  x: number;
+  y: number;
+}
+
+export const BAR_SEATS: readonly Seat[] = FURNITURE.flatMap((f): Seat[] => {
+  if (f.kind === "stool") {
+    // The tile directly south of the stool — the same side a patron
+    // already approaches the counter from.
+    return [{ id: `${f.id}-seat`, furnitureId: f.id, x: f.x, y: f.y + f.h }];
+  }
+  if (f.kind === "dining_table") {
+    // Two seats north, two south: the walkable tiles flanking each of
+    // the table's 2 columns, one row clear of its own footprint.
+    const seats: Seat[] = [];
+    for (let dx = 0; dx < f.w; dx++) {
+      seats.push({ id: `${f.id}-n${dx}`, furnitureId: f.id, x: f.x + dx, y: f.y - 1 });
+      seats.push({ id: `${f.id}-s${dx}`, furnitureId: f.id, x: f.x + dx, y: f.y + f.h });
+    }
+    return seats;
+  }
+  return [];
+});
 
 function furnitureAt(x: number, y: number): Furniture | undefined {
   return FURNITURE.find((f) => x >= f.x && x < f.x + f.w && y >= f.y && y < f.y + f.h);
