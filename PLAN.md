@@ -1752,3 +1752,222 @@ from CI alone:
 This is the agent's own (and, for the live verification, a second agent's
 own) automated re-verification — not the student's own check. 等待用户验收.
 
+# Product direction update (2026-10-11) — real seating, approval, NPC tables, nine tables
+
+The student redirected scope significantly beyond the Crit 9 sync fix
+above: the bar's earlier "four seat-marker dots per table" stand-in is
+replaced by actual walk-up-and-sit seating everywhere (dining tables, bar
+stools, and game tables alike); online Vegas tables gain a host-approval
+join flow instead of "first click wins a seat"; a second, NPC-driven
+Vegas mode is added so a lone visitor can play without waiting for real
+opponents; the floor plan grows to two labelled rows of five tables each.
+This section records what was found in the existing code, the design
+decisions made to satisfy the brief, and the data model — implementation
+is phased below, each phase verified and deployed before the next, per
+the student's own explicit instruction.
+
+## Two real bugs found while reviewing the existing implementation (not new features — fixed in phase 1)
+
+**1. "Return to your game" leaks across bar identities.** Reproduced by
+reading the code, not just taking the student's report on faith:
+`public/app.js`'s `lastActiveRoom()`/`saveSession()` read and write a
+single, flat `localStorage` key, `vegas:lastRoom` — shared by *every*
+consumer on this browser: the classic direct-room-code flow's own
+"return to that room" offer on Home, **and** `tavern.js`'s bar-identity
+"Return to your game" HUD button (fed the exact same global key via the
+`lastActiveRoom` option passed into `createTavern`). Creating a brand-new
+bar character does nothing to this key — it's keyed to the browser, not
+to the bar identity, so a new character's session immediately inherits
+whatever room a *previous* character (or the classic flow, independently)
+last touched on this device. This is the literal mechanism behind the
+report ("以新身份进入,却仍看到 Return to your game,打开的是旧身份留下
+的房间"). The classic flow's own narrower "this browser last used this
+room" offer is a different, intentional, already-documented feature
+(CLAUDE.md's "Identity recovery": browser-scoped, not persona-scoped) and
+isn't what's broken — only the bar HUD's button, which *looks*
+identity-scoped but isn't, needs to stop trusting this key at all.
+
+**2. A bar table's displayed status can bypass the room's own expiry
+check.** `src/tables.ts`'s `lookupOpenRoom` (used by both
+`getTablesStatus`, what the bar's live table view renders, and
+`checkExistingSeat`, the one-seat-at-a-time guard) reads `rooms` directly
+with a raw `SELECT ... WHERE id = ?` — it never calls through
+`rooms.ts`'s own `loadRoomAfterSweep`, the function that actually applies
+the lazy lobby-disconnect-grace sweep (CLAUDE.md: evaluated fresh on
+every read). So a lobby whose players have all gone stale past
+`LOBBY_GRACE_MS`, but which nobody has *read* via `rooms.getPublicState`
+recently, still reports through `getTablesStatus` as "waiting, N/4" —
+stale data nobody has swept yet. The *first* thing that actually reads
+through `rooms.ts` properly is the join attempt itself
+(`tables.joinTableRoom` → `rooms.joinRoom` → `loadOpenRoom` →
+`loadRoomAfterSweep`), which runs the real sweep right then, discovers
+everyone's gone, closes the room, and only *then* refuses with
+`room_closed` — exactly matching the reported "显示有人,加入却说房间已
+关闭". Fix: `tables.ts` stops reading `rooms` directly and goes through
+`rooms.getPublicState(db, code)` instead (which already runs the sweep
+and returns sanitized, display-ready data) for both `getTablesStatus` and
+`checkExistingSeat` — one fewer bespoke read path, not an extra special
+case.
+
+## Decisions (resolving ambiguity in the brief; real rule changes still get asked about)
+
+- **Identity recovery fix, mechanism**: the bar's own session-authenticated
+  responses (`join`/`rejoin`/`appearance`) report the *current* bar
+  identity's own active seat, freshly re-validated every time
+  (`activeSeat: {tableId, roomCode} | null`), reusing the exact
+  "checkExistingSeat"-style validation already in `tables.ts` — never a
+  client-trusted cache. A brand-new character's first `join` response has
+  no prior table pointer at all, so `activeSeat` is `null` by
+  construction — "new character doesn't inherit old game" falls out of
+  the data model, not a special case bolted on. `public/tavern.js`'s
+  "Return to your game" button is driven by this field exclusively; the
+  global `vegas:lastRoom` key is left alone for the classic flow's own,
+  separate, already-correct use, not touched or repurposed.
+- **Leave/exit states — four, not one "disconnected" bucket**, each with
+  its own server-checked condition, recorded in CLAUDE.md once built:
+  1. **Refresh / brief reconnect** — heartbeat resumes within seconds;
+     never a leave of any kind, exactly as today.
+  2. **Away from table (not away from the bar)** — explicitly returning to
+     the bar view, or standing up from a seat, while a game is bound to
+     that table. Starts a **2-minute** grace *on that table binding*,
+     independent of `LOBBY_GRACE_MS` (which governs the *lobby seat*,
+     pre-start) and independent of dice/turn timing (idle-but-present
+     during your own turn is not an away-from-table event at all — this
+     clock starts on leaving the physical table, not on inactivity).
+     Sitting back down within the window resumes the existing binding
+     exactly; past it, auto-exit fires per whichever of 3/4 below applies
+     to the room's current phase.
+  3. **Explicit "Exit game"** — immediate, same tick, no grace: releases a
+     lobby seat outright (pre-start; existing `leaveRoom`), or, once
+     started, hands the seat to NPC control (4 below) — never silently
+     drops dice, skips a settlement, or stalls the turn order.
+  4. **True disconnect** — heartbeat itself stops (closed tab, crashed
+     device, killed process), detected the same lazy, read-time way as
+     always (CLAUDE.md), *not* a new timer. Pre-start, this already means
+     the existing `LOBBY_GRACE_MS` sweep. Mid-game, this is new: the
+     existing "no auto-removal once started" policy is kept (a game in
+     progress still never force-ends on a human's account), but **phase
+     4's NPC takeover** is what now runs in its place once a started
+     game's seat has been away long enough — the dice/turn/winnings in
+     that seat survive, the departed human simply stops being the one
+     deciding what it does next. The exact takeover threshold for an
+     already-started game reuses the same 2-minute away-from-table clock
+     above (standing up from, or never returning to, the game seat), not
+     a separate timer.
+  A seat's physical table binding is the thing with a lifecycle here —
+  the *lobby* seat and the *game* seat remain the same underlying `Player`
+  row throughout (per the existing room model); nothing about
+  `rooms`/`sessions`/`presence`/`events`' shape changes to express any of
+  this (CLAUDE.md's bar/room separation rule) — the away-from-table clock
+  lives in a new, bar-side-adjacent table, not inside `rooms.state_json`.
+- **NPC capacity and readiness**: an NPC occupies a real seat
+  (`Player.controller: "npc"`, counted toward `MAX_PLAYERS = 4` exactly
+  like a human), is always `ready: true` by construction (never has a
+  `sessions` row, so nothing can toggle it — the same "no session, no
+  authenticated action" mechanism every other server check already
+  depends on makes this free), and is added/removed only by the host,
+  only pre-start. The turn engine (`src/game.ts`) needs **zero** changes
+  for this: `applyRoll`/`applyPlacement` already operate on a bare
+  `playerId` with no concept of who's driving it — an NPC's turn is the
+  exact same function call as a human's, just initiated by a short
+  server-side scheduler (phase 4) instead of an authenticated POST,
+  choosing among **already-rolled** values only (never reads deck order,
+  never bends a rule `applyPlacement` wouldn't already enforce for a
+  human).
+- **NPC turn scheduling, bounded like the presence ticker, not a global
+  cron**: a short interval, scoped to rooms with an open SSE subscriber
+  (reusing `live.subscribedRoomCodes()`, the same mechanism Crit 9 phase
+  7 built for presence) — an NPC-only game with nobody watching simply
+  pauses, exactly like presence detection already does, and resumes the
+  moment the room is read again. No new unconditional background timer.
+- **Approval model**: a join *request* gets a real `playerId`/
+  `sessionSecret` immediately (so a requester can watch the same public
+  room stream everyone else does and know their own request's fate by
+  id) but is **not** added to `state.players` and **does not** count
+  toward `MAX_PLAYERS` until the host approves it — approval re-runs the
+  exact capacity/color checks `joinRoom` already runs, inside the same
+  version-gated transaction, so approving two requests for the last seat
+  (or the same color) races exactly like two simultaneous `join` calls
+  already do today (deterministic, one wins) rather than needing new
+  conflict-resolution logic. A rejected or cancelled request is simply
+  removed from the pending list; its `sessions` row is deleted so a
+  stale id can't later be mistaken for anything live.
+- **Physical seats are furniture-adjacent, not new furniture**: dining
+  chairs and bar stools get their own `bar_seats` rows (id, kind, x, y,
+  `occupied_by`), seeded once from `barLayout.ts` exactly like `tables`
+  already is (CLAUDE.md: furniture is fixed, seeded once). A game table's
+  four chairs are **not** separate `bar_seats` rows — "sitting" at a game
+  table *is* already being seat-index 0-3 in that room's own player
+  roster; the chairs are a rendering of existing room state, not a new
+  occupancy concept, avoiding a second source of truth for "who's at this
+  table."
+- **Scope held firm**: no ordering/eating/drinking this round (`src/
+  orders.ts` stays untouched and disconnected); Texas/Dominoes/Blackjack
+  get real fixtures in both the online and NPC rows, clearly "not yet
+  open," never a clickable fake game.
+
+## Data model (additive)
+
+```sql
+-- Phase 2: real seats, separate from tables.ts's game-table concept —
+-- see "Physical seats are furniture-adjacent" above for why a game
+-- table's 4 chairs are NOT rows here.
+CREATE TABLE bar_seats (
+  id TEXT PRIMARY KEY,           -- e.g. "dining-a-1".."dining-a-4", "stool-1"
+  furniture_id TEXT NOT NULL,    -- which dining_table/stool fixture this belongs to
+  x INTEGER NOT NULL, y INTEGER NOT NULL,  -- the walk-up tile, not the fixture tile
+  occupied_by TEXT               -- bar_players.id; NULL = free
+);
+
+-- Phase 2: the 2-minute away-from-table clock. One row per bar identity
+-- currently bound to a table, separate from bar_presence (heartbeat) and
+-- from rooms.state_json (CLAUDE.md: don't blur bar/room, don't put a
+-- frequently-changing clock inside the versioned game blob).
+CREATE TABLE table_departures (
+  bar_player_id TEXT PRIMARY KEY,
+  table_id TEXT NOT NULL,
+  left_at TEXT NOT NULL          -- when they left the physical table (view/seat), not a heartbeat time
+);
+```
+
+```ts
+// Phase 3, additive field on the existing Player shape (src/types.ts) —
+// a pending request is NOT a Player; see RoomState.pendingRequests below.
+interface Player {
+  // ...existing fields...
+  controller: "human" | "npc"; // defaults "human"; npc is add-NPC (phase 4) or post-start takeover (phase 1's lifecycle, enforced once phase 4 exists)
+}
+
+// Phase 3, new top-level field on RoomState/PublicState — lobby-only,
+// cleared (not carried into) an awaiting_roll/round_end phase.
+interface PendingRequest {
+  id: string;        // == the request's own playerId once/if approved
+  nickname: string;
+  color: Color;
+  requestedAt: string;
+}
+```
+
+## Phased implementation order (the student's own, confirmed)
+
+1. Identity-recovery entry point, room-expiry consistency, and the
+   leave/exit lifecycle *definitions* (this section's two bug fixes,
+   `table_departures`, CLAUDE.md's new state table — not yet NPC
+   takeover itself, which needs phase 4's engine to hand a seat to).
+2. Real seats (dining/stool/game-chair sitting and standing) + the
+   2-minute away-from-table grace enforced for real.
+3. Online-table join approval.
+4. Vegas NPC tables, server-scheduled legal turns, and (now that an NPC
+   engine exists) wiring phase 1's "exit after start → NPC takeover" to
+   actually hand the seat to it.
+5. Nine-table layout (two labelled rows) and real "not yet open" fixtures
+   for the NPC-row's Texas/Dominoes/Blackjack slots and the online row's
+   same three.
+
+Each phase: implement → regression tests (new behavior + the two bugs
+above) → `pnpm check` green → deploy → live re-verification → only then
+the next phase, matching every earlier Crit 9 phase's own discipline.
+`crit-8` tag untouched throughout; no `crit-9` tag, no `/ship`.
+`reflections/crit-9.md` and the README/PROCESS.md rewrite remain the
+student's own, not drafted here.
+
