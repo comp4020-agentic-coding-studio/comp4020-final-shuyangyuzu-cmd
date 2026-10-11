@@ -1,6 +1,7 @@
 import { JSDOM } from 'jsdom';
 import { expect, it, vi } from 'vitest';
-// @ts-expect-error The plain browser module has no TypeScript declarations.
+// allowJs (tsconfig.json) lets this import the real browser module
+// directly now — no declaration-file workaround needed.
 import { bindDirectionHold } from '../public/tavern.js';
 
 function setup() {

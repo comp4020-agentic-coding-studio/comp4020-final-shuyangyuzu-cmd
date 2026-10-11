@@ -19,14 +19,73 @@ import * as tables from "./tables.ts";
 import type { Color, PublicState } from "./types.ts";
 import { BUILD_VERSION, renderIndexHtml } from "./version.ts";
 
+// Every outgoing room payload carries `epoch` (SERVER_EPOCH, constant for
+// this process) and `rev` (this room's own push-revision, src/live.ts) in
+// addition to the existing `version` (the DB's optimistic-concurrency
+// column, still reused by game actions for idempotency — unaffected).
+// `rev` is the client's staleness gate from here on, not `version`: see
+// src/live.ts's header for why a heartbeat or presence timeout bumping
+// `version` would be wrong (it would make an unrelated roll/place race
+// against it), and PLAN.md's Crit 9 phase 7 entry for the independent
+// review that caught this.
+type LivePublicState = PublicState & live.LiveCursor;
+
+function withLiveCursor(state: PublicState, rev: number): LivePublicState {
+  return { ...state, epoch: live.SERVER_EPOCH, rev };
+}
+
+/** A plain read of a room's current public state — a GET, a rejoin, or
+ * the snapshot sent when an SSE connection first opens. Reports the
+ * *current* rev; reading never bumps it (only an actual broadcast-worthy
+ * change does — see publishRoomState and tickRoomPresence below). */
+function currentRoomState(code: string): LivePublicState {
+  return withLiveCursor(rooms.getPublicState(db, code), live.currentRoomRev(code));
+}
+
+/** The slice of a room's public state that can change from presence
+ * (connected flags) or the lazy disconnect-grace sweep (closed,
+ * hostPlayerId, who's still seated) alone, with no real mutation and no
+ * `version` bump — what tickRoomPresence diffs against the last thing
+ * actually broadcast to decide whether there's anything new to push. */
+function roomPresenceSignature(state: PublicState): string {
+  return JSON.stringify({
+    closed: state.closed,
+    hostPlayerId: state.hostPlayerId,
+    players: state.players.map((p) => ({ id: p.id, connected: p.connected })),
+  });
+}
+const lastRoomPresenceSignature = new Map<string, string>();
+
 // A room mutation's own fresh public state, pushed to that room's SSE
 // subscribers right after it commits — the same JSON this route is about
-// to return to the actor, just also broadcast. A room's existing
-// `version` column (already in PublicState) is the staleness sequence
-// for this channel; nothing new needed here.
-function publishRoomState(code: string, state: PublicState): PublicState {
-  live.publishRoom(code, state);
-  return state;
+// to return to the actor, just also broadcast.
+function publishRoomState(code: string, state: PublicState): LivePublicState {
+  const withCursor = withLiveCursor(state, live.bumpRoomRev(code));
+  lastRoomPresenceSignature.set(code, roomPresenceSignature(withCursor));
+  live.publishRoom(code, withCursor);
+  return withCursor;
+}
+
+/** Re-checks a room's presence-derived public view (this is the existing
+ * lazy sweep/connected computation in rooms.getPublicState — not a new
+ * mutation path, just an extra caller of the same read) and broadcasts
+ * only if it actually changed since the last thing this channel
+ * broadcast. Called right after a heartbeat (so "they're back" reaches
+ * everyone else immediately) and by the presence ticker below (so "they
+ * went quiet" reaches everyone else without anyone having to click
+ * anything — CLAUDE.md's Crit 9 phase 7 entry). The first check for a
+ * room (no prior signature recorded) seeds the baseline without
+ * publishing, so a brand-new SSE subscriber doesn't get a redundant
+ * duplicate push on the very next tick. */
+function tickRoomPresence(code: string): void {
+  const state = rooms.getPublicState(db, code);
+  const signature = roomPresenceSignature(state);
+  if (!lastRoomPresenceSignature.has(code)) {
+    lastRoomPresenceSignature.set(code, signature);
+    return;
+  }
+  if (lastRoomPresenceSignature.get(code) === signature) return;
+  publishRoomState(code, state);
 }
 
 // Combined bar + table-occupancy snapshot — one payload, one sequence
@@ -35,10 +94,17 @@ function publishRoomState(code: string, state: PublicState): PublicState {
 // staleness sequence (see src/live.ts); passing it in rather than reading
 // it internally keeps "did this call actually mutate anything" (bump) and
 // "just report the current number" (read) visibly distinct at each call
-// site below.
-function barSnapshot(seq: number): { seq: number; players: bar.PublicBarPlayer[]; tables: tables.TableStatusView[] } {
-  return { seq, players: bar.getPublicBarState(db).players, tables: tables.getTablesStatus(db) };
+// site below. `epoch` is this process's own SERVER_EPOCH — see the room
+// comment above and src/live.ts's header for why a raw seq alone isn't
+// enough across a restart.
+function barSnapshot(seq: number): { epoch: number; seq: number; players: bar.PublicBarPlayer[]; tables: tables.TableStatusView[] } {
+  return { epoch: live.SERVER_EPOCH, seq, players: bar.getPublicBarState(db).players, tables: tables.getTablesStatus(db) };
 }
+
+function barPresenceSignature(snap: { players: bar.PublicBarPlayer[]; tables: tables.TableStatusView[] }): string {
+  return JSON.stringify(snap.players) + "|" + JSON.stringify(snap.tables);
+}
+let lastBarPresenceSignature: string | null = null;
 
 // Broadcasts the bar channel after a mutation. Called after every
 // room-mutating endpoint too (not just bar/table ones): a room's phase
@@ -49,8 +115,34 @@ function barSnapshot(seq: number): { seq: number; players: bar.PublicBarPlayer[]
 // bucket" without adding that coupling. Trades a little precision for
 // not adding it — negligible cost at this app's scale.
 function publishBarSnapshot(): void {
-  live.publishBar(barSnapshot(live.bumpBarSeq()));
+  const snap = barSnapshot(live.bumpBarSeq());
+  lastBarPresenceSignature = barPresenceSignature(snap);
+  live.publishBar(snap);
 }
+
+/** Same idea as tickRoomPresence, for the bar's single channel: a patron
+ * going stale (or coming back) changes who getPublicBarState's filter
+ * returns, with no mutation and no seq bump of its own — this is what
+ * notices that and republishes only when the visible set actually
+ * changed. */
+function tickBarPresence(): void {
+  const snap = barSnapshot(live.currentBarSeq());
+  const signature = barPresenceSignature(snap);
+  if (lastBarPresenceSignature === null) {
+    lastBarPresenceSignature = signature;
+    return;
+  }
+  if (lastBarPresenceSignature === signature) return;
+  publishBarSnapshot();
+}
+
+// How often the presence ticker below re-checks already-watched channels
+// for a purely time-driven change (nobody's heartbeat landing, nobody
+// taking any action). Env-overridable for the same reason
+// PRESENCE_STALE_MS/LOBBY_GRACE_MS already are (src/presence.ts): a
+// dedicated short-interval instance can verify this without waiting out
+// the production default for real in an automated check.
+const LIVE_PRESENCE_TICK_MS = Number(process.env.LIVE_PRESENCE_TICK_MS ?? 1000);
 
 const db = openDb(dbPathFromEnv());
 const app = new Hono();
@@ -136,12 +228,17 @@ app.post("/api/rooms/:code/rejoin", async (c) => {
   const code = c.req.param("code");
   const body = (await c.req.json().catch(() => ({}))) as AuthedBody;
   rooms.rejoin(db, code, playerId(body), sessionSecret(body));
-  return c.json(rooms.getPublicState(db, code));
+  // The sweep that rejoin() already ran can itself change the presence
+  // signature (e.g. this read finally pushes a since-stale player's
+  // removal past the point every other viewer last saw) — recheck before
+  // answering, not just on the next unrelated mutation or tick.
+  tickRoomPresence(code);
+  return c.json(currentRoomState(code));
 });
 
 app.get("/api/rooms/:code/state", (c) => {
   const code = c.req.param("code");
-  return c.json(rooms.getPublicState(db, code));
+  return c.json(currentRoomState(code));
 });
 
 app.post("/api/rooms/:code/start", async (c) => {
@@ -176,8 +273,13 @@ app.post("/api/rooms/:code/heartbeat", async (c) => {
   const code = c.req.param("code");
   const body = (await c.req.json().catch(() => ({}))) as AuthedBody;
   rooms.heartbeat(db, code, playerId(body), sessionSecret(body));
-  // Deliberately minimal — a heartbeat fires every few seconds per
-  // player; it doesn't need to carry the full room state back each time.
+  // Deliberately minimal response — a heartbeat fires every few seconds
+  // per player; it doesn't need to carry the full room state back each
+  // time. But this heartbeat can be exactly what flips someone's own
+  // `connected` flag back to true for everyone else watching, so recheck
+  // and push if so — immediate "they're back", not just on the next
+  // ticker pass (see tickRoomPresence above).
+  tickRoomPresence(code);
   return c.json({ ok: true });
 });
 
@@ -253,8 +355,11 @@ app.post("/api/bar/join", async (c) => {
 app.post("/api/bar/rejoin", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody;
   bar.rejoinBar(db, barPlayerId(body), barSessionSecret(body));
-  // A rejoin is re-authentication + a heartbeat, not a state change —
-  // reports the current seq, doesn't bump or broadcast one.
+  // A rejoin is re-authentication + a heartbeat — it can be exactly what
+  // makes this patron visible again to everyone else, so recheck and push
+  // if so (tickBarPresence's own diff decides whether anything actually
+  // changed; this call itself never bumps seq just for being asked).
+  tickBarPresence();
   return c.json(barSnapshot(live.currentBarSeq()));
 });
 
@@ -269,6 +374,10 @@ app.post("/api/bar/appearance", async (c) => {
 app.post("/api/bar/heartbeat", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody;
   bar.barHeartbeat(db, barPlayerId(body), barSessionSecret(body));
+  // Same reasoning as the room heartbeat above: this is exactly the
+  // moment a stale patron can become visible again, so recheck and push
+  // immediately rather than waiting for the ticker's next pass.
+  tickBarPresence();
   return c.json({ ok: true });
 });
 
@@ -317,7 +426,7 @@ app.get("/api/rooms/:code/events", (c) => {
   // the same app.onError as every other route, same RoomError shape
   // (e.g. a nonexistent code still answers 404 room_not_found, not a
   // silently-empty stream).
-  const initial = rooms.getPublicState(db, code);
+  const initial = currentRoomState(code);
   return streamSSE(c, async (stream) => {
     const send = (data: string) => {
       stream.writeSSE({ data }).catch(() => {});
@@ -358,6 +467,34 @@ app.get("/api/bar/events", (c) => {
     unsubscribe();
   });
 });
+
+// Presence can change a room's or the bar's publicly-visible state with
+// no mutating action at all — a heartbeat simply stopping, or a lobby
+// seat finally going past its disconnect grace. Nothing calls an endpoint
+// when that happens, so nothing would otherwise trigger a push: an open
+// SSE viewer would only find out on someone else's next unrelated action,
+// or the 10s client-side fallback poll (Crit 9 phase 7's independent
+// review, problem 2 — see PLAN.md). This re-checks every *currently
+// watched* channel (never an unwatched one — live.subscribedRoomCodes /
+// hasBarSubscribers do nothing when nobody's connected) on a short
+// interval, and only actually republishes when tickRoomPresence /
+// tickBarPresence's own diff finds a real change — not a blind push every
+// tick.
+//
+// This does not reintroduce the background-sweep timer CLAUDE.md rules
+// out for the lobby disconnect grace: that grace condition is still
+// evaluated lazily, as "now minus last heartbeat", by the exact same
+// rooms.getPublicState call a GET already makes. This loop is just an
+// extra caller of that same read, bounded to rooms someone is actually
+// watching live — not a new mutation path, and genuinely idle (no DB
+// work at all) whenever nobody's connected to either channel, which is
+// what keeps it compatible with Fly's auto_stop_machines: an asleep
+// machine has no open SSE connections, so every iteration of this loop is
+// a no-op until something wakes it up the normal way (a real request).
+setInterval(() => {
+  if (live.hasBarSubscribers()) tickBarPresence();
+  for (const code of live.subscribedRoomCodes()) tickRoomPresence(code);
+}, LIVE_PRESENCE_TICK_MS);
 
 // No `index` option — "/" is handled explicitly above (it needs
 // templating, not a raw file serve); this just serves app.js, styles.css,

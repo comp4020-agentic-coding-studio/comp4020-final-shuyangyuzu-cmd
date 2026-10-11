@@ -8,6 +8,13 @@
     // Imports name the file they mean, extension and all --- which is what
     // node itself wants when it runs a .ts file directly.
     "allowImportingTsExtensions": true,
+    // Lets spec/clientLiveSync.test.ts import public/liveSync.js directly
+    // (the real browser file, not a restatement of it) without a
+    // separate .d.ts sidecar. Doesn't pull public/app.js or
+    // public/tavern.js into typechecking — neither is TS, and nothing in
+    // `include` imports them — this only affects .js files something
+    // included actually imports.
+    "allowJs": true,
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "types": ["node"],
     "strict": true,

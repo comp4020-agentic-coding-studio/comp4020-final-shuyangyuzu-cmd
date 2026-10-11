@@ -25,7 +25,7 @@ export function bindDirectionHold(button, { onPress, onRelease, onTap }) {
     win.removeEventListener('blur', release); button.ownerDocument.removeEventListener('visibilitychange', hidden);
   };
 }
-export function createTavern({ el, render, navigate, buildClassicPanel, lastActiveRoom, saveSession }) {
+export function createTavern({ el, render, navigate, buildClassicPanel, lastActiveRoom, saveSession, shouldApplyLiveUpdate }) {
   const colors = { red:'#c85e59', blue:'#6485bc', green:'#629e86', yellow:'#ddba65', purple:'#997cb5', teal:'#66b5b0', orange:'#cf8858', pink:'#cd88a3' };
   const skins = { fair:'#f3d7b6', warm:'#dcb58a', tan:'#ba875f', brown:'#906044', deep:'#614437' };
   let dispose = () => {};
@@ -55,16 +55,22 @@ export function createTavern({ el, render, navigate, buildClassicPanel, lastActi
     let active=true, session=null, state={players:[],tables:[]}, mine=null, camera={x:0,y:0}, path=[], moving=false, frame=0;
     let keys=new Set(), lastTime=0, destination=null, cameraInitialized=false, movementEpoch=0, heldDirection=null;
     // Crit 9: live updates arrive over SSE, not a fixed poll interval —
-    // see CLAUDE.md. `lastSeq` is this channel's staleness gate (every
-    // incoming payload — a push, a fallback fetch, a mutation's own
-    // response — goes through applyIncoming, which discards anything not
-    // strictly newer). `pendingMoveTarget` is the narrow exception: while
-    // this patron's own step is in flight, an update that predates it
-    // must not visually snap the local avatar back to its pre-move tile —
-    // every *other* player's position and the live table list still
-    // apply immediately regardless (continuous walking must not block
-    // receiving others' updates).
-    let lastSeq=-1, eventSource=null, pendingMoveTarget=null, visibilityHandler=null;
+    // see CLAUDE.md. `liveCursor` is this channel's staleness-gate
+    // baseline (`{epoch, seq}`, or `null` before the first payload is
+    // ever applied); every incoming payload — a push, a fallback fetch, a
+    // mutation's own response — goes through applyIncoming, which defers
+    // the actual accept/reject decision to the shared
+    // `shouldApplyLiveUpdate` (public/liveSync.js, passed in from
+    // app.js — the same function tavern.js's room-view sibling uses, not
+    // a separately hand-written copy; a Crit 9 phase 7 review pointed out
+    // two copies passing the same manual trace isn't the guarantee one
+    // shared function actually is). `pendingMoveTarget` is the narrow
+    // exception: while this patron's own step is in flight, an update
+    // that predates it must not visually snap the local avatar back to
+    // its pre-move tile — every *other* player's position and the live
+    // table list still apply immediately regardless (continuous walking
+    // must not block receiving others' updates).
+    let liveCursor=null, eventSource=null, pendingMoveTarget=null, visibilityHandler=null;
     const holdCleanups=[];
     dispose=()=>{
       active=false;holdCleanups.forEach(cleanup=>cleanup());document.body.classList.remove('world-mode');
@@ -122,14 +128,20 @@ export function createTavern({ el, render, navigate, buildClassicPanel, lastActi
       if(pendingMoveTarget&&mine)mine={...mine,x:pendingMoveTarget.x,y:pendingMoveTarget.y};
       online.textContent=`${state.players.length} here`;
     }
-    // The one staleness rule for this channel (same principle as the
-    // game room's own `version` check, CLAUDE.md): a payload only applies
-    // if it's strictly newer than the last one actually rendered. This
-    // alone handles a late-arriving stale response, a reconnect after a
-    // drop (a fresh fetch's seq is always >= anything missed), and two
-    // near-simultaneous updates racing each other.
+    // The staleness rule for this channel: public/liveSync.js's
+    // shouldApplyLiveUpdate, shared with app.js (see this file's own doc
+    // comment for the full contract). A late-arriving stale response and
+    // two near-simultaneous updates racing each other are handled by the
+    // plain seq comparison, same as before; the epoch check is what
+    // additionally survives a real server restart mid-session (seq alone
+    // can't — a restarted process's seq legitimately restarts at 0,
+    // which a bare "incoming<=lastSeq" rule would reject forever).
     function applyIncoming(next){
-      if(typeof next.seq==='number'){if(next.seq<=lastSeq)return;lastSeq=next.seq;}
+      if(typeof next.epoch==='number'&&typeof next.seq==='number'){
+        const incoming={epoch:next.epoch,seq:next.seq};
+        if(!shouldApplyLiveUpdate(liveCursor,incoming))return;
+        liveCursor=incoming;
+      }
       reconcile(next);
     }
     async function fetchAndApply(){if(!session)return;try{applyIncoming(await read('/state'));}catch(e){toast.textContent='Connection interrupted — retrying…';}}

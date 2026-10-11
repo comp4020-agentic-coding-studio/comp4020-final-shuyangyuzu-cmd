@@ -1457,3 +1457,263 @@ rewrite these in their voice, and not to draft `reflections/crit-9.md` on
 their behalf. The specific proposed facts/arguments were given directly
 in this session's final report rather than written into the repo.
 
+## Crit 9 implementation — phase 7: an independent review found two real bugs in phase 2-6's own design
+
+A second agent was asked to independently re-verify phases 2-6 before the
+crit. The 96-test suite, the ~3-6ms production propagation numbers, the
+last-seat race result, and production/local `tavern.js` parity all held
+up — but the review went further than re-running what was already
+measured, and found two real gaps in the *design*, not the measurements,
+neither caught by the original verification because neither needs a
+real restart or presence expiry to show up, and the original work never
+produced either.
+
+### Problem 1: a server restart makes the bar (and, less obviously, any
+### SSE-watching room) permanently reject every subsequent update
+
+**Reproduction, done before any fix existed**: with a client holding
+`lastSeq = 202` from before a restart, a freshly-restarted process
+reporting `seq = 0, 1, 2, ...`, running the *original* `applyIncoming`
+(`next.seq <= lastSeq` discard) against those post-restart payloads
+rejects every one of them. Not a one-off race — permanent, until ~203
+more real mutations happened to accumulate on the new process, which in
+practice never happens while a page sits open after a quiet restart. The
+file's own prior claim that "`onopen` forces a fresh fetch, so reconnect
+recovers" does not fix this: the fresh fetch still returns the new
+process's own low seq, and still goes through the identical filter.
+
+**Root cause**: `src/live.ts`'s `barSeq` (and, after this phase, every
+room's `rev`) is an in-memory counter with no concept of "which process
+generation produced this number." A bare high-water-mark filter can't
+tell "this is older than what I've seen" apart from "this is from a
+different counter that started over."
+
+**Fix**: `src/live.ts` now exports `SERVER_EPOCH` (`Date.now()` at module
+load — process-wide, constant for the process's lifetime) and a pure,
+unit-tested `shouldApplyLiveUpdate(current, incoming)`:
+- no baseline yet → apply;
+- a strictly newer epoch → apply unconditionally, and reset the rev/seq
+  baseline to match (a restarted process's own numbering starts over,
+  legitimately, and must not be read as "behind");
+- a strictly older epoch → never apply, even arriving after a newer one
+  already landed (a late response from, or a queued SSE frame on a
+  connection to, a process that's since died must not regress a view
+  that already moved on to its replacement);
+- same epoch → the original strictly-greater-rev/seq rule, unchanged.
+
+Every room and bar payload now carries `epoch` alongside its `rev`/`seq`
+(`src/server.ts`'s `withLiveCursor`/`barSnapshot`). `public/app.js` and
+`public/tavern.js`'s own `apply`/`applyIncoming` implement the identical
+two-tier check client-side (both point back at `shouldApplyLiveUpdate`'s
+doc comment as the canonical contract, so the three copies can't quietly
+drift apart unnoticed).
+
+This also required separating a room's *push-revision* from
+`rooms.version` outright (not just renaming it) — see problem 2's fix
+below for why; `src/live.ts`'s own header comment and `CLAUDE.md`'s
+"Real-time push" section record the reasoning in full, including the
+correction to this file's own prior, now-false claim about reconnect
+being sufficient on its own.
+
+**Automated regression test**: `spec/liveSync.test.ts` — six cases
+against `shouldApplyLiveUpdate` directly, including the exact repro
+numbers above (`rev 202` pre-restart, `rev 0` post-restart, under a newer
+epoch, must apply) and the "late response from a superseded epoch must
+never regress" case. A true kill-and-restart-mid-session check (what the
+bug actually looks like end-to-end) can't run inside the shared,
+always-up `pnpm test` server — see this file's "real, manual" entry
+further down for that.
+
+### Problem 2: presence changes (connected/online flipping) never reached an already-open viewer
+
+**Reproduction, done before any fix existed**: with `PRESENCE_STALE_MS`
+turned down to 300ms on an isolated instance, (a) a bar patron who
+stopped heartbeating disappeared from a plain `GET /api/bar/state` read,
+but an already-open `GET /api/bar/events` connection kept showing them
+indefinitely — nothing had bumped `seq` or broadcast anything, because
+no mutating action had happened; (b) the same gap for a game room's
+`connected` flag against `GET /api/rooms/:code/state` vs. an open
+`/events` connection, and for the lobby's own disconnect-grace sweep
+(which, before this phase, only ever ran as a side effect of some read —
+and with no poll left calling that read, nothing triggered it either).
+The existing 10s client-side fallback poll doesn't rescue this: it calls
+the exact same endpoint, gated by the exact same filter, so it only
+helps once *something else* has already bumped the sequence number for
+an unrelated reason.
+
+**Root cause**: `connected` (and the lobby sweep's own
+removal/host-transfer/close) are computed fresh on every *read*
+(`rooms.getPublicState`, `bar.getPublicBarState`) — correct and
+unchanged — but nothing was watching for *time itself* changing that
+computed result and broadcasting the difference. A heartbeat simply
+stopping isn't a request to any endpoint; there's nothing to hook a
+publish onto.
+
+**Fix, deliberately not a version/seq bump on every heartbeat**: writing
+every heartbeat into `rooms.version` would reintroduce exactly the
+problem CLAUDE.md's presence design already rules out — a heartbeat
+racing a real roll/place over the same optimistic-concurrency counter.
+Instead:
+- A room's push-revision (`rev`, `src/live.ts`'s `roomViewSeq`) is its
+  *own* counter, independent of `rooms.version` entirely — see problem
+  1's fix above. Bumping it for a presence-only change costs nothing a
+  real game action depends on.
+- `src/server.ts` computes a `roomPresenceSignature`/`barPresenceSignature`
+  (the parts of the public view that presence alone can change: `closed`,
+  `hostPlayerId`, and each player's `id`+`connected` for a room; the
+  visible player list and tables for the bar) and keeps the last one
+  actually broadcast per channel. `tickRoomPresence`/`tickBarPresence`
+  recompute it and republish only on an actual diff — never a blind bump.
+- A short interval (`LIVE_PRESENCE_TICK_MS`, default 1000ms,
+  env-overridable like `PRESENCE_STALE_MS`/`LOBBY_GRACE_MS` already are)
+  calls these for every room/bar channel with a live SSE subscriber right
+  now (`live.subscribedRoomCodes()`/`live.hasBarSubscribers()`) — never
+  an unwatched one. The same heartbeat endpoints also call the tick
+  immediately, so reappearing is instant rather than waiting for the next
+  interval.
+- This is **not** a new background-mutation sweep of the kind CLAUDE.md
+  rules out for the lobby grace period: the grace condition is still
+  evaluated lazily, by the same read a GET already makes; this loop is
+  only an additional caller of that read, scoped to channels someone is
+  actually watching, and does nothing (no DB access at all) while nobody
+  is connected — consistent with `auto_stop_machines` (see CLAUDE.md's
+  updated "lobby disconnect grace" section for the full reasoning).
+
+**Automated regression test**: two real, slow (`pnpm test` already makes
+this trade-off for `spec/settlement.test.ts`'s own 24-round timing) tests
+in `spec/live.test.ts`, run concurrently (`it.concurrent`) against the
+real, unmodified production `PRESENCE_STALE_MS` default — no shortened
+threshold, no mocked time. Each opens a real SSE connection, takes no
+further action at all, and waits past the real staleness threshold:
+- a room with two players: the initial push shows both `connected: true`;
+  a later push (no action from anyone) shows at least one `connected: false`.
+- a bar patron: present in the initial push; absent from a later one.
+
+Both passed. Also added: every room/bar payload now carries a numeric
+`epoch`, identical across a plain read and the SSE channel in the same
+process; a heartbeat that changes nobody's state doesn't bump a room's
+`rev` (checked for rooms, which get an isolated per-code counter; not
+meaningfully checkable for the bar's single global `seq` under this
+suite's own cross-file concurrency — see the comment left in its place in
+`spec/live.test.ts`).
+
+### A follow-up review of this phase's own fix: epoch comparison needed to be checked, not just asserted
+
+Before any of the above was trusted, the follow-up review asked a sharp
+question directly: does `shouldApplyLiveUpdate` only accept a newer epoch
+because it compares `incoming.epoch > current.epoch`, or could a careless
+reading of "different epoch" (`!==`) have slipped in, which would wrongly
+accept a **late, older**-epoch response as if it were new? And separately:
+passing `spec/liveSync.test.ts` (a pure function) was never, on its own,
+proof that `public/app.js` and `public/tavern.js` — two independently
+hand-written copies of the same logic — actually agreed with it or with
+each other.
+
+**Checked, not assumed**: `src/live.ts`'s actual comparison was already
+`incoming.epoch > current.epoch`, not a bare `!==` — correct on inspection.
+But the second point was real: the two client files *did* each carry
+their own separately-typed-out version of the same two-tier check, with
+no test ever importing either one directly. Fixed by removing the
+duplication rather than re-arguing it was fine by hand: **`public/
+liveSync.js`** is now the one client-side implementation of
+`shouldApplyLiveUpdate`, imported once by `app.js` (dynamically, with the
+same `?v=` cache-busting convention already used for `tavern.js`) and
+threaded into `tavern.js` through `createTavern`'s existing options-object
+pattern (alongside `el`/`render`/`navigate`/etc.) — `tavern.js` no longer
+defines its own copy at all. `src/version.ts`'s content hash now includes
+this file too (`spec/caching.test.ts`'s own independent hash computation
+needed the same update — caught immediately by that test failing when it
+wasn't, which is exactly what that test is for). `tsconfig.json` gained
+`allowJs: true` so `spec/clientLiveSync.test.ts` can import the real
+`public/liveSync.js` file directly (no DOM needed — it's a pure function)
+rather than a `.d.ts` stand-in; this also let `spec/direction-hold.test.ts`
+drop a now-redundant `@ts-expect-error` it had carried since Crit 9 phase
+4 for the same reason.
+
+**New regression tests, run as one continuous sequence, not as separately
+-true facts** (both `spec/liveSync.test.ts`, the server-side pure
+function, and `spec/clientLiveSync.test.ts`, importing the actual
+`public/liveSync.js` browser file):
+1. accept epoch A, rev 202 (the review's own repro numbers);
+2. accept epoch B, rev 0 (the restart);
+3. a **late** response from epoch A — arriving *after* B was already
+   accepted, carrying a rev far higher than anything B has produced —
+   must still be rejected, and must leave the cursor at B, unchanged;
+4. B's own next legitimate update must keep applying normally (the
+   rejection in step 3 must not wedge the gate).
+
+Plus a direct test of the exact wrong-implementation shape named above:
+`shouldApplyLiveUpdate({epoch:2000,...}, {epoch:1000,...})` must be
+`false` (an older epoch arriving late) while
+`shouldApplyLiveUpdate({epoch:2000,...}, {epoch:3000,...})` must be `true`
+(a genuinely newer one) — proving the comparison is directional, not a
+bare inequality.
+
+112/112 tests green (`pnpm test`, fresh `DATA_DIR`, run twice), `pnpm
+typecheck` and `pnpm check:evidence` both clean, after this round of
+fixes.
+
+### Real, manual verification (not run inside `pnpm check` — see each
+### task's own reasoning above for why)
+
+Run by a second agent, independently, against throwaway `DATA_DIR`s and
+ports outside the repo's own `./data` — never the repo's real data,
+never a process this agent didn't itself start, nothing left running
+afterward (verified free).
+
+**Restart recovery, with a page left open the entire time, never
+reloaded.** Server #1 up; a baseline pre-restart cross-browser update
+(a second patron joining via direct HTTP, observed on the first patron's
+open page) landed in 4ms, confirming the page was genuinely live before
+touching anything. Server #1 killed; server #2 started against the
+**same** `DATA_DIR` and port, logging "listening" 1257ms later. With the
+Playwright page never reloaded or touched during any of this, a third
+patron's join (POSTed directly, after server #2 was confirmed up) reached
+that still-open page in **2291ms**, measured from the join request
+resolving to the page's own DOM first showing the new count (polled every
+150ms — a deliberately coarse, conservative measurement, not a tight
+timestamp-the-exact-render claim). The same check for a game room (a
+second player joining a room whose lobby was left open across the
+restart): **2139ms**. Both numbers are dominated by `EventSource`'s own
+browser-side reconnect backoff, not application logic — the actual fix
+(the epoch check) is what makes the reconnect's own fetch/push *succeed*
+once it happens, rather than being silently rejected forever the way the
+pre-fix code would have been. This is the direct end-to-end confirmation
+of the bug this phase exists to fix: under the original seq-only gate,
+neither of these would ever have recovered without a page reload.
+
+**Presence push with no action taken, dedicated short-threshold
+instance.** First attempt used `PRESENCE_STALE_MS=1500`, shorter than the
+client's own hardcoded 5-second heartbeat loop — the verifying agent
+caught this itself (via a raw SSE log showing the viewer's own presence
+cycling on its own 5s cadence, confounding the measurement) before
+reporting a number, and redid it with `PRESENCE_STALE_MS=7000` (above the
+client heartbeat) and `LIVE_PRESENCE_TICK_MS=300`:
+- bar patron B disappeared from an open viewer's page **7298ms** after
+  B's last heartbeat (model predicts ~7000-7300ms — matches);
+- B reappeared **19ms** after one heartbeat POST for B;
+- a game room's `connected` flag flipped to disconnected on an open
+  lobby page **7116ms** after that player's last heartbeat (matches the
+  same model);
+- reconnected **11ms** after one heartbeat POST.
+
+All four match `PRESENCE_STALE_MS + LIVE_PRESENCE_TICK_MS`, and
+reappearance is near-instant via the heartbeat-triggered immediate
+recheck (not waiting for the next ticker pass) — exactly as designed, not
+rounded up from something looser.
+
+**Regression smoke** (all pass, kept brief since 112/112 automated tests
+already cover the mechanics): a second patron's join during 500ms+ of
+continuous simulated movement still reached the moving patron's own page;
+a direction-hold button pressed/held 700ms/released produced no console
+errors; ready/start gating unchanged (409 with nobody ready, 409 with
+only one of two ready, 200 once both are).
+
+**What this still is not**: the direction-hold check above is simulated
+pointer events in an automated browser, not a finger on a real
+touchscreen — CLAUDE.md's own standing caveat on this, repeated here
+rather than silently dropped. Production verification (deploy, live
+curl/SSE checks, a matching build hash) is recorded separately once
+this phase is actually pushed and deployed, not assumed from the local
+result above.
+

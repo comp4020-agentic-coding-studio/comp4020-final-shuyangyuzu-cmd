@@ -91,27 +91,78 @@ authenticated POST, checked exactly as it was before this transport
 existed; the push channel just broadcasts what that request's own
 transaction already committed, to everyone else who's watching.
 
-Staleness is resolved by a monotonic sequence number, not arrival order:
-a game room reuses its existing `version` column (the same optimistic-
-concurrency counter idempotency already depends on); the bar — which has
-no single versioned row, since its state is many independently-updated
-player rows — gets its own in-memory counter in `src/live.ts`. Every
-receiver (a stream push, a mutating action's own response, a fallback
-poll, a post-reconnect fetch) goes through the same rule: apply a payload
-only if its sequence number is strictly greater than the last one
-actually applied, otherwise discard it. This is what keeps a late-
-arriving stale response, or two near-simultaneous updates racing each
-other, from ever regressing what's on screen — the same principle as the
-version check above, just extended to a channel the client didn't
-explicitly request.
+Staleness is resolved by a monotonic sequence number, not arrival order —
+but **not** the game room's `rooms.version` column. An earlier version of
+this file said a room channel reused `version` directly; an independent
+review (Crit 9 phase 7) corrected that: `version` is also idempotency's
+own optimistic-concurrency counter, and a presence-only change (a
+`connected` flag flipping, a lobby seat finally swept — see the next
+section) must never bump it, or it would make an unrelated roll/place
+race against a heartbeat. Each channel instead has its own push-revision,
+scoped separately from any DB column, both living in `src/live.ts`: a
+room gets its own in-memory `rev` per room code (`currentRoomRev`/
+`bumpRoomRev`); the bar — which has no single versioned row at all, since
+its state is many independently-updated player rows — gets a single
+`seq` the same way it always has. `version` is still present in a room's
+public payload (game actions still use it internally for their own
+optimistic-concurrency write), but a client's own staleness gate reads
+`rev`, never `version`.
+
+Every receiver (a stream push, a mutating action's own response, a
+fallback poll, a post-reconnect fetch) goes through the same rule: apply
+a payload only if it's strictly newer than the last one actually
+applied, otherwise discard it — see `shouldApplyLiveUpdate` in
+`src/live.ts` for the exact, unit-tested contract both clients implement
+identically. This is what keeps a late-arriving stale response, or two
+near-simultaneous updates racing each other, from ever regressing what's
+on screen, **within one server generation**.
+
+**Across a restart, a sequence number alone is not enough — this was a
+real bug, not a hypothetical.** Every counter above is in-memory and
+resets to 0 when the process restarts; a browser tab that kept a page
+open across that restart still holds whatever high-water `rev`/`seq` it
+last saw. A bare "incoming <= last-seen, discard" rule then rejects
+*every* payload the restarted process ever sends — a fresh fetch forced
+by reconnecting doesn't help, because that fresh fetch still carries the
+new process's own low number and still goes through the exact same
+filter. (An earlier version of this file claimed the reconnect-forced
+fetch alone made recovery work; an independent review reproduced the
+rejection directly and found that claim false — see PLAN.md's Crit 9
+phase 7 entry for the repro.) The fix: `src/live.ts` exports a
+`SERVER_EPOCH`, set once when the process starts, carried in every
+payload alongside its `rev`/`seq`. A client tracks `(epoch, rev)` as one
+cursor: a strictly newer epoch always wins and resets the `rev` baseline
+unconditionally (a restarted process's rev legitimately restarts at 0);
+a strictly older epoch never wins, even arriving after a newer one was
+already applied (a late response from, or a queued frame on a connection
+to, a process that's since died); within the same epoch, the original
+strictly-newer-wins rule applies unchanged.
 
 A dropped connection is never trusted to have delivered everything that
 happened while it was down. `EventSource`'s own `onopen` (which fires on
 the initial connect *and* every automatic reconnect) and a
 `visibilitychange`/`focus` handler both force one unconditional fresh
-fetch of the current state — a resumed session's correctness depends on
-asking the server what's true now, never on replaying whatever the
-stream happens to send next.
+fetch of the current state — this resyncs anything missed *within* a
+server generation; surviving an actual restart is the epoch mechanism
+above, not this fetch on its own.
+
+There is no separate "connection id" or "request generation" concept
+beyond `(epoch, rev/seq)` — a follow-up review asked this directly, since
+`incoming.epoch !== current.epoch` alone says nothing about *direction*
+and a careless implementation of that shape would wrongly accept a late,
+*older*-epoch arrival as if it were newer. The actual rule compares
+`incoming.epoch > current.epoch` explicitly, never a bare inequality; see
+`shouldApplyLiveUpdate`'s doc comment in `src/live.ts` (and the identical
+`public/liveSync.js`, the one client-side copy both `app.js` and
+`tavern.js` call — not two independently hand-written gates, after a
+review pointed out that two copies individually matching the same test
+suite isn't the same guarantee as one shared implementation). Within one
+epoch, the server's own `rev`/`seq` is already a total order over every
+mutation and presence tick in that generation, independent of which
+specific `EventSource` connection or HTTP request happened to deliver a
+given payload — there is nothing an extra per-connection identifier would
+catch that the plain sequence comparison doesn't already catch on its
+own.
 
 ## Presence: heartbeat, not unload
 
@@ -147,6 +198,33 @@ that has already started keeps its original disconnect-tolerant policy
 unchanged: no auto-removal, no auto-skip, ever — ties are between a
 *lobby* seat being held or released and a *round in progress* never
 losing a player, and the two must not be allowed to blur together.
+
+**A lazily-evaluated condition still needs something to push it to an
+already-open viewer.** The grace period's condition itself stays exactly
+as described above — "now minus last heartbeat", recomputed fresh on
+every read, never cached, never swept by a background mutation timer.
+But Crit 9's SSE push (see the section above) meant a viewer could be
+sitting on an already-open connection with nobody ever calling an
+endpoint again: nobody heartbeats, nobody acts, so nothing was left to
+*notice* the condition had become true and broadcast it — an independent
+review caught this directly (reproducing both a `connected` flag never
+flipping to false on an open page, and a swept lobby seat never reaching
+one, with `PRESENCE_STALE_MS` turned down for the repro). The fix is a
+short interval in `src/server.ts` that, only for a room or the bar
+channel someone currently has open (`live.subscribedRoomCodes()` /
+`live.hasBarSubscribers()` — never an unwatched one), re-runs the exact
+same `rooms.getPublicState` read a GET already makes, diffs the
+presence-derived slice of it against the last thing actually broadcast,
+and republishes only on an actual change. This is not a new background
+*mutation* sweep: it never does anything a direct read wouldn't already
+have decided to do on its own, it touches the DB only for a channel with
+a live viewer, and it does nothing at all while nobody's connected —
+which is what keeps it compatible with Fly's `auto_stop_machines` (an
+asleep machine has no open SSE connections, so the interval's own check
+is a no-op until a real request wakes it the normal way). The same
+heartbeat endpoint that refreshes someone's own presence also triggers
+one immediate recheck, so "they're back" reaches everyone else right
+away rather than waiting for the next tick.
 
 ## Ready-gating is a server check, not a disabled button
 

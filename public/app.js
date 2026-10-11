@@ -13,6 +13,11 @@
 
 const assetVersion = new URL(document.querySelector('script[type="module"]').src).searchParams.get('v');
 const { createTavern } = await import(`./tavern.js?v=${assetVersion}`);
+// The one client-side staleness-gate implementation, shared with
+// tavern.js (passed through to it below) rather than each view keeping
+// its own hand-written copy — see public/liveSync.js's own doc comment
+// for why (Crit 9 phase 7's independent review).
+const { shouldApplyLiveUpdate } = await import(`./liveSync.js?v=${assetVersion}`);
 const COLORS = ["red", "blue", "green", "yellow"];
 const HEARTBEAT_MS = 5000; // comfortably under the server's default PRESENCE_STALE_MS (15s)
 // Cheap insurance only, not the primary path (Crit 9: live updates come
@@ -431,7 +436,17 @@ function enterRoom(code, session) {
 let eventSource = null;
 let fallbackPollHandle = null;
 let heartbeatHandle = null;
-let lastVersion = -1;
+// The staleness gate's baseline, as a single `{epoch, seq}` cursor (or
+// `null` before the first payload is ever applied) — see
+// public/liveSync.js's shouldApplyLiveUpdate for the actual decision
+// logic (shared with tavern.js, and mirroring src/live.ts's own copy
+// exactly). A strictly-newer epoch resets this baseline unconditionally,
+// which is what lets this tab keep receiving updates across a real
+// server restart without a page reload (an independent review found a
+// version-only gate would reject every post-restart payload forever,
+// since a restarted process's sequence legitimately restarts at 0 — see
+// PLAN.md's Crit 9 phase 7).
+let liveCursor = null;
 let visibilityHandler = null;
 // Set by startLive to its own staleness-gated apply function, so an
 // action handler (ready/start/roll/place/...) can hand its own request's
@@ -455,7 +470,7 @@ function stopLive() {
     window.removeEventListener("focus", visibilityHandler);
     visibilityHandler = null;
   }
-  lastVersion = -1;
+  liveCursor = null;
   applyIncoming = () => {};
   refreshNow = () => {};
 }
@@ -481,15 +496,25 @@ function startLive(code, session, initialState) {
   stopLive();
 
   function apply(state) {
-    // The one staleness rule, used for every source of state below
-    // (the stream, a fallback fetch, and an action's own response): a
-    // payload only ever applies if it's strictly newer than the last one
-    // this view actually rendered. This is what keeps a late-arriving
-    // stale response (or two near-simultaneous updates racing each
-    // other) from ever rendering something older than what's already
-    // on screen.
-    if (state.version <= lastVersion) return;
-    lastVersion = state.version;
+    // The one staleness rule, used for every source of state below (the
+    // stream, a fallback fetch, and an action's own response) —
+    // public/liveSync.js's shouldApplyLiveUpdate, the single
+    // implementation shared with tavern.js and mirroring src/live.ts's
+    // own copy exactly (see that function's doc comment for the full
+    // contract: a newer epoch always wins and resets the baseline, an
+    // older epoch never wins even arriving late, same-epoch falls back
+    // to strictly-newer-rev). Deliberately gated on `rev`, not
+    // `state.version` (the DB's own optimistic-concurrency column) —
+    // `rev` is this channel's own push-revision, bumped for a
+    // presence-only change too (a `connected` flag flipping, a lobby
+    // seat finally swept) that never touches `version` at all (CLAUDE.md:
+    // a heartbeat must never race a real game action over the same
+    // counter).
+    if (typeof state.epoch === "number" && typeof state.rev === "number") {
+      const incoming = { epoch: state.epoch, seq: state.rev };
+      if (!shouldApplyLiveUpdate(liveCursor, incoming)) return;
+      liveCursor = incoming;
+    }
 
     const stillSeated = state.players.some((p) => p.id === session.playerId);
     if (!state.closed && !stillSeated) {
@@ -531,9 +556,13 @@ function startLive(code, session, initialState) {
     };
     // Fires on the initial connect *and* on every automatic reconnect —
     // either way, do one unconditional fresh fetch rather than trust
-    // that nothing was missed while the connection was down (a fresh
-    // read's version is always >= anything missed, so this always wins
-    // the staleness gate above when it matters).
+    // that nothing was missed while the connection was down. Note this
+    // fresh fetch is *not* on its own what makes a post-restart recovery
+    // work (an earlier version of this comment claimed that) — it still
+    // goes through the same epoch/rev gate above, which is what actually
+    // lets a lower post-restart rev back in. This fetch's job is purely
+    // the ordinary "catch up on anything missed while disconnected"
+    // case, within a single server generation.
     es.onopen = () => {
       fetchAndApply();
     };
@@ -838,5 +867,5 @@ function turnControls(code, session, state, isMyTurn) {
 
 // ---- Boot -------------------------------------------------------------
 
-const tavern = createTavern({ el, render, navigate, buildClassicPanel, lastActiveRoom, saveSession });
+const tavern = createTavern({ el, render, navigate, buildClassicPanel, lastActiveRoom, saveSession, shouldApplyLiveUpdate });
 route();
