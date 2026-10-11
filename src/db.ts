@@ -7,6 +7,7 @@ import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { BAR_SEATS, GAME_TABLES } from "./barLayout.ts";
+import type { RoomState } from "./types.ts";
 
 export function openDb(path: string): Database.Database {
   mkdirSync(dirname(path), { recursive: true });
@@ -126,6 +127,33 @@ function migrate(db: Database.Database): void {
   // player row they became when they sat at a table — what makes "one
   // table at a time" actually checkable server-side (src/tables.ts).
   addColumnIfMissing(db, "bar_players", "current_game_player_id", "TEXT");
+  migrateRoomState(db);
+}
+
+/** Columns and JSON payloads both survive deployments. Rooms created
+ * before approval/NPC support lack these fields, including closed rooms
+ * that returning identities still resolve. Add only missing defaults;
+ * preserve game progress, sessions, events, and action versions. */
+function migrateRoomState(db: Database.Database): void {
+  db.transaction(() => {
+    const rows = db.prepare("SELECT id, state_json FROM rooms").all() as Array<{ id: string; state_json: string }>;
+    const update = db.prepare("UPDATE rooms SET state_json = ? WHERE id = ?");
+    for (const row of rows) {
+      const state: RoomState = JSON.parse(row.state_json);
+      let changed = false;
+      if (state.pendingRequests == null) {
+        state.pendingRequests = [];
+        changed = true;
+      }
+      for (const player of Object.values(state.players ?? {})) {
+        if (player.controller == null) {
+          player.controller = "human";
+          changed = true;
+        }
+      }
+      if (changed) update.run(JSON.stringify(state), row.id);
+    }
+  })();
 }
 
 /** The 6 game-table slots are fixed furniture (src/barLayout.ts) —

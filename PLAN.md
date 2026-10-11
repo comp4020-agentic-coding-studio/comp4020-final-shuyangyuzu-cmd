@@ -2582,5 +2582,29 @@ working as designed, not a bug, since a plain HTTP-polling script is not
 a subscriber); watched (a real `EventSource`-equivalent fetch stream held
 open exactly as a real client's `connectEvents()` would), the engine
 correctly rolled and placed for all three NPC seats in turn order and
-returned control to the human, live against the production server. 等待用户验收.
+ returned control to the human, live against the production server. 等待用户验收.
 
+
+## Production entry regression — legacy room JSON (2026-10-12)
+
+The user reported being unable to enter. The agent reproduced it in the
+production browser: reconnect displayed "Unable to reconnect. Reload to
+retry", and submitting the character editor displayed "something went
+wrong". Fly logs identified `TypeError: state.pendingRequests is not
+iterable` in `rooms.toPublicState`, reached through `getActiveSeat` on
+bar rejoin/appearance. Persisted rooms from before approval support had
+no `pendingRequests`; players from before NPC support also lacked
+`controller`. Column migrations did not migrate these JSON payloads.
+
+`src/db.ts` now transactionally adds missing JSON defaults on startup,
+including closed rooms. It preserves existing requests/controllers,
+room versions, session proofs, event history, and game progress. This
+is a persistence migration, not a reset or an ignored exception.
+
+`spec/room-state-migration.test.ts` reproduces the pre-migration failure,
+then verifies returning identity/seat recovery, room rejoin, consistent
+table status, closed-room binding cleanup, and repeated startup without
+altering started-game progress or existing NPC/request data. Typecheck
+and all 169 tests passed against a fresh isolated server on port 8093;
+`pnpm check:evidence` passed. Production browser verification follows
+publication; the user's own acceptance remains separate.
