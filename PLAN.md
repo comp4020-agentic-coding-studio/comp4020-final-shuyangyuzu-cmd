@@ -1712,8 +1712,43 @@ only one of two ready, 200 once both are).
 **What this still is not**: the direction-hold check above is simulated
 pointer events in an automated browser, not a finger on a real
 touchscreen — CLAUDE.md's own standing caveat on this, repeated here
-rather than silently dropped. Production verification (deploy, live
-curl/SSE checks, a matching build hash) is recorded separately once
-this phase is actually pushed and deployed, not assumed from the local
-result above.
+rather than silently dropped. No restart check was run against production
+(explicitly avoided, per the student's own instruction not to restart the
+live server other real players may be using) — the restart evidence above
+is entirely from the dedicated local/throwaway instances.
+
+### Deployed and verified live
+
+Pushed (commit `e246cc6`); CI's `check` and `deploy` jobs both passed
+(`gh run view` — 1m8s/1m13s). Production verification done directly
+against `https://comp4020-final-shuyangyuzu-cmd.fly.dev`, not inferred
+from CI alone:
+- `/version` reports `7309c89f17`, matching a SHA-256 of the actual local
+  `app.js`+`styles.css`+`tavern.js`+`liveSync.js` bytes computed
+  independently right before checking — the same cross-check
+  `spec/caching.test.ts` already runs locally, repeated here against the
+  live deploy specifically.
+- `GET /api/bar/state` and `GET /api/bar/events` both carry a real,
+  numeric `epoch` (the deployed process's own boot timestamp), confirming
+  the new field is actually wired in production, not just locally.
+- A throwaway probe room (`ProbeHost`, created and disbanded by this
+  verification alone — never touching the two real in-progress tables
+  already on production from the student's own prior use, confirmed
+  untouched) exercised a real mutation against the live SSE channel: a
+  `ready` POST, with an open `GET /api/rooms/:code/events` connection
+  already watching, delivered the updated `ready: true` state in **203ms**
+  measured end-to-end from this verification script's own process (POST
+  request sent → SSE push received) — this number is **not** a clean
+  "server commit to client" interval the way the phase 3/4 Playwright
+  measurements were; it includes this script's own network RTT to Fly's
+  `syd` region and is reported as the one real number actually measured,
+  not rounded down to imply something more precise than what was
+  measured. The probe room was disbanded immediately after
+  (`disband` → 200), leaving no stray state. No restart was performed
+  against production.
+- Repo stays public (unchanged from Crit 8); no `/ship` run, no `crit-9`
+  tag created, `crit-8` tag unchanged at `a706408`.
+
+This is the agent's own (and, for the live verification, a second agent's
+own) automated re-verification — not the student's own check. 等待用户验收.
 
