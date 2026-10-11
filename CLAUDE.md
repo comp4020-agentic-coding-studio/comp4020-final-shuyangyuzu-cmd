@@ -226,6 +226,54 @@ heartbeat endpoint that refreshes someone's own presence also triggers
 one immediate recheck, so "they're back" reaches everyone else right
 away rather than waiting for the next tick.
 
+## Four leave/exit states, not one "disconnected" bucket
+
+A patron's relationship to a table they're bound to is one of four
+states, each with its own server-checked condition — found necessary
+after a reported bug where "Return to your game" and a stale table status
+both blurred these together (see PLAN.md's product-direction-update
+entry for the two concrete bugs this caused and their fixes):
+
+1. **Refresh / brief reconnect.** The heartbeat resumes within seconds.
+   Never treated as a leave of any kind — unchanged from the original
+   presence design above.
+2. **Away from the table (not away from the bar).** Explicitly returning
+   to the bar view, or standing up from a physical seat, while a game is
+   still bound to that table. Starts a **2-minute** grace scoped to that
+   *table binding* specifically — independent of `LOBBY_GRACE_MS` (which
+   governs the lobby *seat*, pre-start) and independent of how long a
+   player takes on their own turn (idle-but-present during your own turn
+   is not an away-from-table event — this clock starts on physically
+   leaving the table, not on inactivity). Returning within the window
+   resumes the exact same binding; past it, the departure is treated as
+   state 3 or 4 below, whichever the room's current phase calls for.
+3. **Explicit "Exit game."** Immediate, same tick, no grace. Pre-start,
+   this releases the lobby seat outright (the existing `leaveRoom`).
+   Once a game has started, it must never silently drop dice, skip a
+   settlement, or stall the turn order — the seat is hard-exited by the
+   human but kept alive under NPC control instead (see "A departed
+   human's started-game seat...” below).
+4. **True disconnect.** The heartbeat itself stops (closed tab, crashed
+   device, killed process) — detected the same lazy, read-time way as
+   always, never a new background timer. Pre-start, this is the existing
+   `LOBBY_GRACE_MS` sweep. Once a game has started, the existing policy
+   stands: a game in progress never force-ends on a human's account. What
+   happens to that seat once it's been away long enough is the *same*
+   2-minute away-from-table clock from state 2 — there is no separate,
+   second timer for "truly gone" versus "walked away and never came
+   back"; both end up at the identical threshold and the identical
+   outcome.
+
+**A departed human's started-game seat is handed to NPC control, never
+deleted.** Once a seat crosses into state 3 (post-start) or state 4's
+2-minute threshold, its existing dice, winnings, and position in the turn
+order are kept exactly as they were; the seat's `controller` flips from
+`"human"` to `"npc"` and the original player's session simply stops being
+consulted for it from then on — there is no path back. This is what makes
+state 3/4 safe to apply to a game already in progress without violating
+"never deletes dice, skips a settlement, or stalls a turn": the seat
+keeps playing, just not under that person's control anymore.
+
 ## Ready-gating is a server check, not a disabled button
 
 `startGame` itself verifies every player is both `ready` and currently

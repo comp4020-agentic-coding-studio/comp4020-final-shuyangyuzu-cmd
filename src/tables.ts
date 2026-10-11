@@ -17,7 +17,7 @@ import { requireBarSession } from "./bar.ts";
 import { GAME_TABLES } from "./barLayout.ts";
 import { RoomError } from "./rooms.ts";
 import * as rooms from "./rooms.ts";
-import type { Color, RoomState } from "./types.ts";
+import type { Color, PublicState } from "./types.ts";
 
 export class TableError extends Error {
   readonly code: string;
@@ -42,28 +42,40 @@ export interface TableStatusView {
   takenColors: string[];
 }
 
-function phaseToStatus(phase: RoomState["phase"]): "waiting" | "in_progress" | "finished" {
+function phaseToStatus(phase: PublicState["phase"]): "waiting" | "in_progress" | "finished" {
   if (phase === "lobby") return "waiting";
   if (phase === "round_end") return "finished";
   return "in_progress";
 }
 
 interface OpenRoom {
-  id: string;
   code: string;
-  state: RoomState;
+  state: PublicState;
 }
 
 /** Null unless roomId points at a room that still exists and isn't
  * closed — the single place "is this room actually still live" is
- * decided, so every caller below gets the same answer. */
+ * decided, so every caller below gets the same answer.
+ *
+ * Deliberately goes through rooms.getPublicState rather than a raw
+ * `SELECT ... FROM rooms` — an independent review found the raw read
+ * this used to do bypassed rooms.ts's own lazy lobby-disconnect-grace
+ * sweep (loadRoomAfterSweep), so a lobby whose players had all gone
+ * stale, but which nobody had read via rooms.ts recently, kept reporting
+ * through getTablesStatus as "waiting, N/4" until the *join attempt
+ * itself* finally triggered the real sweep, closed the room, and only
+ * then refused — "shows someone present, joining says closed" (see
+ * PLAN.md's product-direction-update entry). Routing every read here
+ * through the same sweep-applying function every other room read already
+ * uses removes the second, inconsistent code path instead of adding a
+ * special case for it. */
 function lookupOpenRoom(db: Database.Database, roomId: string | null): OpenRoom | null {
   if (!roomId) return null;
-  const room = db.prepare(`SELECT id, code, closed_at, state_json FROM rooms WHERE id = ?`).get(roomId) as
-    | { id: string; code: string; closed_at: string | null; state_json: string }
-    | undefined;
-  if (!room || room.closed_at) return null;
-  return { id: room.id, code: room.code, state: JSON.parse(room.state_json) };
+  const row = db.prepare(`SELECT code FROM rooms WHERE id = ?`).get(roomId) as { code: string } | undefined;
+  if (!row) return null; // rooms are never deleted (CLAUDE.md); this would mean a stale id from elsewhere
+  const state = rooms.getPublicState(db, row.code);
+  if (state.closed) return null;
+  return { code: row.code, state };
 }
 
 export function getTablesStatus(db: Database.Database): TableStatusView[] {
@@ -104,7 +116,7 @@ export function getTablesStatus(db: Database.Database): TableStatusView[] {
         takenColors: [],
       };
     }
-    const players = Object.values(open.state.players);
+    const players = open.state.players; // already an array — PublicState, not RoomState
     return {
       id: t.id,
       gameType: t.gameType!,
@@ -123,20 +135,24 @@ interface BarPlayerLinkage {
   current_game_player_id: string | null;
 }
 
-/** Three-way answer, resolved once so every caller sees the same thing:
- * - `{ seatedHere: result }` — genuinely still seated at *this* table;
- *   the caller should hand back the existing seat, not create/join
- *   again (which would otherwise mint a second, duplicate player row
- *   for the same patron in the same room).
- * - throws — genuinely seated at a *different* open table.
- * - returns `null` — free to proceed; if the stored pointer was stale
- *   (room closed, or left via the room's own /leave without this
- *   pointer ever being told), it's cleared here, not left dangling. */
-function checkExistingSeat(
-  db: Database.Database,
-  barPlayerId: string,
-  tableId: string,
-): { code: string; playerId: string; sessionSecret: string } | null {
+interface ActiveSeat {
+  tableId: string;
+  code: string;
+  playerId: string;
+  sessionSecret: string;
+}
+
+/** Resolves and re-validates a bar identity's own currently-bound table
+ * seat, if any — the one place this check happens, shared by
+ * checkExistingSeat below (which adds the "seated elsewhere" refusal on
+ * top) and by getActiveSeat (exported for src/server.ts's bar
+ * join/rejoin/appearance responses, so "Return to your game" is driven by
+ * a live, re-validated answer rather than anything a client stored itself
+ * — see PLAN.md's product-direction-update entry for the bug this
+ * replaces). A stale pointer (room closed, or left via the room's own
+ * /leave without this pointer ever being told) is cleared here, lazily,
+ * rather than left dangling. */
+function resolveActiveSeat(db: Database.Database, barPlayerId: string): ActiveSeat | null {
   const bp = db.prepare(`SELECT current_table_id, current_game_player_id FROM bar_players WHERE id = ?`).get(
     barPlayerId,
   ) as BarPlayerLinkage | undefined;
@@ -147,24 +163,58 @@ function checkExistingSeat(
     | undefined;
   const open = lookupOpenRoom(db, tableRow?.current_room_id ?? null);
   const stillSeated =
-    open !== null && bp.current_game_player_id !== null && open.state.players[bp.current_game_player_id] !== undefined;
+    open !== null &&
+    bp.current_game_player_id !== null &&
+    open.state.players.some((p) => p.id === bp.current_game_player_id);
 
   if (stillSeated) {
-    if (bp.current_table_id !== tableId) {
-      throw new TableError("you're already seated at another table — leave it first", "already_seated", 409);
-    }
     const sessionRow = db.prepare(`SELECT session_secret FROM sessions WHERE player_id = ?`).get(
       bp.current_game_player_id,
     ) as { session_secret: string } | undefined;
     // sessionRow is always present here: creating/joining a room always
     // inserts its sessions row in the same transaction that set this
     // bar_players pointer, and neither is ever deleted independently.
-    return { code: open!.code, playerId: bp.current_game_player_id!, sessionSecret: sessionRow!.session_secret };
+    return {
+      tableId: bp.current_table_id,
+      code: open!.code,
+      playerId: bp.current_game_player_id!,
+      sessionSecret: sessionRow!.session_secret,
+    };
   }
   db.prepare(`UPDATE bar_players SET current_table_id = NULL, current_game_player_id = NULL WHERE id = ?`).run(
     barPlayerId,
   );
   return null;
+}
+
+/** Three-way answer, resolved once so every caller sees the same thing:
+ * - a result — genuinely still seated at *this* table; the caller should
+ *   hand back the existing seat, not create/join again (which would
+ *   otherwise mint a second, duplicate player row for the same patron in
+ *   the same room).
+ * - throws — genuinely seated at a *different* open table.
+ * - returns `null` — free to proceed. */
+function checkExistingSeat(
+  db: Database.Database,
+  barPlayerId: string,
+  tableId: string,
+): { code: string; playerId: string; sessionSecret: string } | null {
+  const seat = resolveActiveSeat(db, barPlayerId);
+  if (!seat) return null;
+  if (seat.tableId !== tableId) {
+    throw new TableError("you're already seated at another table — leave it first", "already_seated", 409);
+  }
+  return { code: seat.code, playerId: seat.playerId, sessionSecret: seat.sessionSecret };
+}
+
+/** The current bar identity's own active table seat, if any —
+ * `{tableId, roomCode}` only, never the room's own session_secret (this
+ * identity already holds that locally from when it first joined that
+ * room; CLAUDE.md forbids a session_secret in any response regardless).
+ * Exported for src/server.ts's bar join/rejoin/appearance responses. */
+export function getActiveSeat(db: Database.Database, barPlayerId: string): { tableId: string; roomCode: string } | null {
+  const seat = resolveActiveSeat(db, barPlayerId);
+  return seat ? { tableId: seat.tableId, roomCode: seat.code } : null;
 }
 
 function getBarNickname(db: Database.Database, barPlayerId: string): string {

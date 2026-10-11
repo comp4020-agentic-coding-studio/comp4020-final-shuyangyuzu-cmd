@@ -1951,11 +1951,15 @@ interface PendingRequest {
 ## Phased implementation order (the student's own, confirmed)
 
 1. Identity-recovery entry point, room-expiry consistency, and the
-   leave/exit lifecycle *definitions* (this section's two bug fixes,
-   `table_departures`, CLAUDE.md's new state table — not yet NPC
-   takeover itself, which needs phase 4's engine to hand a seat to).
-2. Real seats (dining/stool/game-chair sitting and standing) + the
-   2-minute away-from-table grace enforced for real.
+   leave/exit lifecycle *definitions* (this section's two bug fixes, plus
+   an explicit "leave table" action and CLAUDE.md's new state table —
+   not yet the 2-minute away-from-table clock or `table_departures`
+   itself, which need phase 2's seating concept of "stood up from your
+   seat" to even mean anything, and not yet NPC takeover, which needs
+   phase 4's engine to hand a seat to).
+2. Real seats (dining/stool/game-chair sitting and standing) +
+   `table_departures` + the 2-minute away-from-table grace enforced for
+   real.
 3. Online-table join approval.
 4. Vegas NPC tables, server-scheduled legal turns, and (now that an NPC
    engine exists) wiring phase 1's "exit after start → NPC takeover" to
@@ -1970,4 +1974,69 @@ the next phase, matching every earlier Crit 9 phase's own discipline.
 `crit-8` tag untouched throughout; no `crit-9` tag, no `/ship`.
 `reflections/crit-9.md` and the README/PROCESS.md rewrite remain the
 student's own, not drafted here.
+
+## Phase 1 — built: identity-recovery fix, table-expiry-sweep fix, leave/exit state definitions
+
+**Bug 1 fix**: `src/tables.ts` gained `getActiveSeat(db, barPlayerId)`
+(extracted alongside `checkExistingSeat` from a shared, newly-named
+`resolveActiveSeat`, so both go through identical re-validation), returning
+`{tableId, roomCode} | null`. Wired into the bar's own
+`join`/`rejoin`/`appearance` responses (`src/server.ts`) — never into the
+broadcast `barSnapshot` every other subscriber receives, so this stays a
+private, self-only field. `public/tavern.js`'s "Return to your game" now
+reads a dedicated `activeSeat` variable set from these three responses,
+instead of the global `lastActiveRoom()`/`vegas:lastRoom` key — which
+`public/app.js`'s classic flow keeps using, untouched, for its own,
+separate, intentionally browser-scoped (not persona-scoped) "return to
+that room" offer.
+
+**Bug 2 fix**: `src/tables.ts`'s `lookupOpenRoom` now calls
+`rooms.getPublicState(db, code)` (which runs the lazy lobby-disconnect-
+grace sweep) instead of a raw `SELECT * FROM rooms`. `getTablesStatus`
+and `checkExistingSeat`/`resolveActiveSeat` both go through this one
+corrected path — removing the second, inconsistent read instead of
+patching it with a special case.
+
+**CLAUDE.md**: new "Four leave/exit states" section records the
+refresh/away-from-table/explicit-exit/true-disconnect model and the
+"departed human's seat goes to NPC control, never deleted" rule that
+later phases build on — definitions only this phase; the 2-minute
+away-from-table clock and NPC takeover itself need phase 2's seating
+concept and phase 4's NPC engine respectively to mean anything yet.
+
+**Regression tests**: `spec/tables.test.ts` gained 4 new cases (a
+brand-new identity's `activeSeat: null`; a real binding reflected and
+then cleared on disband; a second identity never inheriting the first's
+seat; clearing on voluntary leave) — appended to this file rather than a
+separate one after an early version raced a standalone file against the
+same 3 shared real Vegas tables (vitest's default file-level
+parallelism caught this immediately as a flaky 409, not a test design
+success — fixed by consolidating, not by adding a lock). New
+`spec/tableExpiry.test.ts` reproduces bug 2 directly against hand-built
+databases (`src/db.ts`'s `openDb`, like `spec/db-migration.test.ts`
+already does) with a presence row back-dated well past `LOBBY_GRACE_MS`
+— deterministic and instant, not a real 60-second wait, while still
+exercising the exact fixed code path
+(`getTablesStatus`/`getActiveSeat`/`createTableRoom`) rather than a
+restated copy of its logic.
+
+**Live verification, real browser**: a throwaway Playwright driver
+(reusing the install already set up for Crit 9 phase 7's verification)
+against a local instance: a genuinely-seated identity, after a hard page
+reload (which — by existing, unrelated, pre-phase-1 design — re-shows the
+character editor once per page load even for a returning identity, not a
+bug this phase introduced) and resubmitting that pre-filled form, sees
+"Return to your game" and clicking it lands in the real, correct lobby. A
+second, completely separate browser context (a genuinely new identity, no
+shared storage) never sees it, even while the first identity's game is
+still active — confirmed with both a same-page-reload path and an
+entirely fresh context, the exact "new identity incorrectly inherits a
+previous identity's game" scenario from the bug report. The first version
+of this check used `.world-dpad`'s appearance as its readiness signal and
+reported a false bug (`.world-dpad` renders immediately in `mount()`,
+before `begin()` — which is what actually appends the button — has
+necessarily run); corrected to wait on the online-count text actually
+updating before asserting, and re-verified clean. No restart test needed
+for this phase (not restart-related); `pnpm check` (16 files, 119/119)
+green throughout, run fresh twice.
 

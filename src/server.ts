@@ -349,7 +349,11 @@ app.post("/api/bar/join", async (c) => {
   const result = bar.joinBar(db, asNickname(body), body.color as bar.BarColor, typeof body.skin === "string" ? body.skin : "warm");
   const snap = barSnapshot(live.bumpBarSeq());
   live.publishBar(snap);
-  return c.json(result, 201);
+  // A brand-new bar identity has no prior table binding at all — always
+  // null here, by construction, not a special case. Included anyway so
+  // the client has one uniform contract across join/rejoin/appearance
+  // rather than branching on whether the field is present.
+  return c.json({ ...result, activeSeat: tables.getActiveSeat(db, result.playerId) }, 201);
 });
 
 app.post("/api/bar/rejoin", async (c) => {
@@ -360,7 +364,16 @@ app.post("/api/bar/rejoin", async (c) => {
   // if so (tickBarPresence's own diff decides whether anything actually
   // changed; this call itself never bumps seq just for being asked).
   tickBarPresence();
-  return c.json(barSnapshot(live.currentBarSeq()));
+  // `activeSeat` is this caller's own re-validated table binding (or
+  // null) — attached only to this direct response, never to the
+  // broadcast `barSnapshot` every other subscriber receives (that stays
+  // exactly what it was: public player/table data, nothing identity-
+  // specific). This is what "Return to your game" is driven by
+  // client-side now, instead of a locally-cached room code (PLAN.md's
+  // product-direction-update entry — the bug an independent review and
+  // the student both caught: a new bar character inheriting a stale
+  // previous character's game).
+  return c.json({ ...barSnapshot(live.currentBarSeq()), activeSeat: tables.getActiveSeat(db, barPlayerId(body)) });
 });
 
 app.post("/api/bar/appearance", async (c) => {
@@ -368,7 +381,7 @@ app.post("/api/bar/appearance", async (c) => {
   bar.updateAppearance(db, barPlayerId(body), barSessionSecret(body), asNickname(body), body.color as bar.BarColor, typeof body.skin === "string" ? body.skin : "warm");
   const snap = barSnapshot(live.bumpBarSeq());
   live.publishBar(snap);
-  return c.json(snap);
+  return c.json({ ...snap, activeSeat: tables.getActiveSeat(db, barPlayerId(body)) });
 });
 
 app.post("/api/bar/heartbeat", async (c) => {

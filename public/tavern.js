@@ -25,7 +25,7 @@ export function bindDirectionHold(button, { onPress, onRelease, onTap }) {
     win.removeEventListener('blur', release); button.ownerDocument.removeEventListener('visibilitychange', hidden);
   };
 }
-export function createTavern({ el, render, navigate, buildClassicPanel, lastActiveRoom, saveSession, shouldApplyLiveUpdate }) {
+export function createTavern({ el, render, navigate, buildClassicPanel, saveSession, shouldApplyLiveUpdate }) {
   const colors = { red:'#c85e59', blue:'#6485bc', green:'#629e86', yellow:'#ddba65', purple:'#997cb5', teal:'#66b5b0', orange:'#cf8858', pink:'#cd88a3' };
   const skins = { fair:'#f3d7b6', warm:'#dcb58a', tan:'#ba875f', brown:'#906044', deep:'#614437' };
   let dispose = () => {};
@@ -53,6 +53,16 @@ export function createTavern({ el, render, navigate, buildClassicPanel, lastActi
   async function mount() {
     dispose(); document.body.classList.add('world-mode');
     let active=true, session=null, state={players:[],tables:[]}, mine=null, camera={x:0,y:0}, path=[], moving=false, frame=0;
+    // This identity's own currently-bound table seat, if any —
+    // {tableId, roomCode} or null, re-validated server-side on every
+    // join/rejoin/appearance response (src/tables.ts's getActiveSeat),
+    // never a client-trusted cache. Deliberately NOT part of `session`
+    // (which is persisted to localStorage): a new character's first join
+    // response always carries activeSeat:null, so "Return to your game"
+    // can never leak a *different* character's game the way the old
+    // single global vegas:lastRoom key did (PLAN.md's
+    // product-direction-update entry — the actual reported bug).
+    let activeSeat=null;
     let keys=new Set(), lastTime=0, destination=null, cameraInitialized=false, movementEpoch=0, heldDirection=null;
     // Crit 9: live updates arrive over SSE, not a fixed poll interval —
     // see CLAUDE.md. `liveCursor` is this channel's staleness-gate
@@ -226,7 +236,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, lastActi
       const enter=el('button',{type:'submit',class:'enter-world'},'Step inside  →');
       const form=el('form',{class:'world-dialog avatar-dialog',role:'dialog','aria-label':'Create your character',onsubmit:async e=>{
         e.preventDefault();enter.disabled=true;error.textContent='';
-        try{const appearance={nickname:input.value.trim(),color,skin};if(session){applyIncoming(await post('/appearance',{...session,...appearance}));session={...session,...appearance};}else{session={...await post('/join',appearance),...appearance};}try{localStorage.setItem(sessionKey,JSON.stringify(session));}catch{}overlay.replaceChildren();applyIncoming(await read('/state'));begin();}
+        try{const appearance={nickname:input.value.trim(),color,skin};let resp;if(session){resp=await post('/appearance',{...session,...appearance});applyIncoming(resp);session={...session,...appearance};}else{resp=await post('/join',appearance);session={...resp,...appearance};}activeSeat=resp.activeSeat??null;try{localStorage.setItem(sessionKey,JSON.stringify(session));}catch{}overlay.replaceChildren();applyIncoming(await read('/state'));begin();}
         catch(err){error.textContent=err.message||'Could not enter';enter.disabled=false;}
       }},[
         el('p',{class:'eyebrow'},'THE AMBER ROOM · OPEN ALL EVENING'),el('h1',{},'Come as you are.'),el('p',{class:'dialog-subtitle'},'Make yourself a little character. Your friends are inside.'),
@@ -258,7 +268,10 @@ export function createTavern({ el, render, navigate, buildClassicPanel, lastActi
       };
       document.addEventListener('visibilitychange',visibilityHandler);
       window.addEventListener('focus',visibilityHandler);
-      const last=lastActiveRoom();if(last){hud.querySelector('.hud-actions').appendChild(el('button',{class:'hud-button',onclick:()=>navigate(`/?room=${last}`)},'Return to your game'));}
+      // Driven by the server's own re-validated activeSeat, never a
+      // locally-cached room code — a closed, left, or expired room, or a
+      // different character's game entirely, is never offered here.
+      if(activeSeat){hud.querySelector('.hud-actions').appendChild(el('button',{class:'hud-button',onclick:()=>navigate(`/?room=${activeSeat.roomCode}`)},'Return to your game'));}
       toast.textContent='Welcome in. WASD / arrows to walk · click a destination';canvas.focus();
     }
     const keyDown=e=>{if(['INPUT','TEXTAREA'].includes(e.target.tagName)||overlay.childElementCount)return;const key=e.key.toLowerCase();if(['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright'].includes(key)){e.preventDefault();keys.add(key);path=[];}if(e.key==='Escape'){path=[];destination=null;}};
@@ -394,7 +407,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, lastActi
     frame=requestAnimationFrame(animate);
     dispose=()=>{active=false;cancelAnimationFrame(frame);timers.forEach(clearInterval);holdCleanups.forEach(cleanup=>cleanup());window.removeEventListener('resize',resize);window.removeEventListener('keydown',keyDown);window.removeEventListener('keyup',keyUp);window.removeEventListener('blur',blur);document.body.classList.remove('world-mode');};
     try{session=JSON.parse(localStorage.getItem(sessionKey)||'null');}catch{}
-    if(session){try{applyIncoming(await post('/rejoin',session));if(active){if(enteredThisPage)begin();else chooseCharacter();}}catch(e){if(e.status===403){session=null;localStorage.removeItem(sessionKey);chooseCharacter();}else toast.textContent='Unable to reconnect. Reload to retry.';}}
+    if(session){try{const resp=await post('/rejoin',session);applyIncoming(resp);activeSeat=resp.activeSeat??null;if(active){if(enteredThisPage)begin();else chooseCharacter();}}catch(e){if(e.status===403){session=null;localStorage.removeItem(sessionKey);chooseCharacter();}else toast.textContent='Unable to reconnect. Reload to retry.';}}
     else chooseCharacter();
   }
   return {mount,stop:()=>dispose()};

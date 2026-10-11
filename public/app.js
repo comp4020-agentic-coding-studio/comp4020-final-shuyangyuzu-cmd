@@ -867,5 +867,5 @@ function turnControls(code, session, state, isMyTurn) {
 
 // ---- Boot -------------------------------------------------------------
 
-const tavern = createTavern({ el, render, navigate, buildClassicPanel, lastActiveRoom, saveSession, shouldApplyLiveUpdate });
+const tavern = createTavern({ el, render, navigate, buildClassicPanel, saveSession, shouldApplyLiveUpdate });
 route();

@@ -198,6 +198,62 @@ it("a table also frees up when its last player leaves (not only on explicit disb
   expect(t.status).toBe("empty");
 });
 
+// ---- Product-direction-update (2026-10-11): activeSeat, the fix for
+// "Return to your game" leaking across bar identities. Appended here
+// (not a separate file) because these tests need real Vegas tables, and
+// this file's own header already explains why those can't be shared
+// safely with a concurrently-running file. ----
+
+it("a brand-new bar identity's own join response always reports activeSeat: null", async () => {
+  const patron = await joinBar("Fresh", "red");
+  const res = await postJson("/api/bar/rejoin", patron);
+  expect(res.body.activeSeat).toBeNull();
+});
+
+it("activeSeat reflects a real table binding, and clears again once the room closes — all re-validated server-side, not cached", async () => {
+  const tableId = await anEmptyVegasTable();
+  const patron = await joinBar("Seated", "blue");
+
+  const created = await postJson(`/api/bar/tables/${tableId}/create`, { ...patron, color: "red" });
+  expect(created.status).toBe(201);
+
+  const rejoined = await postJson("/api/bar/rejoin", patron);
+  expect(rejoined.body.activeSeat).toEqual({ tableId, roomCode: created.body.code });
+
+  const appearance = await postJson("/api/bar/appearance", { ...patron, nickname: "Seated", color: "blue", skin: "warm" });
+  expect(appearance.body.activeSeat).toEqual({ tableId, roomCode: created.body.code });
+
+  await postJson(`/api/rooms/${created.body.code}/disband`, { ...created.body, confirm: true });
+
+  const after = await postJson("/api/bar/rejoin", patron);
+  expect(after.body.activeSeat).toBeNull();
+});
+
+it("a second, brand-new bar identity never inherits a different identity's active seat", async () => {
+  const tableId = await anEmptyVegasTable();
+  const first = await joinBar("First", "green");
+  const created = await postJson(`/api/bar/tables/${tableId}/create`, { ...first, color: "red" });
+  expect(created.status).toBe(201);
+
+  const second = await joinBar("SecondAndUnrelated", "yellow");
+  const secondRejoin = await postJson("/api/bar/rejoin", second);
+  expect(secondRejoin.body.activeSeat).toBeNull();
+
+  await postJson(`/api/rooms/${created.body.code}/disband`, { ...created.body, confirm: true });
+});
+
+it("activeSeat clears when the lone player voluntarily leaves (not just on disband)", async () => {
+  const tableId = await anEmptyVegasTable();
+  const patron = await joinBar("Leaver", "purple");
+  const created = await postJson(`/api/bar/tables/${tableId}/create`, { ...patron, color: "red" });
+  expect(created.status).toBe(201);
+
+  await postJson(`/api/rooms/${created.body.code}/leave`, created.body);
+
+  const after = await postJson("/api/bar/rejoin", patron);
+  expect(after.body.activeSeat).toBeNull();
+});
+
 it("refuses an action with a wrong bar session secret", async () => {
   const tableId = await anEmptyVegasTable();
   const patron = await joinBar("Impostee", "blue");
