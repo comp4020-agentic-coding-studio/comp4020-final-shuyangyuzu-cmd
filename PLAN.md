@@ -2340,3 +2340,16 @@ double-execution, restart survival, and the old-session-blocked check),
 restart test and the real end-to-end SSE-observed NPC turn sequence
 above, plus the same-browser-context identity re-verification.
 
+**Deployed and verified live**: pushed (commit `4f543aa`); CI's `check`
+and `deploy` jobs both passed. `/version` on
+`https://comp4020-final-shuyangyuzu-cmd.fly.dev` matches a fresh local
+hash; `POST /api/bar/resume` is live and correctly rejects an
+unauthorized caller, confirming the new endpoint is actually deployed.
+The NPC turn-taking and real-restart demonstrations above were run
+against dedicated local instances with a shortened `AWAY_FROM_TABLE_MS`,
+not production — production's own default is a real 2-minute wait, and
+waiting that out against the live server (rather than a throwaway local
+one) wasn't a good use of it; the mechanism itself is identical code,
+just gated by an env-overridable threshold already established practice
+elsewhere in this project. 等待用户验收.
+
