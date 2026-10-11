@@ -2560,6 +2560,27 @@ spec. Every online table this round starts with only the humans who
 joined/were approved; "play vs. NPCs" is only available via the separate
 solo NPC row.
 
-Not yet done as of this entry: `pnpm check:evidence`, commit/push, CI,
-and production verification (next). 等待用户验收.
+`pnpm check:evidence` green. Committed (`8a6ef6f`), pushed, CI's `checks`
+job passed (run `38165033646`).
+
+**Deployed and verified live**: `/version` on
+`https://comp4020-final-shuyangyuzu-cmd.fly.dev` returns `4c58216b7d`,
+matching the local build exactly (the same hash visible in this phase's
+own local Playwright screenshots). A throwaway probe identity (created,
+never touching the student's own real tables) against production
+confirmed: the real layout response carries 9 game tables (2 online + 1
+NPC playable, 6 reserved); the online `/join` endpoint called against
+`vegas-npc-1` returns `404 table_not_found`, not a success; starting a
+solo game there creates a real room with the correct 1 human + 3 NPC
+roster; the shared `/api/bar/tables` view reports it `empty`/`roomCode:
+null`/`playerCount: 0` throughout. The NPC turn engine was checked twice
+against production, once **without** and once **with** a held-open SSE
+subscription to the room: unwatched, the engine correctly never acted
+(CLAUDE.md's own "only while something's actually watching" rule for the
+scheduler ticker — the first run's apparent non-progress was this rule
+working as designed, not a bug, since a plain HTTP-polling script is not
+a subscriber); watched (a real `EventSource`-equivalent fetch stream held
+open exactly as a real client's `connectEvents()` would), the engine
+correctly rolled and placed for all three NPC seats in turn order and
+returned control to the human, live against the production server. 等待用户验收.
 
