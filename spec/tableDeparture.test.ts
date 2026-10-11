@@ -14,7 +14,7 @@ import { afterEach, beforeEach, expect, it } from "vitest";
 import { BAR_SEATS } from "../src/barLayout.ts";
 import { joinBar, sitAtSeat } from "../src/bar.ts";
 import { openDb } from "../src/db.ts";
-import { getPublicState, heartbeat, rejoin, setReady, startGame } from "../src/rooms.ts";
+import { approveJoin, getPublicState, heartbeat, rejoin, setReady, startGame } from "../src/rooms.ts";
 import {
   createTableRoom,
   departActiveTable,
@@ -175,6 +175,10 @@ it("an expired departure from an in-progress game hands the seat to NPC control 
   const created = createTableRoom(db, "vegas-1", host.playerId, host.sessionSecret, "red");
   const guestBar = joinBar(db, "GameGuest", "pink", "warm");
   const guest = joinTableRoom(db, "vegas-1", guestBar.playerId, guestBar.sessionSecret, "yellow");
+  // joinTableRoom is a *request* now (Crit 9 phase 8's approval
+  // workflow) — approve it to get an actual second seat, unrelated to
+  // what this test is actually about.
+  approveJoin(db, created.code, created.playerId, created.sessionSecret, guest.playerId);
 
   setReady(db, created.code, created.playerId, created.sessionSecret, true);
   setReady(db, created.code, guest.playerId, guest.sessionSecret, true);

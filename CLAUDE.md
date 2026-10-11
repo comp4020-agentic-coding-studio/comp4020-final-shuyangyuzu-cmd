@@ -423,6 +423,31 @@ Enforced server-side on the bar identity, the same way every other rule
 in this file is: starting or joining a different table while already
 seated at an open one is refused outright, not just hidden by the
 client's own UI. Switching tables requires the existing `/leave` first.
+A pending join request (below) counts as "holding" a table for this rule
+exactly the same as an actual seat does — one table at a time means one
+table at a time, whether seated or just waiting to be.
+
+## Joining an online table that already has a host is a request, not a seat
+
+Only the first person to open an *empty* table is seated immediately, as
+its host (product decision, unchanged). Everyone after that submits a
+request (`rooms.requestJoin`) that the host explicitly approves or
+declines from the room's own lobby view — never an automatic seat. A
+pending request gets a real session the moment it's made (so the
+requester can watch the same public room stream everyone else does and
+learn their own request's fate by id), but it is **not** a `Player`:
+it never counts toward `MAX_PLAYERS`, never appears in `turnOrder`, and
+never shows as seated — `rooms.ts` keeps it in its own
+`pendingRequests` list, checked separately everywhere a player list is
+checked. Approval re-runs the exact same capacity and color checks a
+direct join already ran, inside the same version-gated transaction every
+other mutation uses — approving two requests for the last seat (or the
+same color) races exactly like two simultaneous joins already do today:
+deterministic, one wins, the other gets an ordinary refusal. A declined
+or cancelled request's session is deleted outright, not left dangling; an
+abandoned one (nobody acts on it) expires through the same lazy lobby-
+disconnect-grace sweep a stale seat already uses, reusing `LOBBY_GRACE_MS`
+rather than inventing a second threshold.
 
 ## Movement is server-validated; the client may plan a path
 

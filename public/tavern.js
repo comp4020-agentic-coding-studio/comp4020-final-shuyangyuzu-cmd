@@ -223,21 +223,35 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       const taken=new Set(t.takenColors||[]);
       let selected=GAME_COLORS.find(c=>!taken.has(c))||GAME_COLORS[0];
       const error=el('p',{class:'error',role:'alert'});
-      const canAct=t.status==='empty'||t.status==='waiting';
+      const isEmpty=t.status==='empty';
+      const isWaiting=t.status==='waiting';
+      const roomFull=t.playerCount>=4;
+      // Phase 3 (product-direction-update): the first person to open an
+      // empty table is seated immediately as host; everyone after that
+      // submits a request the host approves or declines — never an
+      // immediate seat (CLAUDE.md's leave/exit states section references
+      // this same split). A waiting table that's already full can't even
+      // accept a new request.
+      const canAct=isEmpty||(isWaiting&&!roomFull);
 
-      const swatches=el('div',{class:'avatar-swatches','aria-label':'Table colour'},GAME_COLORS.map(c=>
+      const swatches=el('div',{class:'avatar-swatches','aria-label':'Table colour (seat preview)'},GAME_COLORS.map(c=>
         el('button',{type:'button',class:'avatar-swatch','aria-label':`Colour ${c}`,disabled:taken.has(c),
           'aria-pressed':c===selected?'true':'false',style:`--swatch:${colors[c]}`,
           onclick:e=>{if(taken.has(c))return;selected=c;for(const b of e.currentTarget.parentElement.children)b.setAttribute('aria-pressed','false');e.currentTarget.setAttribute('aria-pressed','true');},
         },'')));
 
-      const statusLine=t.status==='empty'?`${f.label} is empty.`
-        :`${f.label} — ${t.playerCount}/4 ${t.status==='waiting'?'waiting to start':t.status==='in_progress'?'mid-game':'round over'}.`;
-      const subtitle=canAct
-        ? `Joining as ${mine?.nickname??'you'} — just pick a table colour.`
-        : t.status==='in_progress'
-          ? "This table is already playing — ask to be invited, or wait for it to finish."
-          : "This round is over. Whoever's hosting can disband it to free the table.";
+      const statusLine=isEmpty?`${f.label} is empty.`
+        :`${f.label} — ${t.playerCount}/4 ${isWaiting?'waiting to start':t.status==='in_progress'?'mid-game':'round over'}.`;
+      const pendingNote=t.pendingCount>0?` (${t.pendingCount} waiting for the host's approval)`:'';
+      const subtitle=isEmpty
+        ? `Starting as ${mine?.nickname??'you'} — just pick a table colour, and you're the host.`
+        : isWaiting
+          ? (roomFull
+              ? `This table already has its 4 players.${pendingNote}`
+              : `Pick a colour to request a seat — the host approves or declines it.${pendingNote}`)
+          : t.status==='in_progress'
+            ? "This table is already playing — ask to be invited, or wait for it to finish."
+            : "This round is over. Whoever's hosting can disband it to free the table.";
 
       const body=[
         el('button',{class:'dialog-close','aria-label':'Close',onclick:()=>overlay.replaceChildren()},'×'),
@@ -248,7 +262,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         body.push(swatches,error,el('button',{class:'enter-world',onclick:async e=>{
           const btn=e.currentTarget;btn.disabled=true;error.textContent='';
           try{
-            const endpoint=t.status==='empty'?'create':'join';
+            const endpoint=isEmpty?'create':'join';
             const result=await post(`/tables/${f.id}/${endpoint}`,{...session,color:selected});
             try{saveSession(result.code,{playerId:result.playerId,sessionSecret:result.sessionSecret});}catch{}
             // A deliberate, explicit "heading back to this table" action —
@@ -259,7 +273,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
             overlay.replaceChildren();
             navigate(`/?room=${result.code}`);
           }catch(err){error.textContent=err.message||'Could not join that table';btn.disabled=false;}
-        }},t.status==='empty'?'Start a game here':'Join this table'));
+        }},isEmpty?'Start a game here':'Request to join'));
       }
       overlay.replaceChildren(el('section',{class:'world-dialog game-dialog',role:'dialog','aria-label':f.label},body));
     }

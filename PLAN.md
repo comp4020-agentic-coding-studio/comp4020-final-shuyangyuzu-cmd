@@ -2353,3 +2353,100 @@ one) wasn't a good use of it; the mechanism itself is identical code,
 just gated by an env-overridable threshold already established practice
 elsewhere in this project. 等待用户验收.
 
+## Phase 3 — built: online-table join approval
+
+**Data model**: `RoomState`/`PublicState` gain `pendingRequests:
+PendingRequest[]` (`{id, nickname, color, requestedAt}` — `id` doubles as
+the eventual player id if approved). Not a new table: this is lobby-only,
+closely tied to a room's own version-gated state exactly like `players`
+already is, so it lives in the same JSON blob rather than inventing a
+parallel storage layer. No new seat-assignment rule: approval uses the
+same join-order seat index every direct join already used (see the
+"fixed color-to-seat" note below for why this is a deliberate,
+conservative reading of the brief rather than a silent rule change).
+
+**`src/rooms.ts`**: `requestJoin` (creates a real session + a
+`PendingRequest`, re-validating capacity/color for early, honest
+feedback — not the authoritative check), `approveJoin`/`rejectJoin`
+(host-only, re-validate capacity/color again at commit time, inside the
+same version-gated transaction every other mutation uses — approving two
+requests for the last seat or the same color races exactly like two
+simultaneous `join` calls already do: deterministic, one wins),
+`cancelJoinRequest` (the requester's own, proven by their own session).
+`sweepStaleLobbyPlayers` now also expires a request nobody acted on,
+reusing `LOBBY_GRACE_MS` rather than a second threshold. `roll`/`place`
+needed no changes — a pending request never becomes `currentPlayerId`
+until approved, so there's nothing for the turn engine to even see.
+
+**`src/tables.ts`**: `joinTableRoom` now calls `rooms.requestJoin`
+instead of `rooms.joinRoom` — joining a table that already has a host is
+a request, full stop; only `createTableRoom` (the first, empty-table
+case) still seats immediately, unchanged. `resolveActiveSeat`/
+`getActiveSeat`/`checkExistingSeat` now recognize a pending request as
+"still associated with this table" (not just an actual seat) — both for
+the one-table-at-a-time rule and so `activeSeat` can report `pending:
+true`, which is what lets "Return to your game" and "you have a pending
+request" be told apart client-side. `getTablesStatus` gains a lightweight
+`pendingCount` for the bar's own table dialog.
+
+**Server**: three new room-level endpoints —
+`POST /api/rooms/:code/requests/:requestId/approve`,
+`.../reject`, and `.../requests/cancel` — all plain room-session actions
+(the host already has their own room credentials from being seated;
+CLAUDE.md's bar/game separation means none of this needs a bar identity
+at all, only the *initial* request does, via the existing
+`/api/bar/tables/:id/join`). All three return the fresh state, same
+convention every other mutation already follows.
+
+**Client**: `public/app.js`'s room view now recognizes three states for
+"where is my own session in this room" — seated (existing), pending
+(new: a dedicated waiting screen with a live-updating message and a
+Cancel button, never the normal lobby), or neither (removed/declined/
+expired, same message either way since the distinction doesn't change
+what the person needs to do next). The lobby itself gained a "Waiting to
+join" section, visible to everyone (same transparency as the player list
+— CLAUDE.md), with Approve/Decline buttons rendered only for the host.
+`public/tavern.js`'s table dialog now reads "Request to join" instead of
+"Join this table" for a table that already has a host, explains that the
+host approves it, shows a pending-request count, and disables acting
+entirely on an already-full table rather than inviting a request the
+server would just refuse.
+
+**A deliberately conservative reading, not a silent rule change**: the
+student's own follow-up message described "四种游戏颜色固定对应四个座位"
+(the four game colours fixed to four seats) in the context of a "seat
+preview." Changing what `seat` (and therefore turn order, which sorts by
+seat) actually means — from join/approval order to a fixed color-to-index
+mapping — would be a genuine change to an already-confirmed product rule
+(PLAN.md's original product decision 3: "turn order in round 1 is join
+order"), which CLAUDE.md's own instruction says to ask about rather than
+infer. This build keeps `seat` as approval order, unchanged, and reads
+"seat preview" as the dialog's own visual aid (the swatch picker, with
+takenColors already disabled) — not a request to silently change turn
+order semantics. Flagged here explicitly rather than guessed at silently
+either way; happy to rebuild this as a real seat-index-by-color scheme if
+that's what was actually meant.
+
+**Regression tests**: `spec/tables.test.ts` gained 7 new cases (decline +
+session deletion, requester self-cancel, host-only enforcement, color
+re-validation at approval, capacity re-validation at approval, a pending
+request never appearing as a seat or blocking ready-up, and
+`activeSeat.pending` reflecting request vs. approved seat correctly) plus
+an update to the existing "table status reflects a real room" test to
+show the request→approve transition explicitly. New
+`spec/joinRequestExpiry.test.ts` (3 cases) covers request expiry
+directly against a hand-built database (a real grace period is minutes
+long — far too slow to wait out automatically), the same trade-off
+`spec/tableExpiry.test.ts` already established.
+
+**Live verification, real browser**: a real Playwright page submitted a
+request through the actual client UI, correctly showed the "waiting for
+approval" screen, and — once a separate action approved it — updated
+**live, with no reload**, to the real lobby. Separately, a real host page
+showed a submitted request live with Approve/Decline buttons, and
+clicking Decline correctly removed it live. Zero console/page errors in
+either run.
+
+`pnpm check` (21 files, 159/159) green, fresh `DATA_DIR`, run twice;
+`pnpm typecheck` and `pnpm check:evidence` green.
+

@@ -41,6 +41,7 @@ function emptyState(): RoomState {
     turnOrder: [],
     currentPlayerId: null,
     players: {},
+    pendingRequests: [],
     lastRoll: null,
     casinos: [],
     deck: freshDeck(),
@@ -113,12 +114,16 @@ function loadOpenRoom(db: Database.Database, code: string): RoomRow {
 }
 
 /** Lobby-only: removes any player whose last heartbeat (or join time, if
- * they've never sent one yet) is past LOBBY_GRACE_MS. Transfers host to
- * the remaining player with the lowest seat if the host was the one
- * removed; closes the room if nobody's left. Never touches a game that's
- * already started (CLAUDE.md / PLAN.md playtest-round-1: no auto-removal
- * once playing) — checked both before and again inside the transaction,
- * since this runs on every read, not just on an explicit action. */
+ * they've never sent one yet) is past LOBBY_GRACE_MS, and (Crit 9 phase
+ * 8's approval workflow) any pending join request older than the same
+ * threshold — a request nobody's acted on is a stale lobby seat in every
+ * way that matters here, so it reuses the identical grace period rather
+ * than inventing a second one. Transfers host to the remaining player
+ * with the lowest seat if the host was the one removed; closes the room
+ * if nobody's left. Never touches a game that's already started
+ * (CLAUDE.md / PLAN.md playtest-round-1: no auto-removal once playing) —
+ * checked both before and again inside the transaction, since this runs
+ * on every read, not just on an explicit action. */
 function sweepStaleLobbyPlayers(db: Database.Database, row: RoomRow): void {
   if (row.closed_at) return;
   const state: RoomState = JSON.parse(row.state_json);
@@ -129,7 +134,8 @@ function sweepStaleLobbyPlayers(db: Database.Database, row: RoomRow): void {
   const staleIds = Object.values(state.players)
     .filter((p) => isPastGrace(seen.get(p.id) ?? p.joinedAt, now))
     .map((p) => p.id);
-  if (staleIds.length === 0) return;
+  const staleRequestIds = state.pendingRequests.filter((r) => isPastGrace(r.requestedAt, now)).map((r) => r.id);
+  if (staleIds.length === 0 && staleRequestIds.length === 0) return;
 
   const tx = db.transaction(() => {
     const fresh = db
@@ -146,6 +152,15 @@ function sweepStaleLobbyPlayers(db: Database.Database, row: RoomRow): void {
         forgetPresence(db, id);
         anyRemoved = true;
         logEvent(db, row.id, "player_timed_out", { playerId: id });
+      }
+    }
+    for (const id of staleRequestIds) {
+      const idx = freshState.pendingRequests.findIndex((r) => r.id === id);
+      if (idx !== -1) {
+        freshState.pendingRequests.splice(idx, 1);
+        db.prepare(`DELETE FROM sessions WHERE player_id = ?`).run(id);
+        anyRemoved = true;
+        logEvent(db, row.id, "join_request_expired", { playerId: id });
       }
     }
     if (!anyRemoved) return;
@@ -300,6 +315,195 @@ export function joinRoom(db: Database.Database, code: string, nickname: string, 
   return { playerId, sessionSecret };
 }
 
+export interface RequestedJoin {
+  playerId: string;
+  sessionSecret: string;
+}
+
+/** Submits a request to join — NOT an immediate seat. A real session is
+ * created right away (so the requester can watch this room's own public
+ * stream and know their own request's fate by id, the same way every
+ * other viewer does), but nothing about `state.players` or `MAX_PLAYERS`
+ * changes until (if) the host approves it (`approveJoin` below). Checked
+ * here purely to give early, honest feedback (an obviously-full room or
+ * an obviously-taken color shouldn't let someone submit a request that
+ * could never succeed) — the real, authoritative check happens again at
+ * approval time, inside that transaction, against whatever's true then. */
+export function requestJoin(db: Database.Database, code: string, nickname: string, color: Color): RequestedJoin {
+  const trimmed = nickname.trim();
+  if (!trimmed) throw new RoomError("nickname is required", "nickname_required", 400);
+  if (!COLORS.includes(color)) throw new RoomError("not a valid color", "bad_color", 400);
+
+  const row = loadOpenRoom(db, code);
+  const playerId = randomUUID();
+  const sessionSecret = newSessionSecret();
+
+  const tx = db.transaction(() => {
+    const fresh = db
+      .prepare(`SELECT state_json, version, closed_at FROM rooms WHERE id = ?`)
+      .get(row.id) as { state_json: string; version: number; closed_at: string | null };
+    if (fresh.closed_at) throw new RoomError("this room has closed", "room_closed", 410);
+    const state: RoomState = JSON.parse(fresh.state_json);
+
+    if (state.phase !== "lobby") {
+      throw new RoomError("the game has already started; seats are closed", "seats_closed", 409);
+    }
+    const existing = Object.values(state.players);
+    if (existing.length >= MAX_PLAYERS) {
+      throw new RoomError("this room already has its 4 players", "room_full", 409);
+    }
+    if (existing.some((p) => p.color === color)) {
+      throw new RoomError("that color is already taken in this room", "color_taken", 409);
+    }
+
+    state.pendingRequests.push({ id: playerId, nickname: trimmed, color, requestedAt: new Date().toISOString() });
+
+    db.prepare(`UPDATE rooms SET state_json = ?, version = version + 1 WHERE id = ? AND version = ?`).run(
+      JSON.stringify(state),
+      row.id,
+      fresh.version,
+    );
+    db.prepare(`INSERT INTO sessions (player_id, room_id, session_secret) VALUES (?, ?, ?)`).run(
+      playerId,
+      row.id,
+      sessionSecret,
+    );
+    logEvent(db, row.id, "join_requested", { playerId, nickname: trimmed, color });
+  });
+  tx();
+
+  return { playerId, sessionSecret };
+}
+
+/** Host-only: approves a pending request, re-validating capacity and
+ * color — the exact same checks `joinRoom` runs, just deferred to this
+ * moment instead of request time, inside the same version-gated
+ * transaction every other mutation uses. Approving two requests for the
+ * last seat (or the same color) races exactly like two simultaneous
+ * `join` calls already do today: deterministic, one wins, the other gets
+ * a normal refusal — no new conflict-resolution logic needed. */
+export function approveJoin(
+  db: Database.Database,
+  code: string,
+  hostPlayerId: string,
+  hostSessionSecret: string,
+  requestId: string,
+): void {
+  const row = loadOpenRoom(db, code);
+  requireSession(db, row.id, hostPlayerId, hostSessionSecret);
+  if (row.host_player_id !== hostPlayerId) {
+    throw new RoomError("only the host can approve a join request", "not_host", 403);
+  }
+
+  const tx = db.transaction(() => {
+    const fresh = db
+      .prepare(`SELECT state_json, version FROM rooms WHERE id = ?`)
+      .get(row.id) as { state_json: string; version: number };
+    const state: RoomState = JSON.parse(fresh.state_json);
+    if (state.phase !== "lobby") {
+      throw new RoomError("the game has already started", "not_lobby", 409);
+    }
+    const idx = state.pendingRequests.findIndex((r) => r.id === requestId);
+    if (idx === -1) throw new RoomError("no such pending request", "request_not_found", 404);
+    const req = state.pendingRequests[idx];
+
+    const existing = Object.values(state.players);
+    if (existing.length >= MAX_PLAYERS) {
+      throw new RoomError("this room already has its 4 players", "room_full", 409);
+    }
+    if (existing.some((p) => p.color === req.color)) {
+      throw new RoomError("that color is already taken in this room", "color_taken", 409);
+    }
+
+    state.pendingRequests.splice(idx, 1);
+    const now = new Date().toISOString();
+    state.players[req.id] = {
+      id: req.id,
+      nickname: req.nickname,
+      color: req.color,
+      seat: existing.length,
+      diceInHand: 0,
+      wonBills: [],
+      ready: false,
+      joinedAt: now,
+      controller: "human",
+    };
+
+    db.prepare(`UPDATE rooms SET state_json = ?, version = version + 1 WHERE id = ? AND version = ?`).run(
+      JSON.stringify(state),
+      row.id,
+      fresh.version,
+    );
+    // So the newly-approved player isn't immediately swept as stale —
+    // same reasoning joinRoom's own recordHeartbeat call already has.
+    recordHeartbeat(db, row.id, req.id, new Date(now));
+    logEvent(db, row.id, "join_approved", { playerId: req.id, nickname: req.nickname, color: req.color });
+  });
+  tx();
+}
+
+/** Host-only: declines a pending request outright. The request's own
+ * session is deleted, not left dangling — a rejected id must not later
+ * be mistaken for anything live. */
+export function rejectJoin(
+  db: Database.Database,
+  code: string,
+  hostPlayerId: string,
+  hostSessionSecret: string,
+  requestId: string,
+): void {
+  const row = loadOpenRoom(db, code);
+  requireSession(db, row.id, hostPlayerId, hostSessionSecret);
+  if (row.host_player_id !== hostPlayerId) {
+    throw new RoomError("only the host can decline a join request", "not_host", 403);
+  }
+
+  const tx = db.transaction(() => {
+    const fresh = db
+      .prepare(`SELECT state_json, version FROM rooms WHERE id = ?`)
+      .get(row.id) as { state_json: string; version: number };
+    const state: RoomState = JSON.parse(fresh.state_json);
+    const idx = state.pendingRequests.findIndex((r) => r.id === requestId);
+    if (idx === -1) throw new RoomError("no such pending request", "request_not_found", 404);
+    const [req] = state.pendingRequests.splice(idx, 1);
+
+    db.prepare(`UPDATE rooms SET state_json = ?, version = version + 1 WHERE id = ? AND version = ?`).run(
+      JSON.stringify(state),
+      row.id,
+      fresh.version,
+    );
+    db.prepare(`DELETE FROM sessions WHERE player_id = ?`).run(req.id);
+    logEvent(db, row.id, "join_rejected", { playerId: req.id });
+  });
+  tx();
+}
+
+/** The requester's own cancel — proven by their own session, same as any
+ * other self-referential action (leaveRoom, setReady). */
+export function cancelJoinRequest(db: Database.Database, code: string, playerId: string, sessionSecret: string): void {
+  const row = loadOpenRoom(db, code);
+  requireSession(db, row.id, playerId, sessionSecret);
+
+  const tx = db.transaction(() => {
+    const fresh = db
+      .prepare(`SELECT state_json, version FROM rooms WHERE id = ?`)
+      .get(row.id) as { state_json: string; version: number };
+    const state: RoomState = JSON.parse(fresh.state_json);
+    const idx = state.pendingRequests.findIndex((r) => r.id === playerId);
+    if (idx === -1) throw new RoomError("no such pending request", "request_not_found", 404);
+    state.pendingRequests.splice(idx, 1);
+
+    db.prepare(`UPDATE rooms SET state_json = ?, version = version + 1 WHERE id = ? AND version = ?`).run(
+      JSON.stringify(state),
+      row.id,
+      fresh.version,
+    );
+    db.prepare(`DELETE FROM sessions WHERE player_id = ?`).run(playerId);
+    logEvent(db, row.id, "join_request_cancelled", { playerId });
+  });
+  tx();
+}
+
 /** Confirms a returning player's identity. Deliberately doesn't throw on
  * a closed room — rejoining just proves who you are; getPublicState (the
  * client always fetches this right after) is what tells them the room's
@@ -313,6 +517,13 @@ export function heartbeat(db: Database.Database, code: string, playerId: string,
   const row = loadOpenRoom(db, code);
   requireSession(db, row.id, playerId, sessionSecret);
   const state: RoomState = JSON.parse(row.state_json);
+  // A pending requester's own heartbeat loop (public/app.js starts it the
+  // same way for anyone with a valid room session, seated or not) is a
+  // harmless no-op here — they're not in presence at all yet (pending
+  // requests expire by `requestedAt`, not by heartbeat; CLAUDE.md), and
+  // "player_removed" would misdescribe someone who was never seated in
+  // the first place.
+  if (state.pendingRequests.some((r) => r.id === playerId)) return;
   requireSeated(state, playerId);
   recordHeartbeat(db, row.id, playerId);
 }
@@ -722,6 +933,7 @@ function toPublicState(db: Database.Database, row: RoomRow, state: RoomState): P
         connected: isConnected(seen.get(p.id) ?? p.joinedAt, now),
         controller: p.controller,
       })),
+    pendingRequests: [...state.pendingRequests].sort((a, b) => a.requestedAt.localeCompare(b.requestedAt)),
     lastRoll: state.lastRoll,
     casinos: state.casinos.map((c) => ({
       value: c.value,

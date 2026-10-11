@@ -55,6 +55,12 @@ export interface TableStatusView {
    * kept separate from takenColors (which the table-dialog's own color
    * picker already depends on) rather than replacing it. */
   seats: Array<TableSeatView | null>;
+  /** How many join requests are awaiting the host's approval right now
+   * (Crit 9 phase 8) — a lightweight count for the bar's own table
+   * dialog to show "N waiting for approval", not full requester detail
+   * (that's the room's own lobby view, which already shows it to
+   * everyone — CLAUDE.md transparency). Always 0 once a game has started. */
+  pendingCount: number;
 }
 
 function phaseToStatus(phase: PublicState["phase"]): "waiting" | "in_progress" | "finished" {
@@ -110,6 +116,7 @@ export function getTablesStatus(db: Database.Database): TableStatusView[] {
         playerCount: 0,
         takenColors: [],
         seats: emptySeats(),
+        pendingCount: 0,
       };
     }
     const row = db.prepare(`SELECT current_room_id FROM tables WHERE id = ?`).get(t.id) as
@@ -135,6 +142,7 @@ export function getTablesStatus(db: Database.Database): TableStatusView[] {
         playerCount: 0,
         takenColors: [],
         seats: emptySeats(),
+        pendingCount: 0,
       };
     }
     const players = open.state.players; // already an array — PublicState, not RoomState
@@ -154,6 +162,7 @@ export function getTablesStatus(db: Database.Database): TableStatusView[] {
       playerCount: players.length,
       takenColors: players.map((p) => p.color),
       seats,
+      pendingCount: open.state.pendingRequests.length,
     };
   });
 }
@@ -168,6 +177,12 @@ interface ActiveSeat {
   code: string;
   playerId: string;
   sessionSecret: string;
+  /** True if this is a pending join request awaiting host approval, not
+   * an actual seat yet (Crit 9 phase 8's approval workflow) — "still
+   * associated with this table" either way, for one-table-at-a-time and
+   * for what getActiveSeat reports, but a very different thing to show
+   * the owner ("waiting for approval" vs. "return to your game"). */
+  pending: boolean;
 }
 
 /** Resolves and re-validates a bar identity's own currently-bound table
@@ -177,36 +192,36 @@ interface ActiveSeat {
  * join/rejoin/appearance responses, so "Return to your game" is driven by
  * a live, re-validated answer rather than anything a client stored itself
  * — see PLAN.md's product-direction-update entry for the bug this
- * replaces). A stale pointer (room closed, or left via the room's own
- * /leave without this pointer ever being told) is cleared here, lazily,
- * rather than left dangling. */
+ * replaces). A stale pointer (room closed, request rejected/expired, or
+ * left via the room's own /leave without this pointer ever being told)
+ * is cleared here, lazily, rather than left dangling. */
 function resolveActiveSeat(db: Database.Database, barPlayerId: string): ActiveSeat | null {
   const bp = db.prepare(`SELECT current_table_id, current_game_player_id FROM bar_players WHERE id = ?`).get(
     barPlayerId,
   ) as BarPlayerLinkage | undefined;
-  if (!bp?.current_table_id) return null;
+  if (!bp?.current_table_id || !bp.current_game_player_id) return null;
 
   const tableRow = db.prepare(`SELECT current_room_id FROM tables WHERE id = ?`).get(bp.current_table_id) as
     | { current_room_id: string | null }
     | undefined;
   const open = lookupOpenRoom(db, tableRow?.current_room_id ?? null);
-  const stillSeated =
-    open !== null &&
-    bp.current_game_player_id !== null &&
-    open.state.players.some((p) => p.id === bp.current_game_player_id);
+  const seated = open !== null && open.state.players.some((p) => p.id === bp.current_game_player_id);
+  const pending = !seated && open !== null && open.state.pendingRequests.some((r) => r.id === bp.current_game_player_id);
 
-  if (stillSeated) {
+  if (seated || pending) {
     const sessionRow = db.prepare(`SELECT session_secret FROM sessions WHERE player_id = ?`).get(
       bp.current_game_player_id,
     ) as { session_secret: string } | undefined;
-    // sessionRow is always present here: creating/joining a room always
-    // inserts its sessions row in the same transaction that set this
-    // bar_players pointer, and neither is ever deleted independently.
+    // sessionRow is always present here: creating/joining/requesting a
+    // room always inserts its sessions row in the same transaction that
+    // set this bar_players pointer, and neither is ever deleted
+    // independently while still seated or pending.
     return {
       tableId: bp.current_table_id,
       code: open!.code,
-      playerId: bp.current_game_player_id!,
+      playerId: bp.current_game_player_id,
       sessionSecret: sessionRow!.session_secret,
+      pending,
     };
   }
   db.prepare(`UPDATE bar_players SET current_table_id = NULL, current_game_player_id = NULL WHERE id = ?`).run(
@@ -216,33 +231,37 @@ function resolveActiveSeat(db: Database.Database, barPlayerId: string): ActiveSe
 }
 
 /** Three-way answer, resolved once so every caller sees the same thing:
- * - a result — genuinely still seated at *this* table; the caller should
- *   hand back the existing seat, not create/join again (which would
- *   otherwise mint a second, duplicate player row for the same patron in
- *   the same room).
- * - throws — genuinely seated at a *different* open table.
+ * - a result — genuinely still seated (or pending) at *this* table; the
+ *   caller should hand back the existing seat/request, not create/join/
+ *   request again (which would otherwise mint a second, duplicate player
+ *   or request for the same patron in the same room).
+ * - throws — genuinely seated or pending at a *different* open table.
  * - returns `null` — free to proceed. */
 function checkExistingSeat(
   db: Database.Database,
   barPlayerId: string,
   tableId: string,
-): { code: string; playerId: string; sessionSecret: string } | null {
+): { code: string; playerId: string; sessionSecret: string; pending: boolean } | null {
   const seat = resolveActiveSeat(db, barPlayerId);
   if (!seat) return null;
   if (seat.tableId !== tableId) {
     throw new TableError("you're already seated at another table — leave it first", "already_seated", 409);
   }
-  return { code: seat.code, playerId: seat.playerId, sessionSecret: seat.sessionSecret };
+  return { code: seat.code, playerId: seat.playerId, sessionSecret: seat.sessionSecret, pending: seat.pending };
 }
 
-/** The current bar identity's own active table seat, if any —
- * `{tableId, roomCode}` only, never the room's own session_secret (this
- * identity already holds that locally from when it first joined that
- * room; CLAUDE.md forbids a session_secret in any response regardless).
- * Exported for src/server.ts's bar join/rejoin/appearance responses. */
-export function getActiveSeat(db: Database.Database, barPlayerId: string): { tableId: string; roomCode: string } | null {
+/** The current bar identity's own active table seat or pending request,
+ * if any — `{tableId, roomCode, pending}` only, never the room's own
+ * session_secret (this identity already holds that locally from when it
+ * first joined/requested that room; CLAUDE.md forbids a session_secret in
+ * any response regardless). Exported for src/server.ts's bar
+ * join/rejoin/appearance responses. */
+export function getActiveSeat(
+  db: Database.Database,
+  barPlayerId: string,
+): { tableId: string; roomCode: string; pending: boolean } | null {
   const seat = resolveActiveSeat(db, barPlayerId);
-  return seat ? { tableId: seat.tableId, roomCode: seat.code } : null;
+  return seat ? { tableId: seat.tableId, roomCode: seat.code, pending: seat.pending } : null;
 }
 
 function getBarNickname(db: Database.Database, barPlayerId: string): string {
@@ -257,6 +276,12 @@ export interface TableRoomResult {
   code: string;
   playerId: string;
   sessionSecret: string;
+  /** True if this is a pending request awaiting host approval, not an
+   * actual seat yet (Crit 9 phase 8's approval workflow) — the client
+   * needs this to show "waiting for approval" rather than the normal
+   * lobby. Always false for createTableRoom (the first person to open an
+   * empty table is seated immediately, as host, by product decision). */
+  pending: boolean;
 }
 
 export function createTableRoom(
@@ -296,11 +321,18 @@ export function createTableRoom(
       created.playerId,
       barPlayerId,
     );
-    return created;
+    return { ...created, pending: false };
   });
   return tx();
 }
 
+/** Submits a request to join a table that already has a host — never an
+ * immediate seat (Crit 9 phase 8's approval workflow; only the first
+ * person to open an *empty* table, via createTableRoom above, is seated
+ * immediately). The host approves or declines it from the room's own
+ * lobby view (rooms.approveJoin/rejectJoin, called directly from
+ * src/server.ts — that's a plain room-session action, no bar identity
+ * involved, the same as every other lobby action already is). */
 export function joinTableRoom(
   db: Database.Database,
   tableId: string,
@@ -311,7 +343,7 @@ export function joinTableRoom(
   requireBarSession(db, barPlayerId, barSessionSecret);
   const tx = db.transaction(() => {
     const existing = checkExistingSeat(db, barPlayerId, tableId);
-    if (existing) return existing; // re-clicking the table you're already at, not a new join
+    if (existing) return existing; // re-clicking the table you're already at/pending for, not a new request
 
     const row = db.prepare(`SELECT current_room_id FROM tables WHERE id = ?`).get(tableId) as
       | { current_room_id: string | null }
@@ -320,19 +352,19 @@ export function joinTableRoom(
     if (!open) throw new TableError("no game at this table yet — create one", "table_empty", 404);
 
     const nickname = getBarNickname(db, barPlayerId);
-    let joined: rooms.JoinedRoom;
+    let requested: rooms.RequestedJoin;
     try {
-      joined = rooms.joinRoom(db, open.code, nickname, color);
+      requested = rooms.requestJoin(db, open.code, nickname, color);
     } catch (err) {
       if (err instanceof RoomError) throw new TableError(err.message, err.code, err.status);
       throw err;
     }
     db.prepare(`UPDATE bar_players SET current_table_id = ?, current_game_player_id = ? WHERE id = ?`).run(
       tableId,
-      joined.playerId,
+      requested.playerId,
       barPlayerId,
     );
-    return { code: open.code, ...joined };
+    return { code: open.code, playerId: requested.playerId, sessionSecret: requested.sessionSecret, pending: true };
   });
   return tx();
 }

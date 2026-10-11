@@ -48,14 +48,34 @@ export interface LastRoll {
   values: number[];
 }
 
+/** A request to join an online table, awaiting the host's approval —
+ * NOT a Player: doesn't count toward MAX_PLAYERS, isn't seated, isn't
+ * part of turnOrder (PLAN.md's product-direction-update, phase 3). `id`
+ * doubles as the eventual player id if approved — a real session is
+ * created the moment the request is made (so the requester can watch the
+ * same public room stream everyone else does and know their own
+ * request's fate by id), but the sessions row is deleted outright on
+ * rejection, cancellation, or expiry, never left dangling. */
+export interface PendingRequest {
+  id: string;
+  nickname: string;
+  color: Color;
+  requestedAt: string;
+}
+
 /** The room's live, mutable round state. Never sent to a client as-is —
  * see toPublicState, which drops the deck's future order. */
 export interface RoomState {
   phase: Phase;
-  /** Fixed at game start: join order for round 1. */
+  /** Fixed at game start: join order (join = approval order for a
+   * request) for round 1. */
   turnOrder: string[];
   currentPlayerId: string | null;
   players: Record<string, Player>;
+  /** Lobby-only; always empty once the game has started (every pending
+   * request is implicitly moot once seats are closed — nothing moves
+   * them to players, nothing special needs to happen to them). */
+  pendingRequests: PendingRequest[];
   lastRoll: LastRoll | null;
   casinos: Casino[];
   /** Remaining banknotes, draw order hidden from clients. Index 0 is the
@@ -108,6 +128,11 @@ export interface PublicState {
   turnOrder: string[];
   currentPlayerId: string | null;
   players: PublicPlayer[];
+  /** Visible to everyone watching the room (same transparency as the
+   * player list itself) — the host acts on these, a requester watches
+   * their own by id, and an onlooker can simply see a table has requests
+   * pending. Always empty once phase leaves "lobby". */
+  pendingRequests: PendingRequest[];
   lastRoll: LastRoll | null;
   casinos: PublicCasino[];
   /** How many banknotes are left to draw — never their values or order. */

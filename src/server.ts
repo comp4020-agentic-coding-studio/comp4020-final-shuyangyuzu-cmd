@@ -396,6 +396,42 @@ app.post("/api/rooms/:code/disband", async (c) => {
   return c.json({ ok: true });
 });
 
+// ---- Phase 3 (product-direction-update): online-table join approval —
+// all plain room-session actions, no bar identity involved (the host
+// already has their own room credentials from being seated; CLAUDE.md's
+// bar/game separation). ----
+
+app.post("/api/rooms/:code/requests/:requestId/approve", async (c) => {
+  const code = c.req.param("code");
+  const requestId = c.req.param("requestId");
+  const body = (await c.req.json().catch(() => ({}))) as AuthedBody;
+  rooms.approveJoin(db, code, playerId(body), sessionSecret(body), requestId);
+  // A newly-seated player changes both the room's own lobby view and the
+  // bar's table-status view (playerCount, takenColors). Returns the fresh
+  // state, same convention every other room mutation follows, so the
+  // host's own client can apply it directly.
+  const state = publishRoomState(code, rooms.getPublicState(db, code));
+  publishBarSnapshot();
+  return c.json(state);
+});
+
+app.post("/api/rooms/:code/requests/:requestId/reject", async (c) => {
+  const code = c.req.param("code");
+  const requestId = c.req.param("requestId");
+  const body = (await c.req.json().catch(() => ({}))) as AuthedBody;
+  rooms.rejectJoin(db, code, playerId(body), sessionSecret(body), requestId);
+  const state = publishRoomState(code, rooms.getPublicState(db, code));
+  return c.json(state);
+});
+
+app.post("/api/rooms/:code/requests/cancel", async (c) => {
+  const code = c.req.param("code");
+  const body = (await c.req.json().catch(() => ({}))) as AuthedBody;
+  rooms.cancelJoinRequest(db, code, playerId(body), sessionSecret(body));
+  const state = publishRoomState(code, rooms.getPublicState(db, code));
+  return c.json(state);
+});
+
 // ---- The bar (Phase 1: identity, movement, presence — see PLAN.md) ----
 
 interface BarAuthedBody {

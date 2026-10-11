@@ -548,19 +548,26 @@ function startLive(code, session, initialState) {
     }
 
     const stillSeated = state.players.some((p) => p.id === session.playerId);
-    if (!state.closed && !stillSeated) {
-      // Swept out while we weren't looking (disconnect grace expired) —
-      // this browser's seat is just gone, same as a voluntary leave.
+    const stillPending = !stillSeated && (state.pendingRequests ?? []).some((r) => r.id === session.playerId);
+    if (!state.closed && !stillSeated && !stillPending) {
+      // Neither a seated player nor a pending request anymore — swept out
+      // while we weren't looking (disconnect grace expired), or a
+      // request that was declined or expired. Same outcome either way:
+      // this browser's seat is just gone.
       stopLive();
       stopHeartbeat();
       clearSession(code);
       render(
         el("div", { class: "entry" }, [
           el("h1", {}, "Vegas"),
-          el("p", {}, "You were removed from this room after being disconnected too long."),
+          el("p", {}, "You were removed from this room (disconnected too long, or a pending request was declined or expired)."),
           backToHomeButton(),
         ]),
       );
+      return;
+    }
+    if (stillPending) {
+      renderPendingRequest(code, session, state);
       return;
     }
     renderTable(code, session, state);
@@ -647,6 +654,46 @@ function copyInviteLinkControl(shareLink) {
   return el("div", { class: "invite-link" }, [linkField, copyBtn, status]);
 }
 
+// Phase 3 (product-direction-update): shown instead of the normal lobby
+// while this browser's own request to join an online table hasn't been
+// approved yet — a pending request is never a player (CLAUDE.md: doesn't
+// count toward MAX_PLAYERS, isn't seated), so it gets its own screen
+// rather than a half-populated table view.
+function renderPendingRequest(code, session, state) {
+  const mine = (state.pendingRequests ?? []).find((r) => r.id === session.playerId);
+  render(
+    el("div", { class: "entry" }, [
+      el("h1", {}, "Vegas"),
+      el("p", {}, `Waiting for the host of room ${code} to approve your request to join${mine ? ` as ${mine.nickname}` : ""}.`),
+      el(
+        "p",
+        { class: "note" },
+        "You'll be seated automatically the moment the host approves you — this page updates live, no need to refresh.",
+      ),
+      el(
+        "button",
+        {
+          type: "button",
+          class: "secondary",
+          onclick: async () => {
+            try {
+              await api(`/rooms/${code}/requests/cancel`, session);
+            } catch {
+              // Already approved, declined, or expired — navigating away
+              // below is the right outcome regardless.
+            }
+            stopLive();
+            stopHeartbeat();
+            clearSession(code);
+            navigate("/");
+          },
+        },
+        "Cancel request",
+      ),
+    ]),
+  );
+}
+
 function renderTable(code, session, state) {
   if (state.closed) {
     stopLive();
@@ -688,6 +735,60 @@ function renderTable(code, session, state) {
     }),
   );
 
+  // Phase 3 (product-direction-update): visible to everyone (same
+  // transparency as the player list itself — CLAUDE.md), but Approve/
+  // Decline only render for the host; a non-host sees who's waiting and
+  // nothing they can act on, which is itself useful ("someone wants in").
+  const pendingSection =
+    state.pendingRequests && state.pendingRequests.length > 0
+      ? el("section", { class: "pending-requests" }, [
+          el("h3", {}, "Waiting to join"),
+          el(
+            "ul",
+            {},
+            state.pendingRequests.map((r) =>
+              el("li", {}, [
+                el("span", { class: `swatch ${r.color}` }),
+                `${r.nickname} `,
+                ...(isHost
+                  ? [
+                      el(
+                        "button",
+                        {
+                          type: "button",
+                          onclick: async () => {
+                            try {
+                              applyIncoming(await api(`/rooms/${code}/requests/${r.id}/approve`, session));
+                            } catch (err) {
+                              alert(err.message);
+                            }
+                          },
+                        },
+                        "Approve",
+                      ),
+                      el(
+                        "button",
+                        {
+                          type: "button",
+                          class: "secondary",
+                          onclick: async () => {
+                            try {
+                              applyIncoming(await api(`/rooms/${code}/requests/${r.id}/reject`, session));
+                            } catch (err) {
+                              alert(err.message);
+                            }
+                          },
+                        },
+                        "Decline",
+                      ),
+                    ]
+                  : [el("span", { class: "note" }, "(waiting for the host)")]),
+              ]),
+            ),
+          ),
+        ])
+      : null;
+
   let body;
   if (state.phase === "lobby") {
     body = lobbyControls(code, session, state, isHost, me);
@@ -714,7 +815,9 @@ function renderTable(code, session, state) {
     ),
   ]);
 
-  render(el("div", { class: "table" }, [header, playerList, body, notes, backToHomeButton()]));
+  render(
+    el("div", { class: "table" }, [header, playerList, pendingSection, body, notes, backToHomeButton()].filter(Boolean)),
+  );
 }
 
 function lobbyControls(code, session, state, isHost, me) {

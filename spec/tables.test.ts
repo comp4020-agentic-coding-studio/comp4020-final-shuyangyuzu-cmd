@@ -40,6 +40,7 @@ interface TableView {
   roomCode: string | null;
   playerCount: number;
   takenColors: string[];
+  pendingCount: number;
 }
 
 async function tablesStatus(): Promise<TableView[]> {
@@ -85,7 +86,7 @@ it("creating a game at a table reuses the bar nickname, no re-entry, and frees i
   expect(after.find((t) => t.id === tableId)?.status).toBe("empty");
 });
 
-it("table status reflects a real room: waiting, player count, taken colors", async () => {
+it("table status reflects a real room: waiting, player count, taken colors, and a pending request's own effect", async () => {
   const tableId = await anEmptyVegasTable();
   const host = await joinBar("Alice", "purple");
   const created = await postJson(`/api/bar/tables/${tableId}/create`, { ...host, color: "red" });
@@ -96,15 +97,34 @@ it("table status reflects a real room: waiting, player count, taken colors", asy
   expect(t.playerCount).toBe(1);
   expect(t.takenColors).toEqual(["red"]);
   expect(t.roomCode).toBe(created.body.code);
+  expect(t.pendingCount).toBe(0);
 
+  // Phase 3 (product-direction-update): joining a table that already has
+  // a host is a *request*, not an immediate seat — playerCount must not
+  // move yet.
   const guest = await joinBar("Bob", "teal");
-  const joined = await postJson(`/api/bar/tables/${tableId}/join`, { ...guest, color: "blue" });
-  expect(joined.status).toBe(201);
-  expect(joined.body.code).toBe(created.body.code);
+  const requested = await postJson(`/api/bar/tables/${tableId}/join`, { ...guest, color: "blue" });
+  expect(requested.status).toBe(201);
+  expect(requested.body.code).toBe(created.body.code);
+  expect(requested.body.pending).toBe(true);
+
+  t = (await tablesStatus()).find((x) => x.id === tableId)!;
+  expect(t.playerCount).toBe(1);
+  expect(t.takenColors).toEqual(["red"]);
+  expect(t.pendingCount).toBe(1);
+
+  // Only once the host approves it does the seat (and the table status)
+  // actually change.
+  const approved = await postJson(
+    `/api/rooms/${created.body.code}/requests/${requested.body.playerId}/approve`,
+    created.body,
+  );
+  expect(approved.status).toBe(200);
 
   t = (await tablesStatus()).find((x) => x.id === tableId)!;
   expect(t.playerCount).toBe(2);
   expect(t.takenColors.sort()).toEqual(["blue", "red"]);
+  expect(t.pendingCount).toBe(0);
 
   await postJson(`/api/rooms/${created.body.code}/disband`, { ...created.body, confirm: true }); // free it back up
 });
@@ -218,15 +238,34 @@ it("activeSeat reflects a real table binding, and clears again once the room clo
   expect(created.status).toBe(201);
 
   const rejoined = await postJson("/api/bar/rejoin", patron);
-  expect(rejoined.body.activeSeat).toEqual({ tableId, roomCode: created.body.code });
+  expect(rejoined.body.activeSeat).toEqual({ tableId, roomCode: created.body.code, pending: false });
 
   const appearance = await postJson("/api/bar/appearance", { ...patron, nickname: "Seated", color: "blue", skin: "warm" });
-  expect(appearance.body.activeSeat).toEqual({ tableId, roomCode: created.body.code });
+  expect(appearance.body.activeSeat).toEqual({ tableId, roomCode: created.body.code, pending: false });
 
   await postJson(`/api/rooms/${created.body.code}/disband`, { ...created.body, confirm: true });
 
   const after = await postJson("/api/bar/rejoin", patron);
   expect(after.body.activeSeat).toBeNull();
+});
+
+it("activeSeat.pending is true for a requester, flips to false once approved", async () => {
+  const tableId = await anEmptyVegasTable();
+  const host = await joinBar("PendingHost", "orange");
+  const created = await postJson(`/api/bar/tables/${tableId}/create`, { ...host, color: "red" });
+  const guestBar = await joinBar("PendingGuest", "teal");
+  const requested = await postJson(`/api/bar/tables/${tableId}/join`, { ...guestBar, color: "blue" });
+  expect(requested.body.pending).toBe(true);
+
+  const rejoinedPending = await postJson("/api/bar/rejoin", guestBar);
+  expect(rejoinedPending.body.activeSeat).toEqual({ tableId, roomCode: created.body.code, pending: true });
+
+  await postJson(`/api/rooms/${created.body.code}/requests/${requested.body.playerId}/approve`, created.body);
+
+  const rejoinedApproved = await postJson("/api/bar/rejoin", guestBar);
+  expect(rejoinedApproved.body.activeSeat).toEqual({ tableId, roomCode: created.body.code, pending: false });
+
+  await postJson(`/api/rooms/${created.body.code}/disband`, { ...created.body, confirm: true });
 });
 
 it("a second, brand-new bar identity never inherits a different identity's active seat", async () => {
@@ -252,6 +291,154 @@ it("activeSeat clears when the lone player voluntarily leaves (not just on disba
 
   const after = await postJson("/api/bar/rejoin", patron);
   expect(after.body.activeSeat).toBeNull();
+});
+
+// ---- Phase 3 (product-direction-update): online-table join approval ----
+
+it("the host can decline a pending request outright, and the declined requester's session can't be reused", async () => {
+  const tableId = await anEmptyVegasTable();
+  const host = await joinBar("DeclineHost", "purple");
+  const created = await postJson(`/api/bar/tables/${tableId}/create`, { ...host, color: "red" });
+  const guestBar = await joinBar("Declined", "teal");
+  const requested = await postJson(`/api/bar/tables/${tableId}/join`, { ...guestBar, color: "blue" });
+  expect(requested.body.pending).toBe(true);
+
+  const rejected = await postJson(
+    `/api/rooms/${created.body.code}/requests/${requested.body.playerId}/reject`,
+    created.body,
+  );
+  expect(rejected.status).toBe(200);
+
+  const state = await getJson(`/api/rooms/${created.body.code}/state`);
+  expect(state.body.players).toHaveLength(1);
+  expect(state.body.pendingRequests).toHaveLength(0);
+
+  // The declined session is really gone, not just hidden from the list.
+  const tryHeartbeat = await postJson(`/api/rooms/${created.body.code}/heartbeat`, {
+    playerId: requested.body.playerId,
+    sessionSecret: requested.body.sessionSecret,
+  });
+  expect(tryHeartbeat.status).toBe(403);
+
+  await postJson(`/api/rooms/${created.body.code}/disband`, { ...created.body, confirm: true });
+});
+
+it("a requester can cancel their own pending request", async () => {
+  const tableId = await anEmptyVegasTable();
+  const host = await joinBar("CancelHost", "orange");
+  const created = await postJson(`/api/bar/tables/${tableId}/create`, { ...host, color: "green" });
+  const guestBar = await joinBar("ChangedMind", "pink");
+  const requested = await postJson(`/api/bar/tables/${tableId}/join`, { ...guestBar, color: "blue" });
+
+  const cancelled = await postJson(`/api/rooms/${created.body.code}/requests/cancel`, requested.body);
+  expect(cancelled.status).toBe(200);
+
+  const state = await getJson(`/api/rooms/${created.body.code}/state`);
+  expect(state.body.pendingRequests).toHaveLength(0);
+  expect(state.body.players).toHaveLength(1);
+
+  await postJson(`/api/rooms/${created.body.code}/disband`, { ...created.body, confirm: true });
+});
+
+it("only the host can approve or reject a pending request — not the requester's own session", async () => {
+  const tableId = await anEmptyVegasTable();
+  const host = await joinBar("RealHost", "yellow");
+  const created = await postJson(`/api/bar/tables/${tableId}/create`, { ...host, color: "red" });
+  const otherBar = await joinBar("NotTheHost", "teal");
+  const other = await postJson(`/api/bar/tables/${tableId}/join`, { ...otherBar, color: "blue" });
+
+  const selfApprove = await postJson(
+    `/api/rooms/${created.body.code}/requests/${other.body.playerId}/approve`,
+    other.body, // the requester's own (real, valid) session — not the host's
+  );
+  expect(selfApprove.status).toBe(403);
+  expect(selfApprove.body.error).toBe("not_host");
+
+  await postJson(`/api/rooms/${created.body.code}/disband`, { ...created.body, confirm: true });
+});
+
+it("approval re-validates color at commit time — two pending requests for the same color, only one can win", async () => {
+  const tableId = await anEmptyVegasTable();
+  const host = await joinBar("ColorHost", "orange");
+  const created = await postJson(`/api/bar/tables/${tableId}/create`, { ...host, color: "green" });
+  const guestABar = await joinBar("GuestA", "teal");
+  const guestA = await postJson(`/api/bar/tables/${tableId}/join`, { ...guestABar, color: "blue" });
+  const guestBBar = await joinBar("GuestB", "pink");
+  // Both pending requests choose the same color — allowed, since a
+  // pending request doesn't reserve anything (PLAN.md).
+  const guestB = await postJson(`/api/bar/tables/${tableId}/join`, { ...guestBBar, color: "blue" });
+  expect(guestB.status).toBe(201);
+
+  const approveA = await postJson(
+    `/api/rooms/${created.body.code}/requests/${guestA.body.playerId}/approve`,
+    created.body,
+  );
+  expect(approveA.status).toBe(200);
+
+  const approveB = await postJson(
+    `/api/rooms/${created.body.code}/requests/${guestB.body.playerId}/approve`,
+    created.body,
+  );
+  expect(approveB.status).toBe(409);
+  expect(approveB.body.error).toBe("color_taken");
+
+  await postJson(`/api/rooms/${created.body.code}/disband`, { ...created.body, confirm: true });
+});
+
+it("approval re-validates capacity at commit time — never more than 4 seated players, and a full room refuses new requests outright", async () => {
+  const tableId = await anEmptyVegasTable();
+  const host = await joinBar("CapHost", "red");
+  const created = await postJson(`/api/bar/tables/${tableId}/create`, { ...host, color: "red" });
+
+  const colorsToFill = ["blue", "green", "yellow"];
+  const requests = [];
+  for (const color of colorsToFill) {
+    const bar = await joinBar(`Cap-${color}`, "teal");
+    requests.push(await postJson(`/api/bar/tables/${tableId}/join`, { ...bar, color }));
+  }
+  for (const r of requests) {
+    const res = await postJson(`/api/rooms/${created.body.code}/requests/${r.body.playerId}/approve`, created.body);
+    expect(res.status).toBe(200);
+  }
+  const state = await getJson(`/api/rooms/${created.body.code}/state`);
+  expect(state.body.players).toHaveLength(4);
+
+  const lateBar = await joinBar("TooLate", "pink");
+  const lateRequest = await postJson(`/api/bar/tables/${tableId}/join`, { ...lateBar, color: "red" });
+  expect(lateRequest.status).toBe(409);
+  expect(lateRequest.body.error).toBe("room_full");
+
+  await postJson(`/api/rooms/${created.body.code}/disband`, { ...created.body, confirm: true });
+});
+
+it("a pending request doesn't appear as a seated player and doesn't block readying up the real seats", async () => {
+  const tableId = await anEmptyVegasTable();
+  const host = await joinBar("StartHost", "blue");
+  const created = await postJson(`/api/bar/tables/${tableId}/create`, { ...host, color: "blue" });
+  const guestBar = await joinBar("SecondSeat", "teal");
+  const guest = await postJson(`/api/bar/tables/${tableId}/join`, { ...guestBar, color: "green" });
+  const approved = await postJson(
+    `/api/rooms/${created.body.code}/requests/${guest.body.playerId}/approve`,
+    created.body,
+  );
+  expect(approved.status).toBe(200);
+
+  // A third patron's request stays pending — must not block or appear as
+  // a seat.
+  const lateBar = await joinBar("StillPending", "pink");
+  const late = await postJson(`/api/bar/tables/${tableId}/join`, { ...lateBar, color: "yellow" });
+  expect(late.body.pending).toBe(true);
+
+  const readyHost = await postJson(`/api/rooms/${created.body.code}/ready`, { ...created.body, ready: true });
+  const readyGuest = await postJson(`/api/rooms/${created.body.code}/ready`, { ...guest.body, ready: true });
+  expect(readyHost.status).toBe(200);
+  expect(readyGuest.status).toBe(200);
+  expect(readyHost.body.players).toHaveLength(2); // the pending request never counted
+  expect(readyHost.body.pendingRequests).toHaveLength(1);
+
+  // Stay in the lobby (never actually start) so this table can still be
+  // disbanded and freed for the rest of this file's shared 3 tables.
+  await postJson(`/api/rooms/${created.body.code}/disband`, { ...created.body, confirm: true });
 });
 
 it("refuses an action with a wrong bar session secret", async () => {
