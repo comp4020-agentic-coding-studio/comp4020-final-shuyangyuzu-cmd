@@ -8,7 +8,7 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import * as bar from "./bar.ts";
 import { BarError } from "./bar.ts";
-import { FURNITURE, GRID_COLS, GRID_ROWS, TILE_SIZE } from "./barLayout.ts";
+import { FURNITURE, GAME_CHAIRS, GRID_COLS, GRID_ROWS, TILE_SIZE } from "./barLayout.ts";
 import { dbPathFromEnv, openDb } from "./db.ts";
 import * as live from "./live.ts";
 import { renderReadme } from "./markdown.ts";
@@ -458,6 +458,7 @@ app.get("/api/bar/layout", (c) =>
     // positions — live occupancy comes from each streamed player's own
     // seatId, the same split FURNITURE/tables already uses.
     seats: bar.getSeatLayout(),
+    gameChairs: GAME_CHAIRS,
   }),
 );
 

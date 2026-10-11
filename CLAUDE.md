@@ -550,3 +550,17 @@ the URL (`pushState`) and calls `route()`, rather than directly
 rendering a view inline. A one-off `history.replaceState` call with no
 `popstate` listener is how the previous version silently broke the
 browser's own back/forward buttons; don't reintroduce that shape.
+
+## Seat art and input must share geometry
+
+Draw and hit-test dining/stool seats from BAR_SEATS, and game chairs from
+GAME_CHAIRS returned by /api/bar/layout. A chair's own tile is clickable;
+no decorative chair may imply a different tile or overlap another chair.
+Hover/focus highlights belong to the chair, not a separate visible control.
+Stools are walkable seats on their own fixture tiles. Game chairs are
+fixed by colour; room player.seat continues to mean join/turn order and
+must not be changed merely to reposition an avatar. Online host approval
+still applies. Never draw an active game occupant twice as both a seated
+figure and a standing bar patron. Layout migrations preserve room links,
+move occupied chairs with their patrons, and relocate obstructed floor
+positions without deleting identities or game progress.

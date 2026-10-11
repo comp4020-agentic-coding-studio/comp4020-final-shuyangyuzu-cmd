@@ -36,13 +36,18 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     const data = await r.json(); if(!r.ok) throw Object.assign(new Error(data.message),{status:r.status}); return data;
   };
   const read = async path => { const r=await fetch('/api/bar'+path); if(!r.ok) throw new Error('Unable to connect to the tavern'); return r.json(); };
-  function sprite(c,x,y,color,skin,scale=1,step=0) {
+  function sprite(c,x,y,color,skin,scale=1,step=0,seated=false) {
     c.save(); c.translate(Math.round(x),Math.round(y)); c.scale(scale,scale);
     const rect=(a,b,w,h,t)=>{c.fillStyle=t;c.fillRect(a,b,w,h);};
     c.fillStyle='#130e1760'; c.beginPath(); c.ellipse(0,1,12,4,0,0,Math.PI*2);c.fill();
     const leg=Math.sin(step)*2;
-    rect(-7,-12,6,12+leg,'#393a52'); rect(1,-12,6,12-leg,'#393a52');
-    rect(-8,leg-3,7,4,'#251f2d');rect(1,-leg-3,8,4,'#251f2d');
+    if(seated){
+      rect(-11,-12,22,7,'#393a52');rect(-11,-5,6,7,'#393a52');rect(5,-5,6,7,'#393a52');
+      rect(-13,1,9,4,'#251f2d');rect(4,1,9,4,'#251f2d');
+    }else{
+      rect(-7,-12,6,12+leg,'#393a52'); rect(1,-12,6,12-leg,'#393a52');
+      rect(-8,leg-3,7,4,'#251f2d');rect(1,-leg-3,8,4,'#251f2d');
+    }
     rect(-10,-28,20,17,color);rect(-10,-13,20,3,'#00000022');
     rect(-14,-26,4,12,skin);rect(10,-26,4,12,skin);
     rect(-9,-45,18,18,skin);rect(-11,-48,22,8,'#43302d');
@@ -106,7 +111,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     // not just by walking away (which also stands you up, via the
     // server's own moveBar — src/bar.ts).
     const standBtn=el('button',{class:'hud-button',onclick:async()=>{
-      try{const resp=await post('/stand',session);applyIncoming(resp);}catch(e){toast.textContent=e.message||'Could not stand up';}
+      try{const resp=await post('/stand',session);applyIncoming(resp);toast.textContent='Standing — click a chair to sit down.';}catch(e){toast.textContent=e.message||'Could not stand up';}
     }},'Stand up');
     standBtn.style.display='none';
     const hud=el('header',{class:'world-hud'},[
@@ -122,13 +127,35 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         onTap:()=>queueStep(dx,dy),
       }));
     }
-    const scene=el('div',{class:'tavern-world'},[canvas,hud,toast,directions]); render(scene);
+    const seatLayer=el('div',{class:'seat-layer'});
+    const scene=el('div',{class:'tavern-world'},[canvas,seatLayer,hud,toast,directions]); render(scene);
     const overlay=el('div',{class:'world-overlay'});scene.appendChild(overlay);
     let layout;
     try { layout=await read('/layout'); } catch(e) {toast.textContent=e.message;return;}
     if(!active)return;
     const tile=64, worldW=layout.gridCols*tile,worldH=layout.gridRows*tile;
     const fixtures=layout.furniture;
+    const seatTargets=[];
+    for(const s of layout.seats||[]){
+      const f=fixtures.find(f=>f.id===s.furnitureId);
+      const label=`Sit — ${f?.kind==='stool'?'bar stool':'dining chair'} ${s.id}`;
+      const button=el('button',{class:'seat-target','aria-label':label,'data-hint':'Sit down',title:'Sit down',onclick:()=>{
+        if(!mine||overlay.childElementCount)return;
+        if(state.players.some(p=>p.seatId===s.id&&p.id!==mine.id)){toast.textContent='Someone is already sitting there.';return;}
+        beginSit(s);
+      }});
+      seatLayer.appendChild(button);seatTargets.push({...s,button});
+    }
+    for(const s of layout.gameChairs||[]){
+      const f=fixtures.find(f=>f.id===s.tableId);
+      const button=el('button',{class:'seat-target','aria-label':`Choose ${s.color} seat — ${f.label}`,'data-hint':f.available?`Choose ${s.color} seat`:'Not yet open',title:f.available?`Choose ${s.color} seat`:'Not yet open',onclick:()=>{
+        if(!mine||overlay.childElementCount)return;
+        if(!f.available)toast.textContent=f.label;
+        else if(f.tableMode==='npc')openNpcTableDialog(f,s.color);
+        else openTableDialog(f,s.color);
+      }});
+      seatLayer.appendChild(button);seatTargets.push({...s,button});
+    }
     const ctx=canvas.getContext('2d');
     let vw=window.innerWidth,vh=window.innerHeight;
     const resize=()=>{vw=window.innerWidth;vh=window.innerHeight;const dpr=Math.min(devicePixelRatio||1,2);canvas.width=vw*dpr;canvas.height=vh*dpr;canvas.style.width=vw+'px';canvas.style.height=vh+'px';ctx.setTransform(dpr,0,0,dpr,0,0);};resize();
@@ -157,7 +184,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     function beginSit(seat){
       if(!mine||overlay.childElementCount)return;
       if(mine.x===seat.x&&mine.y===seat.y){
-        post(`/seats/${seat.id}/sit`,session).then(applyIncoming).catch(e=>{toast.textContent=e.message||'Could not sit down';});
+        post(`/seats/${seat.id}/sit`,session).then(resp=>{applyIncoming(resp);toast.textContent='Seated — use Stand up to leave the chair.';}).catch(e=>{toast.textContent=e.message||'Could not sit down';});
         return;
       }
       pendingSitSeat=seat;path=findPath(seat.x,seat.y);destination=path.length?{x:seat.x,y:seat.y}:null;
@@ -213,7 +240,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     // chosen here, and taken colours at a waiting table are disabled
     // rather than left to fail server-side.
     const GAME_COLORS=['red','blue','green','yellow'];
-    async function openTableDialog(f){
+    async function openTableDialog(f,preferredColor){
       path=[];
       let tableList;
       try{tableList=await read('/tables');}catch(e){toast.textContent='Could not reach the tables — try again.';return;}
@@ -221,7 +248,8 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       if(!t){toast.textContent='That table is not available.';return;}
 
       const taken=new Set(t.takenColors||[]);
-      let selected=GAME_COLORS.find(c=>!taken.has(c))||GAME_COLORS[0];
+      if(preferredColor&&taken.has(preferredColor)){toast.textContent='That chair is occupied. Choose another chair.';return;}
+      let selected=preferredColor&&!taken.has(preferredColor)?preferredColor:GAME_COLORS.find(c=>!taken.has(c))||GAME_COLORS[0];
       const error=el('p',{class:'error',role:'alert'});
       const isEmpty=t.status==='empty';
       const isWaiting=t.status==='waiting';
@@ -282,9 +310,9 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     // list, no approval, and nobody else can ever show up here, so this
     // is a separate, simpler flow from openTableDialog above: pick a
     // colour, start immediately against 3 computer-controlled opponents.
-    async function openNpcTableDialog(f){
+    async function openNpcTableDialog(f,preferredColor){
       path=[];
-      let selected=GAME_COLORS[0];
+      let selected=preferredColor||GAME_COLORS[0];
       const error=el('p',{class:'error',role:'alert'});
       const swatches=el('div',{class:'avatar-swatches','aria-label':'Table colour (seat preview)'},GAME_COLORS.map(c=>
         el('button',{type:'button',class:'avatar-swatch','aria-label':`Colour ${c}`,
@@ -411,7 +439,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         // finish it with the real, separately-validated sit call (beginSit).
         if(pendingSitSeat&&pendingSitSeat.x===x&&pendingSitSeat.y===y){
           const seat=pendingSitSeat;pendingSitSeat=null;
-          try{applyIncoming(await post(`/seats/${seat.id}/sit`,session));}
+          try{applyIncoming(await post(`/seats/${seat.id}/sit`,session));toast.textContent='Seated — use Stand up to leave the chair.';}
           catch(err){toast.textContent=err.message||'Could not sit down';}
         }
       }
@@ -455,7 +483,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         for(let i=32;i<w;i+=80){box(fc,x+i,y-24,9,22,'#729f80');box(fc,x+i+2,y-29,5,6,'#d8b873');box(fc,x+i+14,y-15,7,13,'#ddc6a0');}
         fc.font='bold 17px monospace';fc.textAlign='center';fc.fillStyle='#e4bf7e';fc.fillText('THE AMBER ROOM',x+w/2,y-43);
       }else if(f.kind==='stool'){
-        box(fc,x+18,y+30,8,25,'#352b2d');box(fc,x+40,y+30,8,25,'#352b2d');box(fc,x+10,y+9,45,29,'#9f7153');box(fc,x+14,y+8,37,22,'#b78163');box(fc,x+18,y+9,27,3,'#dbab7c');
+        // Drawn below from the same seat tile the player can click.
       }else if(f.kind==='restroom'){
         // A walkable alcove, not an obstacle — a floor-level marker only
         // (no raised/blocking shape like a table): a faint floor patch,
@@ -470,7 +498,6 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       }else{
         box(fc,x-5,y+12,w+10,h,'#382a2d');box(fc,x-6,y,w+12,h,'#b78a59');box(fc,x,y+6,w,h-12,f.kind==='game_table'?(f.available?'#487c69':'#665969'):'#9c6848');
         box(fc,x+6,y+12,w-12,3,'#ffffff19');
-        for(const cy of [y+22,y+h-44]){box(fc,x-27,cy,20,32,'#513d36');box(fc,x+w+7,cy,20,32,'#513d36');box(fc,x-26,cy,18,6,'#b68a60');box(fc,x+w+8,cy,18,6,'#b68a60');}
         if(f.kind==='game_table'){
           for(let i=0;i<3;i++){box(fc,x+30+i*23,y+33,17,26,'#eadcc5');box(fc,x+34+i*23,y+41,7,7,i%2?'#c87769':'#4d515d');}
           fc.textAlign='center';fc.font='bold 12px monospace';fc.fillStyle='#f7e6c6';fc.fillText(f.available?f.label:f.gameType.toUpperCase(),x+w/2,y+h-26);
@@ -478,6 +505,14 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         }else{box(fc,x+43,y+35,28,24,'#eee0bd');box(fc,x+51,y+40,12,12,'#bd8253');box(fc,x+77,y+29,11,18,'#94b0a5');}
       }
     }
+    function chair(c,x,y,accent){
+      box(c,x+13,y+44,7,13,'#352b2d');box(c,x+44,y+44,7,13,'#352b2d');
+      box(c,x+10,y+12,44,16,'#6a4938');box(c,x+13,y+14,38,8,'#d0a171');
+      box(c,x+9,y+28,46,20,'#684638');box(c,x+12,y+29,40,14,accent||'#b78163');
+      box(c,x+14,y+29,36,3,'#e1b985');
+    }
+    for(const s of layout.seats||[])chair(fc,s.x*tile,s.y*tile);
+    for(const s of layout.gameChairs||[])chair(fc,s.x*tile,s.y*tile,colors[s.color]);
     // Clear per-row mode labels (PLAN.md phase 5's two-row layout: a
     // player glancing at the room must be able to tell "shared, host-
     // approved" from "solo, instant" apart without opening a dialog).
@@ -517,47 +552,27 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       const target=mine||{x:20,y:12};const desiredX=Math.max(0,Math.min(Math.max(0,worldW-vw),(target.x+.5)*tile-vw/2)),desiredY=Math.max(0,Math.min(Math.max(0,worldH-vh),(target.y+.5)*tile-vh/2));
       if(!cameraInitialized){camera={x:desiredX,y:desiredY};cameraInitialized=true;}else{camera.x+=(desiredX-camera.x)*.12;camera.y+=(desiredY-camera.y)*.12;}
       ctx.clearRect(0,0,vw,vh);ctx.imageSmoothingEnabled=false;ctx.drawImage(floor,-Math.round(camera.x),-Math.round(camera.y));
-      // Each playable table's capacity and live occupancy, drawn fresh
-      // every frame from the continuously-updated state.tables (streamed
-      // over the bar's own SSE channel) — so a bystander can "see whether
-      // it has room" from across the room, without walking over and
-      // clicking (README's own definition of good). Up to 4 chairs
-      // always drawn, matching MAX_PLAYERS in src/rooms.ts — this doesn't
-      // change that rule, just makes it visible. Phase 2
-      // (product-direction-update): an occupied chair now draws an
-      // actual small seated figure (the same sprite() every patron uses,
-      // not a distinct seated illustration — a simplified but honest
-      // stand-in, not a claim of bespoke seated art) using that seat's
-      // real color/nickname/controller from the bound room's own player
-      // roster (src/tables.ts's getTablesStatus), rather than a bare
-      // colored dot.
-      for(const f of fixtures){
-        if(f.kind!=='game_table'||!f.available)continue;
-        const t=state.tables.find(tb=>tb.id===f.id);
-        if(!t)continue;
-        const cx=(f.x+f.w/2)*tile-camera.x,seatY=(f.y+f.h)*tile-camera.y+8;
-        for(let i=0;i<4;i++){
-          const sx=cx-33+i*22;
-          const occupant=t.seats&&t.seats[i];
-          if(occupant){
-            sprite(ctx,sx,seatY+2,colors[occupant.color]||colors.green,skins.warm,.62,0);
-            if(occupant.controller==='npc'){
-              ctx.font='bold 8px monospace';ctx.textAlign='center';ctx.fillStyle='#1c1620cc';ctx.fillRect(sx-10,seatY-20,20,10);
-              ctx.fillStyle='#e4bf7e';ctx.fillText('NPC',sx,seatY-12);
-            }
-          }else{
-            // Empty seat: a clearly visible hollow ring rather than a
-            // near-invisible dark fill against the floor's own dark wood
-            // tones (an earlier version of this was too low-contrast to
-            // actually read as "empty" — caught in a live screenshot
-            // check, not just by reading the code).
-            ctx.beginPath();ctx.arc(sx,seatY,6,0,Math.PI*2);
-            ctx.fillStyle='#1c162066';ctx.fill();ctx.strokeStyle='#e4bf7ecc';ctx.lineWidth=1.5;ctx.stroke();
-          }
+      for(const s of seatTargets){
+        const x=s.x*tile-camera.x,y=s.y*tile-camera.y;
+        s.button.style.display=mine&&x+tile>0&&y+tile>0&&x<vw&&y<vh?'block':'none';
+        s.button.style.transform=`translate(${Math.round(x)}px,${Math.round(y)}px)`;
+      }
+      const seatedPatrons=new Set();
+      for(const s of layout.gameChairs||[]){
+        const t=state.tables.find(t=>t.id===s.tableId);
+        const occupant=t?.seats?.find(p=>p?.color===s.color);
+        if(!occupant)continue;
+        const x=(s.x+.5)*tile-camera.x,y=(s.y+.65)*tile-camera.y;
+        if(occupant.present){
+          sprite(ctx,x,y,colors[occupant.color],skins[occupant.skin]||skins.warm,1,0,true);
+          if(occupant.barPlayerId)seatedPatrons.add(occupant.barPlayerId);
         }
+        ctx.font='10px monospace';ctx.textAlign='center';ctx.fillStyle='#f5e7d2';
+        ctx.fillText(occupant.nickname+(occupant.controller==='npc'?' · NPC':occupant.present?'':' · away'),x,y-52);
       }
       if(destination){ctx.strokeStyle='#ecd29b';ctx.lineWidth=2;ctx.strokeRect(destination.x*tile-camera.x+8,destination.y*tile-camera.y+8,tile-16,tile-16);}
       for(const p of [...state.players].sort((a,b)=>a.y-b.y)){
+        if(seatedPatrons.has(p.id))continue;
         let pos=displayPositions.get(p.id);if(!pos){pos={x:p.x,y:p.y};displayPositions.set(p.id,pos);}
         const walking=!p.seatId&&Math.abs(pos.x-p.x)+Math.abs(pos.y-p.y)>.02;pos.x+=(p.x-pos.x)*.22;pos.y+=(p.y-pos.y)*.22;
         const x=(pos.x+.5)*tile-camera.x,y=(pos.y+.75)*tile-camera.y;
@@ -565,7 +580,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         // no walk animation, and a touch smaller/lower to read as sitting
         // at the chair rather than standing over it. Still the one
         // sprite() primitive, not a distinct seated illustration.
-        sprite(ctx,x,p.seatId?y+4:y,colors[p.color]||colors.green,skins[p.skin]||skins.warm,p.seatId?1.0:1.15,walking?now/90:0);
+        sprite(ctx,x,p.seatId?y-7:y,colors[p.color]||colors.green,skins[p.skin]||skins.warm,p.seatId?1.0:1.15,walking?now/90:0,!!p.seatId);
         ctx.font='12px monospace';ctx.textAlign='center';const label=p.nickname+(p.id===mine?.id?' · you':'');const width=ctx.measureText(label).width+14;
         box(ctx,x-width/2,y-72,width,20,'#292635dc');ctx.fillStyle='#f5e7d2';ctx.fillText(label,x,y-58);
       }

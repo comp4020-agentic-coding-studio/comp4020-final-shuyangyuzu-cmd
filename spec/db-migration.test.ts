@@ -17,6 +17,26 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { openDb } from "../src/db.ts";
+import { BAR_SEATS, GAME_TABLES, defaultSpawn } from "../src/barLayout.ts";
+import { joinBar } from "../src/bar.ts";
+
+it("repositions occupied chairs with their patron, and moves only floor patrons obstructed by the layout", () => {
+  const path = join(dir, "seated-layout.db");
+  const db = openDb(path);
+  const seated = joinBar(db, "Seated", "red", "warm");
+  const walker = joinBar(db, "Walker", "blue", "warm");
+  const seat = BAR_SEATS[0], table = GAME_TABLES[0];
+  db.prepare("UPDATE bar_seats SET x = ?, y = ?, occupied_by = ? WHERE id = ?").run(seat.x, seat.y + 1, seated.playerId, seat.id);
+  db.prepare("UPDATE bar_players SET x = ?, y = ? WHERE id = ?").run(seat.x, seat.y + 1, seated.playerId);
+  db.prepare("UPDATE bar_players SET x = ?, y = ? WHERE id = ?").run(table.x, table.y, walker.playerId);
+  db.close();
+  const migrated = openDb(path);
+  try {
+    expect(migrated.prepare("SELECT x, y FROM bar_players WHERE id = ?").get(seated.playerId)).toEqual({ x: seat.x, y: seat.y });
+    expect(migrated.prepare("SELECT occupied_by FROM bar_seats WHERE id = ?").get(seat.id)).toEqual({ occupied_by: seated.playerId });
+    expect(migrated.prepare("SELECT x, y FROM bar_players WHERE id = ?").get(walker.playerId)).toEqual(defaultSpawn());
+  } finally { migrated.close(); }
+});
 
 let dir: string;
 

@@ -6,7 +6,7 @@
 // from the fixed spawn point alone.
 
 import { describe, expect, it } from "vitest";
-import { BAR_SEATS, FURNITURE, GAME_TABLES, GRID_COLS, GRID_ROWS, isValidStep, isWalkable } from "../src/barLayout.ts";
+import { BAR_SEATS, FURNITURE, GAME_CHAIRS, GAME_TABLES, GRID_COLS, GRID_ROWS, defaultSpawn, isValidStep, isWalkable } from "../src/barLayout.ts";
 
 describe("isWalkable", () => {
   it("is true for open floor", () => {
@@ -114,6 +114,12 @@ describe("isValidStep", () => {
 });
 
 describe("BAR_SEATS (Phase 2: real dining/stool seating)", () => {
+  it("each painted stool is its actual clickable, walkable seat tile", () => {
+    for (const f of FURNITURE.filter((f) => f.kind === "stool")) {
+      expect(BAR_SEATS.find((s) => s.furnitureId === f.id)).toMatchObject({ x: f.x, y: f.y });
+      expect(isWalkable(f.x, f.y)).toBe(true);
+    }
+  });
   it("every seat is on an ordinary walkable tile — sitting never needs a walkability exception", () => {
     for (const s of BAR_SEATS) {
       expect(isWalkable(s.x, s.y), `${s.id} at (${s.x},${s.y})`).toBe(true);
@@ -139,6 +145,34 @@ describe("BAR_SEATS (Phase 2: real dining/stool seating)", () => {
       expect(BAR_SEATS.filter((s) => s.furnitureId === f.id)).toHaveLength(4);
     }
   });
+});
+
+it("all physical chairs have unique, reachable tiles, including between adjacent game tables", () => {
+  const spawn = defaultSpawn();
+  const queue = [spawn], reachable = new Set([`${spawn.x},${spawn.y}`]);
+  for (let i = 0; i < queue.length; i++) {
+    const p = queue[i];
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const x = p.x + dx, y = p.y + dy, key = `${x},${y}`;
+      if (isWalkable(x, y) && !reachable.has(key)) { reachable.add(key); queue.push({ x, y }); }
+    }
+  }
+  const seen = new Set<string>();
+  for (const s of [...BAR_SEATS, ...GAME_CHAIRS]) {
+    const key = `${s.x},${s.y}`;
+    expect(seen.has(key), `two chairs at ${key}`).toBe(false);
+    expect(reachable.has(key), `inaccessible chair at ${key}`).toBe(true);
+    seen.add(key);
+  }
+});
+
+it("both game-table rows span exactly the dining-table boundaries", () => {
+  const dining = FURNITURE.filter((f) => f.kind === "dining_table");
+  for (const mode of ["online", "npc"]) {
+    const row = GAME_TABLES.filter((f) => f.tableMode === mode);
+    expect(Math.min(...row.map((f) => f.x))).toBe(Math.min(...dining.map((f) => f.x)));
+    expect(Math.max(...row.map((f) => f.x + f.w))).toBe(Math.max(...dining.map((f) => f.x + f.w)));
+  }
 });
 
 it("has nine tables in two labelled rows — 2 online + 1 NPC Vegas table playable, 6 reserved slots, all 2x2", () => {

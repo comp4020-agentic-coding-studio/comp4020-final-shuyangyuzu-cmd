@@ -325,6 +325,10 @@ header + .players {
 /* Full-screen world: the viewport is a camera, never a scaled whole map. */
 body.world-mode { padding:0; overflow:hidden; background:#3e3036; }
 .tavern-world { position:fixed; inset:0; overflow:hidden; }
+.seat-layer { position:absolute; inset:0; pointer-events:none; }
+.seat-layer button.seat-target { position:absolute; top:0; left:0; display:none; width:64px; height:64px; margin:0; padding:0; border:2px solid transparent; border-radius:8px; background:transparent; pointer-events:auto; cursor:pointer; touch-action:manipulation; }
+.seat-layer button.seat-target:hover,.seat-layer button.seat-target:focus-visible { border-color:#ffe0a1; background:#ffe0a125; box-shadow:0 0 10px #ffd48680; outline:none; }
+.seat-layer button.seat-target:hover::after,.seat-layer button.seat-target:focus-visible::after { content:attr(data-hint); position:absolute; bottom:66px; left:50%; transform:translateX(-50%); padding:5px 8px; white-space:nowrap; border-radius:5px; color:#fff1cf; background:#30242a; font-size:11px; pointer-events:none; }
 .tavern-world > canvas { display:block; width:100%; height:100%; image-rendering:pixelated; touch-action:none; outline:none; }
 .world-hud { position:absolute; top:22px; left:24px; right:24px; display:flex; justify-content:space-between; gap:16px; align-items:center; pointer-events:none; }
 .world-brand { display:flex; align-items:center; gap:12px; color:#fae9cd; padding:12px 18px; border:1px solid #d9b27b40; background:#272531e8; border-radius:14px; box-shadow:0 5px 24px #0003; }

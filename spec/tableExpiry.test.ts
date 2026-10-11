@@ -63,6 +63,16 @@ it("a table whose only player has gone stale past the lobby grace reports empty,
   expect(vegas1.playerCount).toBe(0);
 });
 
+it("a chosen colour maps to its physical chair regardless of joining first", () => {
+  const patron = joinBar(db, "Yellow host", "purple", "deep");
+  createTableRoom(db, "vegas-1", patron.playerId, patron.sessionSecret, "yellow");
+  const table = getTablesStatus(db).find((t) => t.id === "vegas-1")!;
+  expect(table.seats[0]).toBeNull();
+  expect(table.seats[3]).toMatchObject({ color: "yellow", barPlayerId: patron.playerId, skin: "deep", present: true });
+  db.prepare("INSERT INTO table_departures (bar_player_id, table_id, left_at) VALUES (?, ?, ?)").run(patron.playerId, "vegas-1", new Date().toISOString());
+  expect(getTablesStatus(db).find((t) => t.id === "vegas-1")!.seats[3]).toMatchObject({ present: false });
+});
+
 it("a bar identity's stale table binding (its host gone past grace) is cleared, not mistaken for 'already seated' at a dead room", () => {
   const patron = joinBar(db, "Returning", "red", "warm");
   const created = createTableRoom(db, "vegas-1", patron.playerId, patron.sessionSecret, "red");

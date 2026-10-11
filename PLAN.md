@@ -2608,3 +2608,49 @@ altering started-game progress or existing NPC/request data. Typecheck
 and all 169 tests passed against a fresh isolated server on port 8093;
 `pnpm check:evidence` passed. Production browser verification follows
 publication; the user's own acceptance remains separate.
+
+## Seating and spacing playtest correction (2026-10-12)
+
+The user reported that seats were not visibly usable, game tables still
+showed four rings, tables were crowded, and neighbouring chairs appeared
+to share click tiles. They clarified that the stool/chair itself should
+be the clickable object, with a hover indication, rather than a separate
+button elsewhere.
+
+Inspection found a real drawing/input mismatch: dining chairs were
+painted left/right while `BAR_SEATS` placed their interaction tiles
+north/south; stools were painted on a blocking furniture tile while the
+sittable tile was below them. Game occupancy used four rings under the
+table rather than the four painted chairs. The previous geometry tests
+covered only actual BAR_SEATS, not decorative game chairs.
+
+The layout now spans both game rows across the same left/right table
+boundaries as the dining area. Each game table has four independently
+addressable chair tiles, with two clear columns between online table
+bodies and three clear rows between modes. `GAME_CHAIRS` is returned in
+the layout API alongside BAR_SEATS. Canvas chair art and transparent
+accessible hit areas both use those exact tiles: the chair itself has
+hover/focus highlighting, a hand cursor, and a hint. No separate visible
+button strip is added. Dining/stool clicks walk then sit; a game-chair
+click preselects that chair's colour and preserves the existing create/
+request/host-approval flow. Physical game chairs map to colour while
+join-order/turn-order remains unchanged.
+
+Seated sprites now have bent legs and a sitting pose. Game occupants
+are drawn on the actual chair, with their nickname and skin; an active
+seated bar identity is not also drawn as a standing duplicate. A player
+away from their table retains their reserved place but is labelled away.
+NPC kiosks remain private games, not shared occupied online tables.
+Startup layout migration moves an occupied chair with its patron and
+relocates only floor positions obstructed by relocated furniture.
+
+Validation: typecheck and 174 tests passed against a freshly restarted,
+isolated server, including all-chair uniqueness/reachability, row-width
+alignment, colour-to-chair mapping, departure visibility, and occupied-
+chair migration. Actual browser checks locally confirmed a dining chair
+click -> automatic walk -> visible Stand up; Stand up -> release; direct
+bar-stool click -> sit; blue game-chair click -> blue preselected -> real
+lobby entry; a second open bar page showed the player sitting on that
+blue chair with no standing duplicate. These two pages shared a browser
+identity; this is not a claim of a new independent-player playtest.
+Publication and production verification follow these local checks.

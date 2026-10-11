@@ -51,18 +51,13 @@ export interface Furniture {
 
 const CORE_FURNITURE: readonly Furniture[] = [
   { id: "counter", kind: "counter", x: 3, y: 1, w: 14, h: 1, label: "Bar Counter" },
-  { id: "stool-1", kind: "stool", x: 3, y: 2, w: 1, h: 1, label: "Stool" },
-  { id: "stool-2", kind: "stool", x: 6, y: 2, w: 1, h: 1, label: "Stool" },
-  { id: "stool-3", kind: "stool", x: 9, y: 2, w: 1, h: 1, label: "Stool" },
-  { id: "stool-4", kind: "stool", x: 12, y: 2, w: 1, h: 1, label: "Stool" },
-  { id: "stool-5", kind: "stool", x: 15, y: 2, w: 1, h: 1, label: "Stool" },
-  // x shifted off the stools' own columns (3,6,9,12,15 — see CORE_FURNITURE
-  // below) so each dining table's 4 seat tiles (BAR_SEATS, one tile north
-  // and one south of each of its 2 columns) never land on a stool's own
-  // approach tile (directly south of the stool) — an earlier draft of
-  // this layout had dining-b and dining-c sharing a column with a stool
-  // and their seats collided; spec/barLayout.test.ts's overlap check
-  // covers this permanently now, not just this one fix.
+  { id: "stool-1", kind: "stool", x: 3, y: 2, w: 1, h: 1, label: "Stool", blocksMovement: false },
+  { id: "stool-2", kind: "stool", x: 6, y: 2, w: 1, h: 1, label: "Stool", blocksMovement: false },
+  { id: "stool-3", kind: "stool", x: 9, y: 2, w: 1, h: 1, label: "Stool", blocksMovement: false },
+  { id: "stool-4", kind: "stool", x: 12, y: 2, w: 1, h: 1, label: "Stool", blocksMovement: false },
+  { id: "stool-5", kind: "stool", x: 15, y: 2, w: 1, h: 1, label: "Stool", blocksMovement: false },
+  // Dining chairs are north/south of each table. Stool tiles above and
+  // all game chairs below are included in the same collision test.
   { id: "dining-a", kind: "dining_table", x: 1, y: 4, w: 2, h: 2, label: "Table" },
   { id: "dining-b", kind: "dining_table", x: 10, y: 4, w: 2, h: 2, label: "Table" },
   { id: "dining-c", kind: "dining_table", x: 17, y: 4, w: 2, h: 2, label: "Table" },
@@ -88,7 +83,7 @@ const CORE_FURNITURE: readonly Furniture[] = [
     id: "vegas-1",
     kind: "game_table",
     x: 1,
-    y: 7,
+    y: 9,
     w: 2,
     h: 2,
     label: "Vegas Online #1",
@@ -99,8 +94,8 @@ const CORE_FURNITURE: readonly Furniture[] = [
   {
     id: "vegas-2",
     kind: "game_table",
-    x: 4,
-    y: 7,
+    x: 5,
+    y: 9,
     w: 2,
     h: 2,
     label: "Vegas Online #2",
@@ -111,8 +106,8 @@ const CORE_FURNITURE: readonly Furniture[] = [
   {
     id: "texas-1",
     kind: "game_table",
-    x: 7,
-    y: 7,
+    x: 9,
+    y: 9,
     w: 2,
     h: 2,
     label: "Texas Hold'em Online — not yet open",
@@ -123,8 +118,8 @@ const CORE_FURNITURE: readonly Furniture[] = [
   {
     id: "dominoes-1",
     kind: "game_table",
-    x: 10,
-    y: 7,
+    x: 13,
+    y: 9,
     w: 2,
     h: 2,
     label: "Dominoes Online — not yet open",
@@ -135,8 +130,8 @@ const CORE_FURNITURE: readonly Furniture[] = [
   {
     id: "blackjack-1",
     kind: "game_table",
-    x: 13,
-    y: 7,
+    x: 17,
+    y: 9,
     w: 2,
     h: 2,
     label: "Blackjack Online — not yet open",
@@ -144,15 +139,12 @@ const CORE_FURNITURE: readonly Furniture[] = [
     available: false,
     tableMode: "online",
   },
-  // The NPC row — a 2-tile walkway gap (y9-10 relative) below the online
-  // row's own y7-8 footprint, so the two rows and their drawn chairs
-  // never crowd each other (spec/barLayout.test.ts's overlap check
-  // covers this the same way it already covers the dining/stool seats).
+  // The NPC row has three clear walkway rows below the online tables.
   {
     id: "vegas-npc-1",
     kind: "game_table",
     x: 1,
-    y: 11,
+    y: 14,
     w: 2,
     h: 2,
     label: "Vegas NPC",
@@ -163,8 +155,8 @@ const CORE_FURNITURE: readonly Furniture[] = [
   {
     id: "texas-npc-1",
     kind: "game_table",
-    x: 4,
-    y: 11,
+    x: 6,
+    y: 14,
     w: 2,
     h: 2,
     label: "Texas Hold'em NPC — not yet open",
@@ -175,8 +167,8 @@ const CORE_FURNITURE: readonly Furniture[] = [
   {
     id: "dominoes-npc-1",
     kind: "game_table",
-    x: 7,
-    y: 11,
+    x: 12,
+    y: 14,
     w: 2,
     h: 2,
     label: "Dominoes NPC — not yet open",
@@ -187,8 +179,8 @@ const CORE_FURNITURE: readonly Furniture[] = [
   {
     id: "blackjack-npc-1",
     kind: "game_table",
-    x: 10,
-    y: 11,
+    x: 17,
+    y: 14,
     w: 2,
     h: 2,
     label: "Blackjack NPC — not yet open",
@@ -224,6 +216,15 @@ export const FURNITURE: readonly Furniture[] = CORE_FURNITURE.map((f) => ({
 
 export const GAME_TABLES: readonly Furniture[] = FURNITURE.filter((f) => f.kind === "game_table");
 
+// The chair's whole tile is its drawing and hit target. Fixed colours
+// choose physical chairs independently of join-order/turn-order seats.
+export const GAME_CHAIRS = GAME_TABLES.flatMap((f) => [
+  { tableId: f.id, color: "red", x: f.x - 1, y: f.y },
+  { tableId: f.id, color: "blue", x: f.x + f.w, y: f.y },
+  { tableId: f.id, color: "green", x: f.x - 1, y: f.y + 1 },
+  { tableId: f.id, color: "yellow", x: f.x + f.w, y: f.y + 1 },
+]);
+
 /** A real, sittable seat belonging to a dining table or stool — NOT a
  * game table's own chairs (those are a rendering of that room's existing
  * 0-3 seat index, never a new occupancy concept here; PLAN.md's
@@ -243,9 +244,9 @@ export interface Seat {
 
 export const BAR_SEATS: readonly Seat[] = FURNITURE.flatMap((f): Seat[] => {
   if (f.kind === "stool") {
-    // The tile directly south of the stool — the same side a patron
-    // already approaches the counter from.
-    return [{ id: `${f.id}-seat`, furnitureId: f.id, x: f.x, y: f.y + f.h }];
+    // The stool itself is walkable and is the seat, not a floor tile
+    // beside the visible stool.
+    return [{ id: `${f.id}-seat`, furnitureId: f.id, x: f.x, y: f.y }];
   }
   if (f.kind === "dining_table") {
     // Two seats north, two south: the walkable tiles flanking each of
@@ -296,13 +297,8 @@ export function interactiveAt(x: number, y: number): Furniture | undefined {
   return f?.kind === "game_table" || f?.kind === "counter" ? f : undefined;
 }
 
-/** An open floor tile for a newly-joined patron to spawn on. Row
- * GRID_ROWS - 3 is south of every furniture fixture (the lowest, the NPC
- * game-table row, bottoms out at abs y18 — see FURNITURE above), so this
- * stays clear of the whole cluster regardless of future table-row
- * changes, rather than pinning to a specific row number that a layout
- * edit could silently walk into (exactly what happened to the old
- * GRID_ROWS - 6 spawn once the NPC row's blackjack-npc-1 landed on it). */
+/** Spawn on the floor below the game rows, derived from their layout. */
 export function defaultSpawn(): { x: number; y: number } {
-  return { x: Math.floor(GRID_COLS / 2), y: GRID_ROWS - 3 };
+  const bottom = Math.max(...GAME_TABLES.map((f) => f.y + f.h));
+  return { x: Math.floor(GRID_COLS / 2), y: Math.min(GRID_ROWS - 1, bottom + 1) };
 }

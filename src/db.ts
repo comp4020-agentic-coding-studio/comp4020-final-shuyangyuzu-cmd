@@ -6,7 +6,7 @@
 import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { BAR_SEATS, GAME_TABLES } from "./barLayout.ts";
+import { BAR_SEATS, GAME_TABLES, defaultSpawn, isWalkable } from "./barLayout.ts";
 import type { RoomState } from "./types.ts";
 
 export function openDb(path: string): Database.Database {
@@ -17,6 +17,12 @@ export function openDb(path: string): Database.Database {
   migrate(db);
   seedBarFurniture(db);
   seedBarSeats(db);
+  const spawn = defaultSpawn();
+  // Furniture can move on deploy. Keep seated patrons on their updated
+  // chair (seedBarSeats above); move only obstructed floor positions.
+  for (const p of db.prepare("SELECT id, x, y FROM bar_players").all() as Array<{ id: string; x: number; y: number }>) {
+    if (!isWalkable(p.x, p.y)) db.prepare("UPDATE bar_players SET x = ?, y = ? WHERE id = ?").run(spawn.x, spawn.y, p.id);
+  }
   return db;
 }
 
@@ -184,6 +190,8 @@ function seedBarSeats(db: Database.Database): void {
   for (const s of BAR_SEATS) {
     insert.run(s.id, s.furnitureId, s.x, s.y);
     db.prepare(`UPDATE bar_seats SET x = ?, y = ?, furniture_id = ? WHERE id = ?`).run(s.x, s.y, s.furnitureId, s.id);
+    // A layout change moves an occupied chair and its patron together.
+    db.prepare(`UPDATE bar_players SET x = ?, y = ? WHERE id = (SELECT occupied_by FROM bar_seats WHERE id = ?)`).run(s.x, s.y, s.id);
   }
 }
 

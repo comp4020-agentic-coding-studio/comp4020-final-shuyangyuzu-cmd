@@ -17,7 +17,7 @@ import { requireBarSession } from "./bar.ts";
 import { GAME_TABLES } from "./barLayout.ts";
 import { RoomError } from "./rooms.ts";
 import * as rooms from "./rooms.ts";
-import type { Color, PublicState } from "./types.ts";
+import { COLORS, type Color, type PublicState } from "./types.ts";
 
 export class TableError extends Error {
   readonly code: string;
@@ -32,14 +32,17 @@ export class TableError extends Error {
 export type TableLiveStatus = "reserved" | "empty" | "waiting" | "in_progress" | "finished";
 
 /** One of a game table's (up to 4) chairs, for real seated rendering —
- * null for an empty chair. NOT a bar_seats row: this is a view of the
- * bound room's own player roster, the one source of truth for "who's at
+ * null for an empty chair, ordered by COLORS to match GAME_CHAIRS. This
+ * is a view of the bound room's own player roster, the source of truth for "who's at
  * this table" (PLAN.md's product-direction-update entry). */
 export interface TableSeatView {
   color: string;
   nickname: string;
   connected: boolean;
   controller: "human" | "npc";
+  barPlayerId: string | null;
+  skin: string;
+  present: boolean;
 }
 
 export interface TableStatusView {
@@ -180,8 +183,15 @@ export function getTablesStatus(db: Database.Database): TableStatusView[] {
     const players = open.state.players; // already an array — PublicState, not RoomState
     const seats = emptySeats();
     for (const p of players) {
-      if (p.seat >= 0 && p.seat < seats.length) {
-        seats[p.seat] = { color: p.color, nickname: p.nickname, connected: p.connected, controller: p.controller };
+      const chairIndex = COLORS.indexOf(p.color);
+      if (chairIndex >= 0) {
+        const patron = db.prepare(`SELECT b.id, b.skin, d.left_at FROM bar_players b
+          LEFT JOIN table_departures d ON d.bar_player_id = b.id
+          WHERE b.current_game_player_id = ? AND b.current_table_id = ?`).get(p.id, t.id) as
+          { id: string; skin: string; left_at: string | null } | undefined;
+        seats[chairIndex] = { color: p.color, nickname: p.nickname, connected: p.connected, controller: p.controller,
+          barPlayerId: patron?.id ?? null, skin: patron?.skin ?? "warm",
+          present: p.controller === "npc" || (p.connected && !patron?.left_at) };
       }
     }
     return {
