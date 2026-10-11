@@ -14,6 +14,12 @@ export const TILE_SIZE = 32;
 
 export type FurnitureKind = "counter" | "stool" | "dining_table" | "game_table" | "restroom";
 export type GameType = "vegas" | "texas" | "dominoes" | "blackjack";
+/** "online" — a shared table other patrons can request to join, host-
+ * approved (Crit 9 phase 8). "npc" — a solo kiosk: every visitor who
+ * starts one gets their own private game against 3 computer-controlled
+ * opponents, never a table other patrons see as "join-able" (PLAN.md's
+ * product-direction-update). */
+export type TableMode = "online" | "npc";
 
 export interface Furniture {
   id: string;
@@ -25,9 +31,14 @@ export interface Furniture {
   label: string;
   /** Only set for kind === "game_table". */
   gameType?: GameType;
-  /** Only set for kind === "game_table" — false for the reserved
-   * Texas/dominoes/blackjack slots, true for the 3 Vegas tables. */
+  /** Only set for kind === "game_table" — false for every reserved
+   * ("not yet open") slot, true for the ones actually playable this
+   * round (the two online Vegas tables and the one Vegas NPC table). */
   available?: boolean;
+  /** Only set for kind === "game_table" — which of the two rows this
+   * slot belongs to, independent of `available` (a reserved slot still
+   * has a row/mode, it's just not playable yet). */
+  tableMode?: TableMode;
   /** Defaults to true (every existing kind blocks movement, unchanged)
    * — set false for a fixture that's a walkable zone marker rather than
    * an obstacle (the restroom: a sign/entrance the player can walk
@@ -55,6 +66,24 @@ const CORE_FURNITURE: readonly Furniture[] = [
   { id: "dining-a", kind: "dining_table", x: 1, y: 4, w: 2, h: 2, label: "Table" },
   { id: "dining-b", kind: "dining_table", x: 10, y: 4, w: 2, h: 2, label: "Table" },
   { id: "dining-c", kind: "dining_table", x: 17, y: 4, w: 2, h: 2, label: "Table" },
+  // Nine tables, two labelled rows (Crit 9 phase 8's product-direction-
+  // update): online (shared, host-approved — see src/rooms.ts's
+  // pendingRequests) on top, a visitor's own private NPC game below.
+  // Only the Vegas slots are actually playable this round; every other
+  // game keeps its existing "not yet open" reserved treatment, now in
+  // both rows.
+  //
+  // vegas-1/vegas-2 and texas-1/dominoes-1/blackjack-1 keep their
+  // original ids on purpose — CLAUDE.md: furniture is never deleted, and
+  // a fixture id a live room binding (tables.current_room_id) might
+  // already reference must survive a layout revision unchanged. Only
+  // their position/label/tableMode change here; the old third online
+  // Vegas slot ("vegas-3") is dropped from this active layout per the
+  // student's own explicit reduction to two online Vegas tables — its
+  // row in the `tables` SQL table is never deleted (src/db.ts only seeds
+  // ids that are still in GAME_TABLES, it doesn't remove ones that
+  // aren't), so any room that was ever bound to it keeps existing,
+  // reachable by its own code, exactly as a disbanded room already is.
   {
     id: "vegas-1",
     kind: "game_table",
@@ -62,9 +91,10 @@ const CORE_FURNITURE: readonly Furniture[] = [
     y: 7,
     w: 2,
     h: 2,
-    label: "Vegas #1",
+    label: "Vegas Online #1",
     gameType: "vegas",
     available: true,
+    tableMode: "online",
   },
   {
     id: "vegas-2",
@@ -73,53 +103,98 @@ const CORE_FURNITURE: readonly Furniture[] = [
     y: 7,
     w: 2,
     h: 2,
-    label: "Vegas #2",
+    label: "Vegas Online #2",
     gameType: "vegas",
     available: true,
+    tableMode: "online",
   },
   {
-    id: "vegas-3",
+    id: "texas-1",
     kind: "game_table",
     x: 7,
     y: 7,
     w: 2,
     h: 2,
-    label: "Vegas #3",
-    gameType: "vegas",
-    available: true,
+    label: "Texas Hold'em Online — not yet open",
+    gameType: "texas",
+    available: false,
+    tableMode: "online",
   },
   {
-    id: "texas-1",
+    id: "dominoes-1",
     kind: "game_table",
     x: 10,
     y: 7,
     w: 2,
     h: 2,
-    label: "Texas Hold'em — not yet open",
-    gameType: "texas",
+    label: "Dominoes Online — not yet open",
+    gameType: "dominoes",
     available: false,
+    tableMode: "online",
   },
   {
-    id: "dominoes-1",
+    id: "blackjack-1",
     kind: "game_table",
     x: 13,
     y: 7,
     w: 2,
     h: 2,
-    label: "Dominoes — not yet open",
-    gameType: "dominoes",
-    available: false,
-  },
-  {
-    id: "blackjack-1",
-    kind: "game_table",
-    x: 16,
-    y: 7,
-    w: 2,
-    h: 2,
-    label: "Blackjack — not yet open",
+    label: "Blackjack Online — not yet open",
     gameType: "blackjack",
     available: false,
+    tableMode: "online",
+  },
+  // The NPC row — a 2-tile walkway gap (y9-10 relative) below the online
+  // row's own y7-8 footprint, so the two rows and their drawn chairs
+  // never crowd each other (spec/barLayout.test.ts's overlap check
+  // covers this the same way it already covers the dining/stool seats).
+  {
+    id: "vegas-npc-1",
+    kind: "game_table",
+    x: 1,
+    y: 11,
+    w: 2,
+    h: 2,
+    label: "Vegas NPC",
+    gameType: "vegas",
+    available: true,
+    tableMode: "npc",
+  },
+  {
+    id: "texas-npc-1",
+    kind: "game_table",
+    x: 4,
+    y: 11,
+    w: 2,
+    h: 2,
+    label: "Texas Hold'em NPC — not yet open",
+    gameType: "texas",
+    available: false,
+    tableMode: "npc",
+  },
+  {
+    id: "dominoes-npc-1",
+    kind: "game_table",
+    x: 7,
+    y: 11,
+    w: 2,
+    h: 2,
+    label: "Dominoes NPC — not yet open",
+    gameType: "dominoes",
+    available: false,
+    tableMode: "npc",
+  },
+  {
+    id: "blackjack-npc-1",
+    kind: "game_table",
+    x: 10,
+    y: 11,
+    w: 2,
+    h: 2,
+    label: "Blackjack NPC — not yet open",
+    gameType: "blackjack",
+    available: false,
+    tableMode: "npc",
   },
   // A map-edge, walkable-only fixture — clear of the furniture cluster
   // above (roughly x11-28/y7-15 after the +10/+6 offset below) and of
@@ -221,8 +296,13 @@ export function interactiveAt(x: number, y: number): Furniture | undefined {
   return f?.kind === "game_table" || f?.kind === "counter" ? f : undefined;
 }
 
-/** An open floor tile for a newly-joined patron to spawn on — row 9 is
- * kept clear of furniture specifically so this is always available. */
+/** An open floor tile for a newly-joined patron to spawn on. Row
+ * GRID_ROWS - 3 is south of every furniture fixture (the lowest, the NPC
+ * game-table row, bottoms out at abs y18 — see FURNITURE above), so this
+ * stays clear of the whole cluster regardless of future table-row
+ * changes, rather than pinning to a specific row number that a layout
+ * edit could silently walk into (exactly what happened to the old
+ * GRID_ROWS - 6 spawn once the NPC row's blackjack-npc-1 landed on it). */
 export function defaultSpawn(): { x: number; y: number } {
-  return { x: Math.floor(GRID_COLS / 2), y: GRID_ROWS - 6 };
+  return { x: Math.floor(GRID_COLS / 2), y: GRID_ROWS - 3 };
 }

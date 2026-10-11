@@ -593,6 +593,20 @@ app.post("/api/bar/tables/:tableId/join", async (c) => {
   return c.json(result, 201);
 });
 
+// A solo Vegas-NPC table (Crit 9 phase 8) — no waiting, no approval, and
+// deliberately no publishBarSnapshot(): an NPC table's own shared status
+// never changes (it always just reports "empty/startable" regardless of
+// how many private games are running there — src/tables.ts's
+// getTablesStatus), so there's nothing new for anyone else watching the
+// bar to see.
+app.post("/api/bar/tables/:tableId/start-npc", async (c) => {
+  const tableId = c.req.param("tableId");
+  const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody & { color?: unknown };
+  const result = tables.startNpcGame(db, tableId, barPlayerId(body), barSessionSecret(body), body.color as Color);
+  publishRoomState(result.code, rooms.getPublicState(db, result.code));
+  return c.json(result, 201);
+});
+
 // ---- Real-time push (Crit 9) — see CLAUDE.md for what this transport is
 // and isn't allowed to carry: server-computed public state outward only,
 // never a client write. src/live.ts holds the in-process subscriber

@@ -277,6 +277,38 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       }
       overlay.replaceChildren(el('section',{class:'world-dialog game-dialog',role:'dialog','aria-label':f.label},body));
     }
+    // A solo NPC table (src/tables.ts's startNpcGame) is never a dialog
+    // about a shared table's live status — there's no host, no waiting
+    // list, no approval, and nobody else can ever show up here, so this
+    // is a separate, simpler flow from openTableDialog above: pick a
+    // colour, start immediately against 3 computer-controlled opponents.
+    async function openNpcTableDialog(f){
+      path=[];
+      let selected=GAME_COLORS[0];
+      const error=el('p',{class:'error',role:'alert'});
+      const swatches=el('div',{class:'avatar-swatches','aria-label':'Table colour (seat preview)'},GAME_COLORS.map(c=>
+        el('button',{type:'button',class:'avatar-swatch','aria-label':`Colour ${c}`,
+          'aria-pressed':c===selected?'true':'false',style:`--swatch:${colors[c]}`,
+          onclick:e=>{selected=c;for(const b of e.currentTarget.parentElement.children)b.setAttribute('aria-pressed','false');e.currentTarget.setAttribute('aria-pressed','true');},
+        },'')));
+      const body=[
+        el('button',{class:'dialog-close','aria-label':'Close',onclick:()=>overlay.replaceChildren()},'×'),
+        el('p',{class:'eyebrow'},'VEGAS DICE · SOLO'),el('h1',{},f.label),
+        el('p',{class:'dialog-subtitle'},"Just you against three computer-controlled opponents — starts right away, nobody else can join."),
+        swatches,error,
+        el('button',{class:'enter-world',onclick:async e=>{
+          const btn=e.currentTarget;btn.disabled=true;error.textContent='';
+          try{
+            const result=await post(`/tables/${f.id}/start-npc`,{...session,color:selected});
+            try{saveSession(result.code,{playerId:result.playerId,sessionSecret:result.sessionSecret});}catch{}
+            post('/resume',session).catch(()=>{});
+            overlay.replaceChildren();
+            navigate(`/?room=${result.code}`);
+          }catch(err){error.textContent=err.message||'Could not start that table';btn.disabled=false;}
+        }},'Play vs. 3 NPCs'),
+      ];
+      overlay.replaceChildren(el('section',{class:'world-dialog game-dialog',role:'dialog','aria-label':f.label},body));
+    }
     function chooseCharacter(){
       let color=mine?.color||'green',skin=mine?.skin||'warm';
       const preview=el('canvas',{width:'180',height:'180','aria-label':'Character preview'});
@@ -344,7 +376,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       // fixture (a table, the counter) intercepts the click for its own
       // dialog/message instead.
       if(f&&f.blocksMovement!==false){
-        if(f.kind==='game_table'){if(f.available)openTableDialog(f);else toast.textContent=`${f.label}`;}
+        if(f.kind==='game_table'){if(!f.available)toast.textContent=`${f.label}`;else if(f.tableMode==='npc')openNpcTableDialog(f);else openTableDialog(f);}
         else if(f.kind==='counter')toast.textContent='The kitchen is not open yet. Grab a game while you wait.';
         else if(f.kind==='stool'||f.kind==='dining_table'){
           // Phase 2: a real seat — pick the nearest free one belonging to
@@ -446,6 +478,21 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         }else{box(fc,x+43,y+35,28,24,'#eee0bd');box(fc,x+51,y+40,12,12,'#bd8253');box(fc,x+77,y+29,11,18,'#94b0a5');}
       }
     }
+    // Clear per-row mode labels (PLAN.md phase 5's two-row layout: a
+    // player glancing at the room must be able to tell "shared, host-
+    // approved" from "solo, instant" apart without opening a dialog).
+    // Computed from the fixtures the server actually sent rather than a
+    // hardcoded row position, so a future layout revision can't silently
+    // leave the banner pointing at the wrong row.
+    function rowBanner(tables,text,color){
+      if(!tables.length)return;
+      const minX=Math.min(...tables.map(f=>f.x))*tile,maxX=Math.max(...tables.map(f=>f.x+f.w))*tile;
+      const topY=Math.min(...tables.map(f=>f.y))*tile;
+      fc.textAlign='center';fc.font='bold 14px monospace';fc.fillStyle=color;
+      fc.fillText(text,(minX+maxX)/2,topY-56);
+    }
+    rowBanner(fixtures.filter(f=>f.kind==='game_table'&&f.tableMode==='online'),'◆ ONLINE — REQUEST TO JOIN','#8fd1ff');
+    rowBanner(fixtures.filter(f=>f.kind==='game_table'&&f.tableMode==='npc'),'◆ SOLO VS. 3 NPCS','#ffce7a');
     function animate(now){
       if(!active)return;frame=requestAnimationFrame(animate);
       if(session&&mine&&!moving&&now-lastTime>145&&!overlay.childElementCount){

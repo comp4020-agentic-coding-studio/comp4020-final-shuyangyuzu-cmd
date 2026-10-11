@@ -3,11 +3,14 @@
 // of, and CLAUDE.md for the one-table-at-a-time / furniture-is-fixed
 // constraints this is built to satisfy.
 //
-// There are only 3 real Vegas tables, shared by every test in this
-// file (tests within one file run sequentially in vitest, but nothing
-// here assumes a *specific* table id stays free by the time a later
-// test runs) — every test that needs an empty table asks the server
-// which one currently is, rather than hardcoding "vegas-1" and hoping.
+// There are only 2 real *online* Vegas tables (the nine-table layout's
+// own reduction, Crit 9 phase 8 — a third slot, "vegas-npc-1", is a solo
+// kiosk with entirely different rules, covered separately below), shared
+// by every online-table test in this file (tests within one file run
+// sequentially in vitest, but nothing here assumes a *specific* table id
+// stays free by the time a later test runs) — every test that needs an
+// empty online table asks the server which one currently is, rather than
+// hardcoding "vegas-1" and hoping.
 
 import { expect, inject, it } from "vitest";
 
@@ -36,6 +39,7 @@ interface TableView {
   id: string;
   gameType: string;
   available: boolean;
+  tableMode: "online" | "npc";
   status: string;
   roomCode: string | null;
   playerCount: number;
@@ -50,16 +54,17 @@ async function tablesStatus(): Promise<TableView[]> {
 
 async function anEmptyVegasTable(): Promise<string> {
   const tables = await tablesStatus();
-  const empty = tables.find((t) => t.gameType === "vegas" && t.status === "empty");
-  if (!empty) throw new Error("no empty Vegas table available for this test — only 3 exist");
+  const empty = tables.find((t) => t.gameType === "vegas" && t.tableMode === "online" && t.status === "empty");
+  if (!empty) throw new Error("no empty online Vegas table available for this test — only 2 exist");
   return empty.id;
 }
 
-it("lists exactly 3 playable Vegas tables and 3 reserved slots that can never be created/joined", async () => {
+it("lists nine tables — 2 online + 1 NPC Vegas playable, 6 reserved that can never be created/joined", async () => {
   const tables = await tablesStatus();
+  expect(tables).toHaveLength(9);
   expect(tables.filter((t) => t.gameType === "vegas")).toHaveLength(3);
   const reserved = tables.filter((t) => !t.available);
-  expect(reserved).toHaveLength(3);
+  expect(reserved).toHaveLength(6);
 
   const patron = await joinBar("Reservist", "red");
   for (const t of reserved) {
@@ -450,4 +455,69 @@ it("refuses an action with a wrong bar session secret", async () => {
     color: "red",
   });
   expect(res.status).toBe(403);
+});
+
+// ---- Phase 5 (product-direction-update): the solo Vegas NPC table ----
+
+it("starting a solo Vegas-NPC game seats 1 human + 3 NPCs and starts immediately, no waiting", async () => {
+  const patron = await joinBar("SoloPlayer", "red");
+  const started = await postJson("/api/bar/tables/vegas-npc-1/start-npc", { ...patron, color: "red" });
+  expect(started.status).toBe(201);
+  expect(started.body.pending).toBe(false);
+
+  const state = await getJson(`/api/rooms/${started.body.code}/state`);
+  expect(state.body.phase).not.toBe("lobby"); // already started
+  expect(state.body.players).toHaveLength(4);
+  const human = state.body.players.find((p: { id: string }) => p.id === started.body.playerId);
+  expect(human.controller).toBe("human");
+  expect(state.body.players.filter((p: { controller: string }) => p.controller === "npc")).toHaveLength(3);
+  // The 3 NPCs took exactly the 3 colors the human didn't.
+  expect(state.body.players.map((p: { color: string }) => p.color).sort()).toEqual(
+    ["red", "blue", "green", "yellow"].sort(),
+  );
+});
+
+it("re-clicking the NPC table while already mid-game there hands back that same game, not a second one", async () => {
+  const patron = await joinBar("ReclickSolo", "blue");
+  const first = await postJson("/api/bar/tables/vegas-npc-1/start-npc", { ...patron, color: "blue" });
+  expect(first.status).toBe(201);
+
+  const again = await postJson("/api/bar/tables/vegas-npc-1/start-npc", { ...patron, color: "blue" });
+  expect(again.status).toBe(201);
+  expect(again.body.code).toBe(first.body.code);
+  expect(again.body.playerId).toBe(first.body.playerId);
+});
+
+it("two different visitors each get their own independent NPC game — never shown as joinable to each other", async () => {
+  const a = await joinBar("SoloA", "green");
+  const startedA = await postJson("/api/bar/tables/vegas-npc-1/start-npc", { ...a, color: "green" });
+  const b = await joinBar("SoloB", "yellow");
+  const startedB = await postJson("/api/bar/tables/vegas-npc-1/start-npc", { ...b, color: "yellow" });
+
+  expect(startedA.body.code).not.toBe(startedB.body.code);
+
+  // The shared bar view never shows either of these as a joinable online
+  // room, regardless of how many private NPC games are running right now.
+  const status = (await tablesStatus()).find((t) => t.id === "vegas-npc-1")!;
+  expect(status.status).toBe("empty");
+  expect(status.roomCode).toBeNull();
+  expect(status.playerCount).toBe(0);
+  expect(status.tableMode).toBe("npc");
+
+  // And the classic /join path for an online table must not work against
+  // an NPC table's id — it's a different kind of fixture entirely.
+  const wrongEndpoint = await postJson("/api/bar/tables/vegas-npc-1/join", { ...a, color: "red" });
+  expect(wrongEndpoint.status).toBe(404);
+});
+
+it("refuses starting a solo game at a reserved NPC slot", async () => {
+  const patron = await joinBar("ReservedSolo", "orange");
+  const res = await postJson("/api/bar/tables/texas-npc-1/start-npc", { ...patron, color: "red" });
+  expect(res.status).toBe(404);
+});
+
+it("refuses starting a solo NPC game at an online table's id", async () => {
+  const patron = await joinBar("WrongMode", "teal");
+  const res = await postJson("/api/bar/tables/vegas-1/start-npc", { ...patron, color: "red" });
+  expect(res.status).toBe(404);
 });

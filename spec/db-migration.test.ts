@@ -135,14 +135,14 @@ it("adds the bar's tables against today's real production schema without errorin
   db.close();
 });
 
-it("seeds the 6 fixed game tables exactly once, even across repeated opens", () => {
+it("seeds the 9 fixed game tables exactly once, even across repeated opens", () => {
   const path = join(dir, "vegas.db");
   createPreBarSchema(path);
 
   openDb(path).close();
   const db = openDb(path); // second open must not duplicate the seed
   const count = (db.prepare(`SELECT COUNT(*) AS n FROM tables`).get() as { n: number }).n;
-  expect(count).toBe(6);
+  expect(count).toBe(9);
   db.close();
 });
 

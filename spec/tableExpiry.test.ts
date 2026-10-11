@@ -80,15 +80,15 @@ it("a bar identity's stale table binding (its host gone past grace) is cleared, 
 it("getTablesStatus clearing a stale binding and a direct join attempt agree with each other (no more 'shows waiting, join says closed')", () => {
   const created = createRoom(db, "AloneHost", "green");
   const roomRow = db.prepare(`SELECT id FROM rooms WHERE code = ?`).get(created.code) as { id: string };
-  db.prepare(`UPDATE tables SET current_room_id = ? WHERE id = 'vegas-3'`).run(roomRow.id);
+  db.prepare(`UPDATE tables SET current_room_id = ? WHERE id = 'vegas-2'`).run(roomRow.id);
   db.prepare(`UPDATE presence SET last_seen_at = ? WHERE player_id = ?`).run(longAgo(), created.playerId);
 
-  const beforeAnyAction = getTablesStatus(db).find((t) => t.id === "vegas-3")!;
+  const beforeAnyAction = getTablesStatus(db).find((t) => t.id === "vegas-2")!;
   expect(beforeAnyAction.status).toBe("empty"); // not "waiting" with a player who's actually long gone
 
   // And a fresh create at this now-correctly-reported-empty table must
   // actually succeed — status and action must never disagree.
   const newcomer = joinBar(db, "Newcomer", "blue", "warm");
-  const fresh = createTableRoom(db, "vegas-3", newcomer.playerId, newcomer.sessionSecret, "blue");
+  const fresh = createTableRoom(db, "vegas-2", newcomer.playerId, newcomer.sessionSecret, "blue");
   expect(fresh.code).not.toBe(created.code);
 });

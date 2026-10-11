@@ -252,6 +252,90 @@ export function createRoom(db: Database.Database, nickname: string, color: Color
   return { code, playerId, sessionSecret };
 }
 
+/** A solo Vegas-NPC table (Crit 9 phase 8): one human plus the 3
+ * remaining colors as NPC-controlled seats, started immediately — no
+ * waiting, no approval, no other human needed. One transaction, like
+ * every other state-changing action here (CLAUDE.md): the room is
+ * created *and* started in the same write, since there's nothing to wait
+ * for (every seat is already `ready`). Reuses `startGameLogic` directly
+ * rather than a separate create-then-start round trip the way the
+ * table-click flow for an online table has to (there, a second human
+ * still needs to show up and ready first).
+ *
+ * An NPC's own `isConnected` check (startGameLogic's `connectedPlayerIds`
+ * requirement) is satisfied the same way a brand-new human player's
+ * already is: nobody has a presence row yet, so `isConnected` falls back
+ * to `joinedAt`, which is "now" for every seat here — no special-casing
+ * needed for an NPC never having a heartbeat at all. */
+export function createSoloNpcGame(db: Database.Database, nickname: string, color: Color): CreatedRoom {
+  const trimmed = nickname.trim();
+  if (!trimmed) throw new RoomError("nickname is required", "nickname_required", 400);
+  if (!COLORS.includes(color)) throw new RoomError("not a valid color", "bad_color", 400);
+
+  const roomId = randomUUID();
+  const humanId = randomUUID();
+  const sessionSecret = newSessionSecret();
+  const code = generateCode(db);
+  const now = new Date().toISOString();
+
+  const state = emptyState();
+  state.players[humanId] = {
+    id: humanId,
+    nickname: trimmed,
+    color,
+    seat: 0,
+    diceInHand: 0,
+    wonBills: [],
+    ready: true,
+    joinedAt: now,
+    controller: "human",
+  };
+  COLORS.filter((c) => c !== color).forEach((npcColor, i) => {
+    const npcId = randomUUID();
+    state.players[npcId] = {
+      id: npcId,
+      nickname: `${npcColor[0].toUpperCase()}${npcColor.slice(1)} (NPC)`,
+      color: npcColor,
+      seat: i + 1,
+      diceInHand: 0,
+      wonBills: [],
+      ready: true,
+      joinedAt: now,
+      controller: "npc",
+    };
+  });
+
+  const tx = db.transaction(() => {
+    db.prepare(
+      `INSERT INTO rooms (id, code, host_player_id, created_at, state_json, version) VALUES (?, ?, ?, ?, ?, 1)`,
+    ).run(roomId, code, humanId, now, JSON.stringify(state));
+    db.prepare(`INSERT INTO sessions (player_id, room_id, session_secret) VALUES (?, ?, ?)`).run(
+      humanId,
+      roomId,
+      sessionSecret,
+    );
+    recordHeartbeat(db, roomId, humanId, new Date(now));
+    logEvent(db, roomId, "solo_npc_room_created", { playerId: humanId, nickname: trimmed, color });
+
+    const connectedPlayerIds = new Set(Object.keys(state.players));
+    let started: RoomState;
+    try {
+      started = startGameLogic(state, systemRng, connectedPlayerIds);
+    } catch (err) {
+      if (err instanceof GameError) throw new RoomError(err.message, err.code, 409);
+      throw err;
+    }
+    db.prepare(`UPDATE rooms SET state_json = ?, version = version + 1 WHERE id = ?`).run(
+      JSON.stringify(started),
+      roomId,
+    );
+    logEvent(db, roomId, "game_started", { turnOrder: started.turnOrder });
+  });
+  tx();
+
+  return { code, playerId: humanId, sessionSecret };
+}
+
 export interface JoinedRoom {
   playerId: string;
   sessionSecret: string;

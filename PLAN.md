@@ -2459,3 +2459,107 @@ request→approve round trip directly against production: a request came
 back `pending: true`, and approving it returned a state with both
 players genuinely seated. 等待用户验收.
 
+## Phase 5 — built: nine-table two-row layout, labelled by mode, with a real solo Vegas NPC table
+
+**Layout (`src/barLayout.ts`)**: `GAME_TABLES` is now two rows of the same
+four game types. Online row (unchanged ids, `tableMode: "online"`):
+`vegas-1`/`vegas-2` (playable), `texas-1`/`dominoes-1`/`blackjack-1`
+("...Online — not yet open"). NPC row, new fixtures two tiles south
+(`tableMode: "npc"`): `vegas-npc-1` (playable), `texas-npc-1`/
+`dominoes-npc-1`/`blackjack-npc-1` ("...NPC — not yet open"). The old
+third online Vegas slot (`vegas-3`) is dropped from the active layout per
+the student's own reduction to two online tables — never deleted from the
+`tables` SQL row (`src/db.ts` only seeds ids still in `GAME_TABLES`, never
+removes ones that fall out), so a room ever bound to it stays reachable by
+its own code exactly as any disbanded room already is. Every pre-existing
+table id is kept unchanged (CLAUDE.md: furniture ids a live binding might
+reference must survive a layout revision) — only new ids were added or
+repositioned.
+
+**A real bug this phase found and fixed in its own new layout**: the NPC
+row's `blackjack-npc-1` (abs tiles x20-21, y17-18) landed directly on top
+of the hardcoded default spawn tile (`GRID_COLS/2, GRID_ROWS-6` = x20,
+y18) and its own adjacent tile — a newly-joined patron would spawn
+*inside* a game table, and `spec/bar.test.ts`'s existing "accepts a single
+adjacent step" test caught it immediately (409 instead of 200). Fixed by
+making `defaultSpawn` relative to the whole furniture cluster's bottom
+edge (`GRID_ROWS - 3`, clear of every row) instead of a number picked
+before this row existed — exactly the kind of drift CLAUDE.md's furniture
+section now calls out explicitly so it isn't repeated by a future layout
+edit.
+
+**Solo NPC table architecture (`rooms.createSoloNpcGame`,
+`tables.startNpcGame`)**: a genuinely different fixture shape from an
+online table, not "an online table nobody else joined" — see CLAUDE.md's
+new "Two game modes, two rows, one architecture each" section for the
+full reasoning. In short: no shared `current_room_id` pointer, one brand
+new private room per visitor (1 human + 3 NPC seats, `startGameLogic` run
+in the same creating transaction), `getTablesStatus` always reports it
+empty/unoccupied regardless of how many private games are running, and
+`resolveActiveSeat` was refactored to resolve a bar identity's active
+room via its own `sessions.room_id` row rather than the fixture's pointer
+— which now works for both fixture kinds uniformly. `joinTableRoom` and
+`createTableRoom` both gained a `tableMode` guard checked *before*
+`checkExistingSeat`'s own early return, closing a real bug a new test
+caught: a visitor who already had an active NPC-table seat could
+otherwise get a `201` (their own NPC game handed back) from the
+*online*-table `/join` endpoint called against that same id, instead of
+the `404` that endpoint owes any call against the wrong kind of fixture.
+
+**Client (`public/tavern.js`)**: table clicks now branch on `tableMode` —
+an online fixture still opens the existing live-status dialog
+(`openTableDialog`); an NPC fixture opens a new, simpler
+`openNpcTableDialog` (pick a colour, "Play vs. 3 NPCs", starts
+immediately, no status to show since nothing is ever shared). Each row
+gets a banner (`rowBanner`) painted once onto the static floor layer,
+positioned from the actual fixture coordinates the server sent rather
+than a hardcoded pixel offset, so a future layout change can't leave the
+label pointing at the wrong row.
+
+**Regression tests**: `spec/barLayout.test.ts`/`spec/bar.test.ts` updated
+for nine tables (3 playable Vegas, 6 reserved) plus the existing
+all-pairs/row overlap checks extended to the new row.
+`spec/db-migration.test.ts`'s fixed-table-count assertion updated 6→9 (and
+its "second open must not duplicate the seed" check fixed to actually
+`.close()` the second connection before asserting, closing the same class
+of Windows `EPERM`-on-cleanup leak fixed once before in this file: an
+assertion throwing before a later `.close()` line leaves the handle open
+for the rest of the test run). `spec/tableExpiry.test.ts`'s stale
+`vegas-3` references swapped for `vegas-2` (a real, still-existing
+table — it was never about table identity, just needed *a* real bound
+table id). `spec/tables.test.ts` gained 5 new cases: two independent
+visitors' NPC games never share a room, the shared status view always
+reports an NPC table empty, the wrong-endpoint 404 (online `/join`
+against an NPC id), starting at a reserved NPC slot refuses (404), and
+starting a solo game against an *online* table's id refuses (404). All
+166 tests green; `pnpm check` run twice clean against a fresh `DATA_DIR`.
+
+**Live verification, real browser (Playwright, local)**: joined the bar,
+read the real `/api/bar/layout` response and confirmed 9 game fixtures
+(2 online + 1 NPC playable, 6 reserved) tagged with the right
+`tableMode`; computed the actual on-screen click position for
+`vegas-npc-1` from the client's own camera-follow formula (not a direct
+DOM/API shortcut) and clicked it for real — the correct dialog opened
+("Vegas NPC" / "Play vs. 3 NPCs"), and clicking through created a real
+room and navigated into it. Screenshot confirms both row banners ("◆
+ONLINE — REQUEST TO JOIN", "◆ SOLO VS. 3 NPCS") rendered correctly behind
+the dialog. A second script then drove that same solo game through a real
+page: the human host rolled and placed once, and the NPC engine then
+autonomously rolled *and* placed for all three computer seats in turn
+order (blue → green → yellow), each shedding dice exactly once, before
+correctly stopping back at the human's own turn (`awaiting_roll`,
+unchanged across 10+ seconds of polling) rather than acting for them —
+confirming the existing NPC turn engine (built in an earlier phase) works
+correctly through this new entry point too, not just the handoff scenario
+it was originally proven against.
+
+**Explicitly not built this phase** (recorded as a known gap, not
+silently dropped): an online table host's ability to add/remove NPC
+seats before starting — section 4 of the original product-direction
+spec. Every online table this round starts with only the humans who
+joined/were approved; "play vs. NPCs" is only available via the separate
+solo NPC row.
+
+Not yet done as of this entry: `pnpm check:evidence`, commit/push, CI,
+and production verification (next). 等待用户验收.
+

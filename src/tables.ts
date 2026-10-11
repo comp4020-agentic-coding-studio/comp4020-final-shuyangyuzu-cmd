@@ -47,6 +47,14 @@ export interface TableStatusView {
   gameType: string;
   available: boolean;
   label: string;
+  /** Which row this table belongs to (src/barLayout.ts's TableMode). An
+   * "npc" table always reports as "empty" with no occupancy at all
+   * below, regardless of how many visitors are privately playing there
+   * right now — it's a solo kiosk, not a shared room other patrons could
+   * ever join, and must never be shown as if it were one (PLAN.md's
+   * product-direction-update: "普通大厅玩家不应把别人的个人NPC对局显示成
+   * 自己可加入的在线房间"). */
+  tableMode: "online" | "npc";
   status: TableLiveStatus;
   roomCode: string | null;
   playerCount: number;
@@ -59,7 +67,8 @@ export interface TableStatusView {
    * (Crit 9 phase 8) — a lightweight count for the bar's own table
    * dialog to show "N waiting for approval", not full requester detail
    * (that's the room's own lobby view, which already shows it to
-   * everyone — CLAUDE.md transparency). Always 0 once a game has started. */
+   * everyone — CLAUDE.md transparency). Always 0 once a game has started,
+   * and always 0 for an NPC table (no approval concept there). */
   pendingCount: number;
 }
 
@@ -105,13 +114,35 @@ function emptySeats(): Array<TableSeatView | null> {
 
 export function getTablesStatus(db: Database.Database): TableStatusView[] {
   return GAME_TABLES.map((t) => {
+    const tableMode = t.tableMode ?? "online";
     if (!t.available) {
       return {
         id: t.id,
         gameType: t.gameType!,
         available: false,
         label: t.label,
+        tableMode,
         status: "reserved",
+        roomCode: null,
+        playerCount: 0,
+        takenColors: [],
+        seats: emptySeats(),
+        pendingCount: 0,
+      };
+    }
+    // An NPC table is a solo kiosk, not a single shared room — it has no
+    // `current_room_id` concept at all (many visitors can each be mid-
+    // game there at once), so it always reports as freely startable,
+    // never showing anyone else's private game as if it were a joinable
+    // online room (PLAN.md's product-direction-update).
+    if (tableMode === "npc") {
+      return {
+        id: t.id,
+        gameType: t.gameType!,
+        available: true,
+        label: t.label,
+        tableMode,
+        status: "empty",
         roomCode: null,
         playerCount: 0,
         takenColors: [],
@@ -137,6 +168,7 @@ export function getTablesStatus(db: Database.Database): TableStatusView[] {
         gameType: t.gameType!,
         available: true,
         label: t.label,
+        tableMode,
         status: "empty",
         roomCode: null,
         playerCount: 0,
@@ -157,6 +189,7 @@ export function getTablesStatus(db: Database.Database): TableStatusView[] {
       gameType: t.gameType!,
       available: true,
       label: t.label,
+      tableMode,
       status: phaseToStatus(open.state.phase),
       roomCode: open.code,
       playerCount: players.length,
@@ -194,33 +227,41 @@ interface ActiveSeat {
  * — see PLAN.md's product-direction-update entry for the bug this
  * replaces). A stale pointer (room closed, request rejected/expired, or
  * left via the room's own /leave without this pointer ever being told)
- * is cleared here, lazily, rather than left dangling. */
+ * is cleared here, lazily, rather than left dangling.
+ *
+ * Resolves the room via `sessions.room_id` for the stored
+ * `current_game_player_id` — not via the table fixture's own
+ * `current_room_id` pointer. The two agree for an online table (exactly
+ * one shared room at a time), but a solo Vegas-NPC table (Crit 9 phase
+ * 8) has *many* concurrent private rooms bound to the same fixture — one
+ * per visitor — so there is no single "the room" a fixture-level pointer
+ * could even name. Resolving per-identity, from that identity's own
+ * session, works correctly either way without the two table kinds
+ * needing different code paths here. */
 function resolveActiveSeat(db: Database.Database, barPlayerId: string): ActiveSeat | null {
   const bp = db.prepare(`SELECT current_table_id, current_game_player_id FROM bar_players WHERE id = ?`).get(
     barPlayerId,
   ) as BarPlayerLinkage | undefined;
   if (!bp?.current_table_id || !bp.current_game_player_id) return null;
 
-  const tableRow = db.prepare(`SELECT current_room_id FROM tables WHERE id = ?`).get(bp.current_table_id) as
-    | { current_room_id: string | null }
-    | undefined;
-  const open = lookupOpenRoom(db, tableRow?.current_room_id ?? null);
-  const seated = open !== null && open.state.players.some((p) => p.id === bp.current_game_player_id);
-  const pending = !seated && open !== null && open.state.pendingRequests.some((r) => r.id === bp.current_game_player_id);
+  const sessionRow = db.prepare(`SELECT room_id, session_secret FROM sessions WHERE player_id = ?`).get(
+    bp.current_game_player_id,
+  ) as { room_id: string; session_secret: string } | undefined;
 
-  if (seated || pending) {
-    const sessionRow = db.prepare(`SELECT session_secret FROM sessions WHERE player_id = ?`).get(
-      bp.current_game_player_id,
-    ) as { session_secret: string } | undefined;
-    // sessionRow is always present here: creating/joining/requesting a
-    // room always inserts its sessions row in the same transaction that
-    // set this bar_players pointer, and neither is ever deleted
-    // independently while still seated or pending.
+  const roomRow = sessionRow
+    ? (db.prepare(`SELECT code FROM rooms WHERE id = ?`).get(sessionRow.room_id) as { code: string } | undefined)
+    : undefined;
+  const state = roomRow ? rooms.getPublicState(db, roomRow.code) : null; // applies the lazy sweep
+  const seated = state !== null && !state.closed && state.players.some((p) => p.id === bp.current_game_player_id);
+  const pending =
+    !seated && state !== null && !state.closed && state.pendingRequests.some((r) => r.id === bp.current_game_player_id);
+
+  if (sessionRow && roomRow && (seated || pending)) {
     return {
       tableId: bp.current_table_id,
-      code: open!.code,
+      code: roomRow.code,
       playerId: bp.current_game_player_id,
-      sessionSecret: sessionRow!.session_secret,
+      sessionSecret: sessionRow.session_secret,
       pending,
     };
   }
@@ -293,7 +334,12 @@ export function createTableRoom(
 ): TableRoomResult {
   requireBarSession(db, barPlayerId, barSessionSecret);
   const furniture = GAME_TABLES.find((t) => t.id === tableId);
-  if (!furniture?.available) throw new TableError("not a playable table", "table_not_found", 404);
+  // Same guard as joinTableRoom's own: an NPC-mode fixture is never a
+  // shared room another patron could create/join, so this endpoint must
+  // reject it outright rather than let it through on `available` alone.
+  if (!furniture?.available || furniture.tableMode !== "online") {
+    throw new TableError("not a playable table", "table_not_found", 404);
+  }
 
   const tx = db.transaction(() => {
     const existing = checkExistingSeat(db, barPlayerId, tableId);
@@ -341,6 +387,17 @@ export function joinTableRoom(
   color: Color,
 ): TableRoomResult {
   requireBarSession(db, barPlayerId, barSessionSecret);
+  const furniture = GAME_TABLES.find((t) => t.id === tableId);
+  // Checked before checkExistingSeat's own early return: a visitor who
+  // already has an active seat at an NPC table (their own solo game)
+  // must still get a hard 404 calling this ONLINE-table endpoint against
+  // that same id, not a success that hands back their NPC game — the two
+  // table kinds use different start endpoints (startNpcGame) on purpose
+  // (PLAN.md's product-direction-update: an NPC table is never shown as
+  // joinable to anyone, including its own player calling the wrong route).
+  if (!furniture?.available || furniture.tableMode !== "online") {
+    throw new TableError("not a playable online table", "table_not_found", 404);
+  }
   const tx = db.transaction(() => {
     const existing = checkExistingSeat(db, barPlayerId, tableId);
     if (existing) return existing; // re-clicking the table you're already at/pending for, not a new request
@@ -365,6 +422,52 @@ export function joinTableRoom(
       barPlayerId,
     );
     return { code: open.code, playerId: requested.playerId, sessionSecret: requested.sessionSecret, pending: true };
+  });
+  return tx();
+}
+
+/** Starts (or resumes) this visitor's own private game at a solo Vegas-
+ * NPC table — never a shared room another patron could join, and never
+ * gated on anyone else (no waiting, no approval). Re-clicking the same
+ * NPC table while already in an active private game there hands back
+ * that same game (checkExistingSeat, unchanged) rather than starting a
+ * second one and orphaning the first; re-clicking it after that game has
+ * ended (round_end or disbanded... though an NPC game is never
+ * disbanded, only ever finishes) starts a genuinely new one. Never
+ * touches `tables.current_room_id` at all — there is no single "the"
+ * room for this fixture (PLAN.md's product-direction-update: one table,
+ * many concurrent private games, one per visitor). */
+export function startNpcGame(
+  db: Database.Database,
+  tableId: string,
+  barPlayerId: string,
+  barSessionSecret: string,
+  color: Color,
+): TableRoomResult {
+  requireBarSession(db, barPlayerId, barSessionSecret);
+  const furniture = GAME_TABLES.find((t) => t.id === tableId);
+  if (!furniture?.available || furniture.tableMode !== "npc") {
+    throw new TableError("not a solo NPC table", "table_not_found", 404);
+  }
+
+  const tx = db.transaction(() => {
+    const existing = checkExistingSeat(db, barPlayerId, tableId);
+    if (existing) return existing; // already mid-game here — hand back that same game, don't start a second
+
+    const nickname = getBarNickname(db, barPlayerId);
+    let created: rooms.CreatedRoom;
+    try {
+      created = rooms.createSoloNpcGame(db, nickname, color);
+    } catch (err) {
+      if (err instanceof RoomError) throw new TableError(err.message, err.code, err.status);
+      throw err;
+    }
+    db.prepare(`UPDATE bar_players SET current_table_id = ?, current_game_player_id = ? WHERE id = ?`).run(
+      tableId,
+      created.playerId,
+      barPlayerId,
+    );
+    return { ...created, pending: false };
   });
   return tx();
 }

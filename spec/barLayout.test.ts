@@ -141,12 +141,44 @@ describe("BAR_SEATS (Phase 2: real dining/stool seating)", () => {
   });
 });
 
-it("has exactly 3 playable Vegas tables and 3 reserved slots, all 2x2", () => {
-  expect(GAME_TABLES).toHaveLength(6);
-  expect(GAME_TABLES.filter((t) => t.gameType === "vegas")).toHaveLength(3);
-  expect(GAME_TABLES.filter((t) => !t.available)).toHaveLength(3);
+it("has nine tables in two labelled rows — 2 online + 1 NPC Vegas table playable, 6 reserved slots, all 2x2", () => {
+  expect(GAME_TABLES).toHaveLength(9);
+  expect(GAME_TABLES.filter((t) => t.gameType === "vegas")).toHaveLength(3); // 2 online + 1 NPC
+  expect(GAME_TABLES.filter((t) => t.available)).toHaveLength(3);
+  expect(GAME_TABLES.filter((t) => !t.available)).toHaveLength(6);
+  expect(GAME_TABLES.filter((t) => t.tableMode === "online")).toHaveLength(5);
+  expect(GAME_TABLES.filter((t) => t.tableMode === "npc")).toHaveLength(4);
+  // Every available slot is a Vegas table — only this game is actually
+  // implemented this round (PLAN.md's product-direction-update), in both
+  // modes; every other game stays reserved in both rows.
+  for (const t of GAME_TABLES.filter((t) => t.available)) {
+    expect(t.gameType).toBe("vegas");
+  }
   for (const t of GAME_TABLES) {
     expect(t.w).toBe(2);
     expect(t.h).toBe(2);
+  }
+});
+
+it("the two rows (online, NPC) don't overlap each other or anything else", () => {
+  const online = GAME_TABLES.filter((t) => t.tableMode === "online");
+  const npc = GAME_TABLES.filter((t) => t.tableMode === "npc");
+  for (const a of online) {
+    for (const b of npc) {
+      const overlapsX = a.x < b.x + b.w && b.x < a.x + a.w;
+      const overlapsY = a.y < b.y + b.h && b.y < a.y + a.h;
+      expect(overlapsX && overlapsY, `${a.id} overlaps ${b.id}`).toBe(false);
+    }
+  }
+});
+
+it("no two fixtures in the whole layout overlap each other, full stop", () => {
+  for (let i = 0; i < FURNITURE.length; i++) {
+    for (let j = i + 1; j < FURNITURE.length; j++) {
+      const a = FURNITURE[i], b = FURNITURE[j];
+      const overlapsX = a.x < b.x + b.w && b.x < a.x + a.w;
+      const overlapsY = a.y < b.y + b.h && b.y < a.y + a.h;
+      expect(overlapsX && overlapsY, `${a.id} overlaps ${b.id}`).toBe(false);
+    }
   }
 });

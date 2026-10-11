@@ -417,6 +417,47 @@ anywhere else. A game table's own 4 chairs are deliberately **not**
 room's own player roster, a different, pre-existing occupancy concept
 that a second one would only duplicate.
 
+## Two game modes, two rows, one architecture each
+
+Crit 9 phase 8's nine-table layout (`src/barLayout.ts`'s `GAME_TABLES`) is
+two labelled rows of the same four game types, not one row with a mode
+toggle: an **online** row (shared, host-approved — the section above) and
+an **NPC** row (solo, instant, never shown as joinable). Only the Vegas
+slot is actually playable in either row this round; every other game type
+keeps its existing "not yet open" reserved treatment in both rows — a
+reserved slot still carries a real `tableMode`, it's just `available:
+false`. The client paints a banner above each row directly from the
+fixtures the server sent (`public/tavern.js`'s `rowBanner`, computed from
+the actual `x`/`y`/`w` of that row's own fixtures, not a hardcoded pixel
+position), so a future layout revision can't silently leave a banner
+pointing at the wrong row the way the old hardcoded default-spawn tile
+once drifted into furniture — a real bug this phase hit and fixed, see
+`src/barLayout.ts`'s `defaultSpawn` comment.
+
+**A solo NPC table (`startNpcGame`/`createSoloNpcGame`) is architecturally
+a different kind of fixture, not an online table with no opponents.** An
+online table fixture points at *one* shared room (`tables.current_room_id`)
+that every joiner's request targets; an NPC fixture never sets that
+pointer at all, because there is no single "the" room for it — every
+visitor who clicks it gets their own brand-new private room (1 human
+seat, ready, plus the other 3 colors seeded `controller: "npc"`, ready,
+with `startGameLogic` run in the same transaction that creates them), and
+two different visitors' games never see each other. `getTablesStatus`
+special-cases `tableMode === "npc"` to always report `empty`/no occupancy
+regardless of how many private games are concurrently running there — the
+shared bar view has nothing truthful to say about "how full" a fixture is
+whose games aren't shared. Consequently `resolveActiveSeat`
+(`src/tables.ts`) cannot resolve "which room is this bar identity's
+active game" via the fixture's own pointer the way an online table can;
+it instead looks up the identity's own `sessions.room_id` row directly,
+which works identically for both fixture kinds. `joinTableRoom` and
+`createTableRoom` both reject a `tableMode` mismatch outright (404)
+*before* `checkExistingSeat`'s own early return gets a chance to run —
+necessary because a visitor who already has an active seat at their own
+NPC table would otherwise have that early return silently hand back their
+NPC game in response to a call against the ONLINE-table endpoint, instead
+of the 404 that endpoint owes a caller for the wrong kind of fixture.
+
 ## A patron holds at most one open table at a time
 
 Enforced server-side on the bar identity, the same way every other rule
