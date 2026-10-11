@@ -2145,6 +2145,17 @@ above only in its single-tile-away form) — the underlying mechanism
 either way, but a longer walk specifically wasn't the one exercised live.
 
 `pnpm check` (18 files, 137/137) green, fresh `DATA_DIR`, run twice;
-`pnpm check:evidence` green. 等待用户验收 once deployed and
-production-verified below.
+`pnpm check:evidence` green.
+
+**Deployed and verified live**: pushed (commit `b4728a8`); CI's `check`
+and `deploy` jobs both passed. Directly against
+`https://comp4020-final-shuyangyuzu-cmd.fly.dev`: `/version` matches a
+fresh local hash; `GET /api/bar/layout` reports all 17 real seats (5
+stools + 4×3 dining); a real probe patron was refused sitting from the
+spawn tile (`409 not_at_seat`), then walked there via real,
+individually-server-validated steps, sat successfully
+(`seatId: "stool-1-seat"`), and stood back up successfully
+(`seatId: null`) — the full real-server round trip, not just a local
+check. This is the agent's own re-verification, not the student's own
+check — 等待用户验收.
 
