@@ -2824,5 +2824,28 @@ green throughout — see the "All 192 tests green" note above; nothing in
 that suite needed behavior changes, only the two occupancy-fragile tests
 already described.
 
-`pnpm check:evidence` green. Not yet done as of this entry: commit/push,
-CI, and production verification. 等待用户验收.
+`pnpm check:evidence` green. Committed (`6b3b71f`), pushed, CI's
+`checks` job passed (run `38186521920`).
+
+**Deployed and verified live**: `/version` on
+`https://comp4020-final-shuyangyuzu-cmd.fly.dev` returns `30318e425b`,
+matching the local build exactly. A throwaway probe (three identities,
+created and never touching the student's own real tables) against
+production confirmed: the real layout response carries all 4 dining
+tables at the new positions; a cross-tile jump attempt refuses (409);
+walking a second probe adjacent to the first via real single steps
+succeeded cleanly (no overlap at any point); a chat thread opened and a
+message sent returned 201, and — held open via a real SSE connection to
+`/api/bar/chat/events`, not just checked for persistence — the
+recipient's stream received it live within under 2 seconds; a third
+probe identity was refused opening a chat with the first (`409
+too_far`, correctly failing the distance check from across the bar) and
+refused reading the real pair's own thread directly by its real,
+deterministic id (`403 unauthorized`). One of this probe's own move
+calls landed on `invalid_move` rather than the `tile_occupied` code path
+specifically (the two probes weren't yet adjacent at that exact step,
+an artifact of this probe script's own spacing, not a gap in the
+feature) — the `tile_occupied` path itself is covered by
+`spec/occupancy.test.ts` and was independently confirmed with two real
+adjacent browser contexts in the earlier local verification, and CI ran
+that exact suite against this exact commit before it was deployed. 等待用户验收.
