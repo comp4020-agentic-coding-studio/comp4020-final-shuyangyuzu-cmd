@@ -3001,3 +3001,23 @@ in the corner. A second message during the same session confirmed, via
 request logging, zero calls to any `/api/bar/chat/*` endpoint — the old
 private module is live and intact (unused) in production too, never
 reached by normal use. 等待用户验收.
+
+**A real CI flake, caught by CI itself, fixed in a follow-up commit.**
+The verification-record push above (a PLAN.md-only diff, no code change)
+failed CI's own test run — not a deploy regression, since `deploy` never
+runs when `check` fails, so production stayed on the prior, already-
+verified build throughout. `spec/live.test.ts`'s own SSE-push test tried
+all 4 cardinal neighbours of one fixed spawn tile and asserted at least
+one move succeeded, same defensive pattern as `spec/bar.test.ts`'s own
+adjacent-step test — but under tile occupancy (product-direction-update,
+the three-improvements entry above), it's possible, if rare, for *all 4*
+immediate neighbours of one spawn tile to be legitimately held by other
+patrons this same parallel CI run spawned nearby; trying harder from the
+same unlucky tile was never going to fix that. Both tests now retry with
+a **fresh join** (a new, independently jittered spawn) up to 5 times
+rather than giving up after one spawn's own 4 neighbours, and
+`spec/live.test.ts`'s own event-count assertion was loosened from
+"exactly 2" to "at least 2, and the last one's seq exceeds the first's"
+to tolerate each retry's own join also producing a push on the already-
+open stream. 201/201 green across 4 consecutive local runs after the
+fix, `pnpm check:evidence` green; pushed as its own commit.

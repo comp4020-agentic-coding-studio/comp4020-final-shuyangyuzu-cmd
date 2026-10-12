@@ -76,8 +76,6 @@ it("refuses an action with a wrong session secret", async () => {
 });
 
 it("accepts a single adjacent step onto a walkable tile", async () => {
-  const joined = await postJson("/api/bar/join", { nickname: "Dana", color: "yellow" });
-  const session = { playerId: joined.body.playerId, sessionSecret: joined.body.sessionSecret };
   // The spawn row is kept clear of furniture by design (src/barLayout.ts),
   // so a step in *some* direction is always valid regardless of exact
   // spawn x — but with tile occupancy (product-direction-update), one
@@ -85,22 +83,33 @@ it("accepts a single adjacent step onto a walkable tile", async () => {
   // some other patron this same parallel test run spawned nearby, so
   // this tries all four cardinal neighbours and only requires at least
   // one to succeed, rather than asserting a single hardcoded direction.
-  const candidates = [
-    [joined.body.x + 1, joined.body.y],
-    [joined.body.x - 1, joined.body.y],
-    [joined.body.x, joined.body.y + 1],
-    [joined.body.x, joined.body.y - 1],
-  ];
-  let res, target;
-  for (const [x, y] of candidates) {
-    res = await postJson("/api/bar/move", { ...session, x, y });
-    if (res.status === 200) {
-      target = [x, y];
-      break;
+  // A real CI flake surfaced the next step of this same risk: tile
+  // occupancy can rarely make *all four* neighbours of one fixed spawn
+  // tile unavailable at once under enough concurrent load — a fresh
+  // join (a new, independently jittered spawn) is the actual fix, not
+  // trying harder from the same unlucky tile (spec/live.test.ts hit the
+  // identical failure mode and is fixed the same way).
+  let res, target, playerId: string;
+  for (let attempt = 0; attempt < 5 && !target; attempt++) {
+    const joined = await postJson("/api/bar/join", { nickname: `Dana${attempt}`, color: "yellow" });
+    const session = { playerId: joined.body.playerId, sessionSecret: joined.body.sessionSecret };
+    playerId = joined.body.playerId;
+    const candidates = [
+      [joined.body.x + 1, joined.body.y],
+      [joined.body.x - 1, joined.body.y],
+      [joined.body.x, joined.body.y + 1],
+      [joined.body.x, joined.body.y - 1],
+    ];
+    for (const [x, y] of candidates) {
+      res = await postJson("/api/bar/move", { ...session, x, y });
+      if (res.status === 200) {
+        target = [x, y];
+        break;
+      }
     }
   }
   expect(res!.status).toBe(200);
-  const me = res!.body.players.find((p: { id: string }) => p.id === joined.body.playerId);
+  const me = res!.body.players.find((p: { id: string }) => p.id === playerId);
   expect(me.x).toBe(target![0]);
   expect(me.y).toBe(target![1]);
 });
