@@ -9,6 +9,8 @@ import { streamSSE } from "hono/streaming";
 import * as bar from "./bar.ts";
 import { BarError } from "./bar.ts";
 import { FURNITURE, GAME_CHAIRS, GRID_COLS, GRID_ROWS, TILE_SIZE } from "./barLayout.ts";
+import * as chat from "./chat.ts";
+import { ChatError } from "./chat.ts";
 import { dbPathFromEnv, openDb } from "./db.ts";
 import * as live from "./live.ts";
 import { renderReadme } from "./markdown.ts";
@@ -223,8 +225,8 @@ app.use("*", async (c, next) => {
 });
 
 app.onError((err, c) => {
-  if (err instanceof RoomError || err instanceof BarError || err instanceof TableError) {
-    return c.json({ error: err.code, message: err.message }, err.status as 400 | 403 | 404 | 409 | 410);
+  if (err instanceof RoomError || err instanceof BarError || err instanceof TableError || err instanceof ChatError) {
+    return c.json({ error: err.code, message: err.message }, err.status as 400 | 403 | 404 | 409 | 410 | 429);
   }
   console.error(err);
   return c.json({ error: "internal_error", message: "something went wrong" }, 500);
@@ -608,6 +610,56 @@ app.post("/api/bar/tables/:tableId/start-npc", async (c) => {
   return c.json(result, 201);
 });
 
+// ---- Proximity-triggered 1:1 chat (product-direction-update, part 3) ----
+//
+// Every mutating action here is a plain POST with {playerId,
+// sessionSecret} like every other bar action; the two read-only/stream
+// routes accept the same pair as query parameters instead, since a GET
+// has no body and EventSource can't attach custom headers — the
+// server-side check (src/chat.ts's requireBarSession/requireThreadAccess)
+// is identical either way, only where the proof travels differs.
+
+app.post("/api/bar/chat/open", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody & { otherPlayerId?: unknown };
+  const otherPlayerId = typeof body.otherPlayerId === "string" ? body.otherPlayerId : "";
+  const result = chat.openThread(db, barPlayerId(body), barSessionSecret(body), otherPlayerId);
+  return c.json(result, 201);
+});
+
+app.get("/api/bar/chat/:threadId/messages", (c) => {
+  const threadId = c.req.param("threadId");
+  const pId = c.req.query("playerId") ?? "";
+  const secret = c.req.query("sessionSecret") ?? "";
+  chat.requireThreadAccess(db, threadId, pId, secret);
+  const afterId = Number(c.req.query("afterId") ?? "0") || 0;
+  return c.json({ messages: chat.listMessages(db, threadId, afterId) });
+});
+
+app.post("/api/bar/chat/:threadId/send", async (c) => {
+  const threadId = c.req.param("threadId");
+  const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody & { clientMsgId?: unknown; body?: unknown };
+  const sender = barPlayerId(body);
+  const message = chat.sendMessage(
+    db,
+    threadId,
+    sender,
+    barSessionSecret(body),
+    typeof body.clientMsgId === "string" ? body.clientMsgId : "",
+    typeof body.body === "string" ? body.body : "",
+  );
+  // Delivered only to the two participants' own authenticated inbox
+  // channels (src/live.ts) — never the shared public bar SSE stream
+  // (CLAUDE.md). Includes the sender's own id so the push is pushed to
+  // the sender's *other* open tabs/devices too, each of which applies it
+  // the same idempotent way a direct response already would.
+  const other = chat.otherParticipantOf(db, threadId, sender);
+  const senderNickname = (db.prepare(`SELECT nickname FROM bar_players WHERE id = ?`).get(sender) as { nickname: string } | undefined)?.nickname ?? "";
+  const payload = { ...message, senderNickname };
+  live.publishToPlayer(sender, payload);
+  live.publishToPlayer(other, payload);
+  return c.json(message, 201);
+});
+
 // ---- Real-time push (Crit 9) — see CLAUDE.md for what this transport is
 // and isn't allowed to carry: server-computed public state outward only,
 // never a client write. src/live.ts holds the in-process subscriber
@@ -650,6 +702,37 @@ app.get("/api/bar/events", (c) => {
     const unsubscribe = live.subscribeBar(send);
     stream.onAbort(() => unsubscribe());
     await stream.writeSSE({ data: JSON.stringify(barSnapshot(live.currentBarSeq())) }).catch(() => {});
+    while (!stream.closed && !stream.aborted) {
+      try {
+        await stream.sleep(SSE_PING_MS);
+      } catch {
+        break;
+      }
+      if (stream.closed || stream.aborted) break;
+      await stream.writeSSE({ event: "ping", data: "" }).catch(() => {});
+    }
+    unsubscribe();
+  });
+});
+
+// The private chat inbox channel — one per bar identity, authenticated
+// via query params (see the chat section above for why), never the
+// shared bar channel. No initial snapshot payload: unlike a room/the bar
+// (one piece of state with one current value), this channel only ever
+// carries individual message events as they happen — a client fetches a
+// specific thread's own history via GET .../messages when it opens that
+// dialog, which is also how it catches up on anything sent while this
+// stream was disconnected.
+app.get("/api/bar/chat/events", (c) => {
+  const pId = c.req.query("playerId") ?? "";
+  const secret = c.req.query("sessionSecret") ?? "";
+  bar.requireBarSession(db, pId, secret); // thrown synchronously, before streamSSE opens the response
+  return streamSSE(c, async (stream) => {
+    const send = (data: string) => {
+      stream.writeSSE({ data }).catch(() => {});
+    };
+    const unsubscribe = live.subscribeChatInbox(pId, send);
+    stream.onAbort(() => unsubscribe());
     while (!stream.closed && !stream.aborted) {
       try {
         await stream.sleep(SSE_PING_MS);

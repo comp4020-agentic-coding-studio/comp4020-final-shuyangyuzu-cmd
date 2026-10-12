@@ -95,10 +95,22 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     // /seats/:id/sit once actually standing there — never a shortcut
     // around either check.
     let pendingSitSeat=null;
+    // Proximity-triggered 1:1 chat (product-direction-update, part 3).
+    // `chatChase` is the walk-toward-a-player-to-chat gesture in flight —
+    // {playerId, autoOpen, approach:{x,y}, targetX, targetY, attempts} or
+    // null — mirroring pendingSitSeat's own shape/lifecycle (set by a
+    // click, consumed once step() confirms arrival, aborted by the
+    // animate() loop if the target moves away too many times or goes
+    // offline). `openChatThreadId`/`openChatOtherId` track whichever
+    // thread's dialog is currently on screen, if any, so an inbox push
+    // for that exact thread can append live instead of surfacing a
+    // notification for a conversation the player is already looking at.
+    let chatChase=null, openChatThreadId=null, openChatOtherId=null, lastSeenChatMsgId=0, chatEventSource=null, pendingChatNotify=null;
     const holdCleanups=[];
     dispose=()=>{
       active=false;holdCleanups.forEach(cleanup=>cleanup());document.body.classList.remove('world-mode');
       if(eventSource){eventSource.close();eventSource=null;}
+      if(chatEventSource){chatEventSource.close();chatEventSource=null;}
       if(visibilityHandler){document.removeEventListener('visibilitychange',visibilityHandler);window.removeEventListener('focus',visibilityHandler);visibilityHandler=null;}
     };
     const displayPositions=new Map();
@@ -141,7 +153,13 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       const label=`Sit — ${f?.kind==='stool'?'bar stool':'dining chair'} ${s.id}`;
       const button=el('button',{class:'seat-target','aria-label':label,'data-hint':'Sit down',title:'Sit down',onclick:()=>{
         if(!mine||overlay.childElementCount)return;
-        if(state.players.some(p=>p.seatId===s.id&&p.id!==mine.id)){toast.textContent='Someone is already sitting there.';return;}
+        // A seat-target button is a separate DOM element layered over the
+        // canvas — it never goes through the canvas's own click handler,
+        // so the same player-click-takes-priority rule (part 2) has to be
+        // repeated here: someone actually seated there is always the
+        // occupant to chat-approach, never just a "taken" refusal.
+        const occupant=playerAt(s.x,s.y);
+        if(occupant){beginApproachAndChat(occupant);return;}
         beginSit(s);
       }});
       seatLayer.appendChild(button);seatTargets.push({...s,button});
@@ -150,6 +168,13 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       const f=fixtures.find(f=>f.id===s.tableId);
       const button=el('button',{class:'seat-target','aria-label':`Choose ${s.color} seat — ${f.label}`,'data-hint':f.available?`Choose ${s.color} seat`:'Not yet open',title:f.available?`Choose ${s.color} seat`:'Not yet open',onclick:()=>{
         if(!mine||overlay.childElementCount)return;
+        // A present game occupant's effective position is this exact
+        // chair tile (src/position.ts) — clicking it chats with them
+        // (part 2's "real chair position, not a hidden lobby coordinate"
+        // rule), same priority as any other player click, ahead of the
+        // table dialog this chair would otherwise open.
+        const occupant=playerAt(s.x,s.y);
+        if(occupant){beginApproachAndChat(occupant);return;}
         if(!f.available)toast.textContent=f.label;
         else if(f.tableMode==='npc')openNpcTableDialog(f,s.color);
         else openTableDialog(f,s.color);
@@ -165,17 +190,50 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     // blocksMovement:false (the restroom) is a walkable zone marker, not
     // an obstacle, same rule server-side, so the two can't disagree.
     function walkable(x,y) {return x>=0&&x<layout.gridCols&&y>=0&&y<layout.gridRows&&!fixtures.some(f=>f.blocksMovement!==false&&x>=f.x&&x<f.x+f.w&&y>=f.y&&y<f.y+f.h);}
+    // Product-direction-update, part 2: no two patrons may occupy the
+    // same tile. `state.players` already reports each online patron's
+    // *effective* position (src/position.ts — a present game-table
+    // occupant's real chair tile, never a frozen pre-game coordinate),
+    // so this single check is correct for a standing bar patron and a
+    // seated game occupant alike, with no special-casing between them.
+    function occupiedByOther(x,y){return state.players.some(p=>mine&&p.id!==mine.id&&p.x===x&&p.y===y);}
+    // Which other online patron (if any) is standing at this exact tile —
+    // used to give a player-click priority over the floor/furniture/seat
+    // beneath them, the same lookup reused by every click surface below
+    // (the canvas itself, a seat-target button, a game-chair button) so
+    // the three can't drift into disagreeing about who's clickable where.
+    function playerAt(x,y){return state.players.find(p=>mine&&p.id!==mine.id&&p.x===x&&p.y===y);}
     // Breadth-first path on a small grid; each submitted step is still checked
     // server-side. No client teleport, no optimistic persistent positions.
+    // Avoids every other patron's current tile, not just furniture — a
+    // path is never planned straight through someone else's body.
     function findPath(tx,ty) {
-      if(!mine||!walkable(tx,ty))return [];
+      if(!mine||!walkable(tx,ty)||occupiedByOther(tx,ty))return [];
       const start=`${mine.x},${mine.y}`,end=`${tx},${ty}`,q=[[mine.x,mine.y]],prev=new Map([[start,null]]);
       for(let i=0;i<q.length;i++){const [x,y]=q[i];if(`${x},${y}`===end)break;
-        for(const [dx,dy] of [[0,-1],[1,0],[0,1],[-1,0]]){const nx=x+dx,ny=y+dy,k=`${nx},${ny}`;if(walkable(nx,ny)&&!prev.has(k)){prev.set(k,`${x},${y}`);q.push([nx,ny]);}}
+        for(const [dx,dy] of [[0,-1],[1,0],[0,1],[-1,0]]){const nx=x+dx,ny=y+dy,k=`${nx},${ny}`;if(walkable(nx,ny)&&!occupiedByOther(nx,ny)&&!prev.has(k)){prev.set(k,`${x},${y}`);q.push([nx,ny]);}}
       }
       if(!prev.has(end))return [];const result=[];let key=end;while(key!==start){result.unshift(key.split(',').map(Number));key=prev.get(key);}return result;
     }
-    function queueStep(dx,dy){if(!mine||moving||overlay.childElementCount)return;const x=mine.x+dx,y=mine.y+dy;if(walkable(x,y)){pendingSitSeat=null;path=[[x,y]];destination={x,y};}}
+    function queueStep(dx,dy){if(!mine||moving||overlay.childElementCount)return;const x=mine.x+dx,y=mine.y+dy;if(walkable(x,y)&&!occupiedByOther(x,y)){pendingSitSeat=null;chatChase=null;path=[[x,y]];destination={x,y};}}
+    // The one free-adjacent-tile picker behind both "click an occupied
+    // floor tile" (part 2) and "click a nearby player to chat" (part 3):
+    // among the up to 4 cardinal neighbours of (tx,ty) that are actually
+    // walkable, unoccupied, and in bounds, picks whichever is closest
+    // (Manhattan) to the mover's own current position — the side nearest
+    // the clicker when one exists, and simply the nearest reachable
+    // fallback otherwise. Never the target's own tile: a click never
+    // walks *into* someone, only up next to them. Returns null if every
+    // neighbour is blocked.
+    function findApproachTile(tx,ty){
+      if(!mine)return null;
+      const candidates=[[0,-1],[0,1],[-1,0],[1,0]].map(([dx,dy])=>({x:tx+dx,y:ty+dy}))
+        .filter(c=>walkable(c.x,c.y)&&!occupiedByOther(c.x,c.y));
+      if(!candidates.length)return null;
+      candidates.sort((a,b)=>(Math.abs(a.x-mine.x)+Math.abs(a.y-mine.y))-(Math.abs(b.x-mine.x)+Math.abs(b.y-mine.y)));
+      return candidates[0];
+    }
+    function manhattan(ax,ay,bx,by){return Math.abs(ax-bx)+Math.abs(ay-by);}
     // Phase 2 (product-direction-update): "click an empty chair, walk
     // there, sit down" is one gesture — if already standing exactly on
     // the seat's own tile, sit immediately; otherwise path there first
@@ -189,6 +247,24 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       }
       pendingSitSeat=seat;path=findPath(seat.x,seat.y);destination=path.length?{x:seat.x,y:seat.y}:null;
       if(!path.length)pendingSitSeat=null;
+    }
+    // Product-direction-update, part 3: click a player within 3 tiles
+    // (Manhattan) and this patron auto-walks to a free adjacent tile and
+    // opens a chat; beyond 3 tiles, the same walk-closer happens but the
+    // dialog doesn't auto-open (clicking again once nearby does) — never
+    // walking into their tile (findApproachTile), never chasing forever
+    // (the animate() loop's own re-path cap below).
+    const CHAT_AUTO_OPEN_RADIUS=3;
+    function beginApproachAndChat(player){
+      if(!mine||overlay.childElementCount||player.id===mine.id)return;
+      if(manhattan(mine.x,mine.y,player.x,player.y)<=1){openChatWith(player);return;}
+      const autoOpen=manhattan(mine.x,mine.y,player.x,player.y)<=CHAT_AUTO_OPEN_RADIUS;
+      const approach=findApproachTile(player.x,player.y);
+      if(!approach){toast.textContent="Can't reach them right now.";return;}
+      pendingSitSeat=null;
+      chatChase={playerId:player.id,autoOpen,approach,targetX:player.x,targetY:player.y,attempts:0};
+      path=findPath(approach.x,approach.y);destination=path.length?approach:null;
+      if(!path.length){chatChase=null;toast.textContent="Can't reach them right now.";}
     }
     function reconcile(next){
       state=next;
@@ -337,6 +413,122 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       ];
       overlay.replaceChildren(el('section',{class:'world-dialog game-dialog',role:'dialog','aria-label':f.label},body));
     }
+    // ---- Proximity-triggered 1:1 chat (product-direction-update, part 3) ----
+    //
+    // A client-generated id per outgoing message (crypto.randomUUID when
+    // available, a timestamp+random fallback otherwise — this only needs
+    // to be unique per sender, never verified client-side) is what makes
+    // a retried /send after a dropped response idempotent server-side
+    // (src/chat.ts): the same id resent twice is the same logical
+    // message, applied once.
+    function newClientMsgId(){
+      try{if(crypto.randomUUID)return crypto.randomUUID();}catch{}
+      return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
+    const renderedChatMsgIds=new Set();
+    let chatMessagesEl=null, chatErrorEl=null;
+    function appendChatMessageIfNew(msg){
+      if(renderedChatMsgIds.has(msg.id))return;
+      renderedChatMsgIds.add(msg.id);
+      if(msg.id>lastSeenChatMsgId)lastSeenChatMsgId=msg.id;
+      if(!chatMessagesEl)return; // dialog isn't open right now — nothing to append to
+      const mineMsg=msg.senderId===mine?.id;
+      chatMessagesEl.appendChild(el('p',{class:`chat-bubble ${mineMsg?'chat-mine':'chat-theirs'}`},msg.body));
+      chatMessagesEl.scrollTop=chatMessagesEl.scrollHeight;
+    }
+    async function openChatWith(player){
+      if(!mine||overlay.childElementCount)return;
+      try{
+        const resp=await post('/chat/open',{...session,otherPlayerId:player.id});
+        renderChatDialog(resp.threadId,resp.otherPlayerId,resp.otherNickname,resp.messages);
+      }catch(e){toast.textContent=e.message||'Could not start a chat';}
+    }
+    // Opening from an inbox notification (part 3: "接收方看到带发送者昵称
+    // 的对话提示,可打开该对话") re-fetches fresh history by id rather than
+    // trusting the notification payload alone — a notification can be
+    // stale by the time it's actually clicked.
+    async function openChatByThread(threadId,otherId,otherNickname){
+      if(!mine||overlay.childElementCount)return;
+      try{
+        const resp=await read(`/chat/${threadId}/messages?playerId=${encodeURIComponent(session.playerId)}&sessionSecret=${encodeURIComponent(session.sessionSecret)}&afterId=0`);
+        renderChatDialog(threadId,otherId,otherNickname,resp.messages);
+      }catch(e){toast.textContent=e.message||'Could not open that conversation';}
+    }
+    function renderChatDialog(threadId,otherId,otherNickname,messages){
+      path=[];
+      openChatThreadId=threadId;openChatOtherId=otherId;
+      renderedChatMsgIds.clear();lastSeenChatMsgId=0;
+      if(pendingChatNotify&&pendingChatNotify.threadId===threadId){pendingChatNotify=null;chatBanner.style.display='none';}
+      const messagesBox=el('div',{class:'chat-messages','aria-live':'polite'});
+      chatMessagesEl=messagesBox;
+      chatErrorEl=el('p',{class:'error',role:'alert'});
+      const input=el('input',{class:'chat-input',placeholder:'Message…',maxlength:'500','aria-label':`Message to ${otherNickname}`});
+      const sendBtn=el('button',{class:'enter-world chat-send'},'Send');
+      const doSend=async()=>{
+        const text=input.value.trim();
+        if(!text)return;
+        sendBtn.disabled=true;chatErrorEl.textContent='';
+        const clientMsgId=newClientMsgId();
+        try{
+          const msg=await post(`/chat/${threadId}/send`,{...session,clientMsgId,body:text});
+          appendChatMessageIfNew(msg);
+          input.value='';
+        }catch(e){
+          chatErrorEl.textContent=e.status===409&&e.message?`${e.message} Your message is still here — try again once you're close.`:(e.message||'Could not send that message');
+        }
+        sendBtn.disabled=false;input.focus();
+      };
+      sendBtn.onclick=doSend;
+      input.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();doSend();}});
+      for(const m of messages)appendChatMessageIfNew(m);
+      overlay.replaceChildren(el('section',{class:'world-dialog chat-dialog',role:'dialog','aria-label':`Chat with ${otherNickname}`},[
+        el('button',{class:'dialog-close','aria-label':'Close',onclick:()=>{overlay.replaceChildren();closeChatDialog();}},'×'),
+        el('p',{class:'eyebrow'},'PRIVATE MESSAGE'),el('h1',{},otherNickname),
+        messagesBox,chatErrorEl,
+        el('div',{class:'chat-compose'},[input,sendBtn]),
+      ]));
+      input.focus();
+    }
+    function closeChatDialog(){openChatThreadId=null;openChatOtherId=null;chatMessagesEl=null;chatErrorEl=null;}
+    const chatBanner=el('button',{class:'hud-button chat-banner',style:'display:none',onclick:()=>{
+      if(!pendingChatNotify)return;
+      const {threadId,otherId,otherNickname}=pendingChatNotify;
+      openChatByThread(threadId,otherId,otherNickname);
+    }},'');
+    function showChatNotify(threadId,otherId,otherNickname){
+      // Never while that exact thread is already open on screen — the
+      // live push already appended it there directly.
+      if(openChatThreadId===threadId)return;
+      pendingChatNotify={threadId,otherId,otherNickname};
+      chatBanner.textContent=`💬 ${otherNickname} — new message`;
+      chatBanner.style.display='';
+    }
+    scene.appendChild(chatBanner);
+    function connectChatInbox(){
+      if(chatEventSource)chatEventSource.close();
+      const url=`/api/bar/chat/events?playerId=${encodeURIComponent(session.playerId)}&sessionSecret=${encodeURIComponent(session.sessionSecret)}`;
+      const es=new EventSource(url);
+      es.onmessage=ev=>{
+        let msg;try{msg=JSON.parse(ev.data);}catch{return;}
+        if(!msg||typeof msg.threadId!=='string')return;
+        if(msg.threadId===openChatThreadId){
+          appendChatMessageIfNew(msg);
+        }else if(msg.senderId!==mine?.id){
+          showChatNotify(msg.threadId,msg.senderId,msg.senderNickname||'Someone');
+        }
+      };
+      // A reconnect (initial connect or automatic retry) can't be trusted
+      // to have delivered everything sent while the connection was down
+      // (CLAUDE.md's real-time-push section) — if a thread is currently
+      // open, re-fetch anything past the last message actually rendered.
+      es.onopen=()=>{
+        if(openChatThreadId&&session){
+          read(`/chat/${openChatThreadId}/messages?playerId=${encodeURIComponent(session.playerId)}&sessionSecret=${encodeURIComponent(session.sessionSecret)}&afterId=${lastSeenChatMsgId}`)
+            .then(resp=>{for(const m of resp.messages)appendChatMessageIfNew(m);}).catch(()=>{});
+        }
+      };
+      chatEventSource=es;
+    }
     function chooseCharacter(){
       let color=mine?.color||'green',skin=mine?.skin||'warm';
       const preview=el('canvas',{width:'180',height:'180','aria-label':'Character preview'});
@@ -363,7 +555,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       if(timers.length||!active)return;
       if(mine){session={...session,nickname:mine.nickname,color:mine.color,skin:mine.skin};try{localStorage.setItem(sessionKey,JSON.stringify(session));}catch{}}
       post('/heartbeat',session).catch(()=>{});
-      connectEvents();fetchAndApply();
+      connectEvents();connectChatInbox();fetchAndApply();
       // 10s fallback poll — cheap insurance if the stream silently
       // stalls without EventSource noticing; gated through the same
       // seq check above, so it's a no-op whenever the stream is doing
@@ -375,6 +567,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         // browser; coming back is exactly when a stale view would
         // otherwise sit unnoticed.
         if(!eventSource||eventSource.readyState===EventSource.CLOSED)connectEvents();
+        if(!chatEventSource||chatEventSource.readyState===EventSource.CLOSED)connectChatInbox();
         fetchAndApply();
       };
       document.addEventListener('visibilitychange',visibilityHandler);
@@ -397,6 +590,13 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     window.addEventListener('keydown',keyDown);window.addEventListener('keyup',keyUp);window.addEventListener('blur',blur);
     canvas.addEventListener('click',e=>{
       if(!mine||overlay.childElementCount)return;const rect=canvas.getBoundingClientRect(),x=Math.floor((e.clientX-rect.left+camera.x)/tile),y=Math.floor((e.clientY-rect.top+camera.y)/tile);
+      // A player's own tile takes priority over whatever floor, seat, or
+      // table is underneath them (product-direction-update, part 2) —
+      // clicking yourself is a deliberate no-op, never a chat with
+      // yourself. Checked first, before any furniture/seat logic below.
+      if(x===mine.x&&y===mine.y)return;
+      const other=playerAt(x,y);
+      if(other){beginApproachAndChat(other);return;}
       const f=fixtures.find(f=>x>=f.x&&x<f.x+f.w&&y>=f.y&&y<f.y+f.h);
       // A walkable-zone fixture (blocksMovement:false — the restroom)
       // falls through to the normal walk/pathfinding below, same as any
@@ -442,8 +642,19 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
           try{applyIncoming(await post(`/seats/${seat.id}/sit`,session));toast.textContent='Seated — use Stand up to leave the chair.';}
           catch(err){toast.textContent=err.message||'Could not sit down';}
         }
+        // Arrived at the approach tile a chat-chase gesture was walking
+        // toward — open the dialog only if the original click was within
+        // the auto-open radius (otherwise this was just "walk closer",
+        // per the spec's own split) and the target is still actually
+        // there to chat with.
+        if(chatChase&&chatChase.approach.x===x&&chatChase.approach.y===y){
+          const target=state.players.find(p=>p.id===chatChase.playerId);
+          const autoOpen=chatChase.autoOpen;
+          chatChase=null;
+          if(target&&autoOpen)openChatWith(target);
+        }
       }
-      catch(e){pendingMoveTarget=null;path=[];destination=null;pendingSitSeat=null;toast.textContent=e.status===403?'Your session could not be restored. Reload to rejoin.':'Could not move — try again.';await fetchAndApply();}
+      catch(e){pendingMoveTarget=null;path=[];destination=null;pendingSitSeat=null;chatChase=null;toast.textContent=e.status===403?'Your session could not be restored. Reload to rejoin.':'Could not move — try again.';await fetchAndApply();}
       finally{moving=false;}
     }
     // A static world layer is painted once, not rebuilt on every animation frame.
@@ -534,7 +745,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         let dx=0,dy=0;if(keys.has('w')||keys.has('arrowup'))dy=-1;else if(keys.has('s')||keys.has('arrowdown'))dy=1;
         if(keys.has('a')||keys.has('arrowleft'))dx=-1;else if(keys.has('d')||keys.has('arrowright'))dx=1;
         if(heldDirection){dx=heldDirection.dx;dy=heldDirection.dy;}
-        if(dx||dy){path=[];pendingSitSeat=null;if(walkable(mine.x+dx,mine.y+dy)){lastTime=now;step(mine.x+dx,mine.y+dy);}}
+        if(dx||dy){path=[];pendingSitSeat=null;chatChase=null;if(walkable(mine.x+dx,mine.y+dy)&&!occupiedByOther(mine.x+dx,mine.y+dy)){lastTime=now;step(mine.x+dx,mine.y+dy);}}
         else if(path.length){
           // A seat this patron is walking toward can be taken by someone
           // else mid-journey — stop the attempt and say so rather than
@@ -543,6 +754,32 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
           // clearer, earlier signal than an error only at arrival).
           if(pendingSitSeat&&state.players.some(p=>p.seatId===pendingSitSeat.id&&p.id!==mine.id)){
             path=[];destination=null;pendingSitSeat=null;toast.textContent='Someone sat down there first.';
+          }else if(chatChase){
+            // The person being approached can walk, log off, or (rarely)
+            // have their old approach tile taken by someone else while
+            // this patron is still en route — re-pathed a bounded number
+            // of times (never an infinite chase, per the spec's own
+            // "不能无限追赶"), and abandoned outright if they're simply
+            // gone.
+            const target=state.players.find(p=>p.id===chatChase.playerId);
+            if(!target){
+              path=[];destination=null;chatChase=null;toast.textContent='They left the bar.';
+            }else if(target.x!==chatChase.targetX||target.y!==chatChase.targetY){
+              if(chatChase.attempts>=3){
+                path=[];destination=null;chatChase=null;toast.textContent="They're moving around too much — try again.";
+              }else{
+                chatChase.attempts++;chatChase.targetX=target.x;chatChase.targetY=target.y;
+                const approach=findApproachTile(target.x,target.y);
+                if(!approach){path=[];destination=null;chatChase=null;toast.textContent="Can't reach them right now.";}
+                else{
+                  chatChase.approach=approach;path=findPath(approach.x,approach.y);destination=path.length?approach:null;
+                  if(!path.length){chatChase=null;toast.textContent="Can't reach them right now.";}
+                  else{lastTime=now;const [x,y]=path.shift();step(x,y);}
+                }
+              }
+            }else{
+              lastTime=now;const [x,y]=path.shift();step(x,y);
+            }
           }else{
             lastTime=now;const [x,y]=path.shift();step(x,y);
           }

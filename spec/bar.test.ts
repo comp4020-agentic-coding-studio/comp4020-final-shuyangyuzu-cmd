@@ -79,12 +79,30 @@ it("accepts a single adjacent step onto a walkable tile", async () => {
   const joined = await postJson("/api/bar/join", { nickname: "Dana", color: "yellow" });
   const session = { playerId: joined.body.playerId, sessionSecret: joined.body.sessionSecret };
   // The spawn row is kept clear of furniture by design (src/barLayout.ts),
-  // so a sideways step is always valid regardless of exact spawn x.
-  const res = await postJson("/api/bar/move", { ...session, x: joined.body.x + 1, y: joined.body.y });
-  expect(res.status).toBe(200);
-  const me = res.body.players.find((p: { id: string }) => p.id === joined.body.playerId);
-  expect(me.x).toBe(joined.body.x + 1);
-  expect(me.y).toBe(joined.body.y);
+  // so a step in *some* direction is always valid regardless of exact
+  // spawn x — but with tile occupancy (product-direction-update), one
+  // specific neighbour (say, +1,0) can legitimately already be held by
+  // some other patron this same parallel test run spawned nearby, so
+  // this tries all four cardinal neighbours and only requires at least
+  // one to succeed, rather than asserting a single hardcoded direction.
+  const candidates = [
+    [joined.body.x + 1, joined.body.y],
+    [joined.body.x - 1, joined.body.y],
+    [joined.body.x, joined.body.y + 1],
+    [joined.body.x, joined.body.y - 1],
+  ];
+  let res, target;
+  for (const [x, y] of candidates) {
+    res = await postJson("/api/bar/move", { ...session, x, y });
+    if (res.status === 200) {
+      target = [x, y];
+      break;
+    }
+  }
+  expect(res!.status).toBe(200);
+  const me = res!.body.players.find((p: { id: string }) => p.id === joined.body.playerId);
+  expect(me.x).toBe(target![0]);
+  expect(me.y).toBe(target![1]);
 });
 
 it("refuses a move more than one tile away", async () => {

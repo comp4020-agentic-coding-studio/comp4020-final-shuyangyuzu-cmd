@@ -2654,3 +2654,175 @@ lobby entry; a second open bar page showed the player sitting on that
 blue chair with no standing duplicate. These two pages shared a browser
 identity; this is not a claim of a new independent-player playtest.
 Publication and production verification follow these local checks.
+
+# Three further improvements (2026-10-12): a fourth dining table, tile occupancy, proximity chat
+
+Three requests, built on top of the student's own two commits above
+(the legacy-JSON migration fix and the seating/spacing correction, both
+already live): a fourth dining table evenly spaced with the rest; no two
+patrons sharing a tile anywhere in the bar; and a new, genuinely
+multiplayer feature — walk up to someone and chat privately. The second
+and third items are this round's real engineering weight; see CLAUDE.md's
+new "No two patrons occupy the same tile" and "Proximity chat is private,
+authenticated, and re-validated at send time" sections for the settled
+design, kept here to the concrete decisions, real bugs found, and
+verification record.
+
+## Part 1 — a fourth dining table, evenly spaced
+
+`src/barLayout.ts`'s `dining-a..d` are now at relative x = 1, 6, 12, 17
+(gaps 3, 4, 3 — the closest an integer-tile grid gets to even spacing for
+four width-2 tables across the exact same [1,19) span the two game-table
+rows already aligned to, matching `vegas-npc-1`'s own row's already-
+accepted asymmetry for the identical reason). The original stool-column
+collision constraint that shaped the old 3-table layout no longer applies
+at all: the two already-live student commits above changed a stool's own
+seat to be the stool's own tile (not a floor tile south of it), so a
+dining seat's row (one north, one south of each table) never shares a y
+with a stool seat regardless of x. `spec/barLayout.test.ts`'s existing
+geometry suite (all-pairs overlap, reachability, row-boundary-alignment)
+needed no new assertions, just ran against the new numbers — confirming
+no new collision, no stranded chair.
+
+## Part 2 — no two patrons on the same tile
+
+**Server (`src/bar.ts`, new `src/position.ts`).** "Occupied" means one
+specific thing everywhere: another *currently connected* identity's
+*effective* position is exactly this tile (CLAUDE.md has the full
+reasoning — effective position is the real chair tile for a present
+game-table occupant, never a frozen pre-game coordinate). Checked and
+written inside the same synchronous transaction that already made
+idempotency race-free elsewhere in this codebase, so two simultaneous
+claims on one tile can never both land. A disconnected patron's old tile
+stops blocking the instant their heartbeat goes stale (the bar's own
+existing `PRESENCE_STALE_MS`, no second threshold invented) — and
+recovery itself can't be broken by this: `rejoinBar` now repairs a
+now-invalid stored position (claimed by someone else while away, or no
+longer walkable after a layout change) before ever reporting it back,
+and `joinBar`'s spawn search finds a free tile near a *jittered* spawn
+point rather than assuming the canonical one is free (a real test
+flake, caught immediately: a burst of simultaneous joins under
+parallel test load packed solid around one fixed point before this).
+`db.ts`'s existing migration-time relocation (from the student's own
+prior commit, for furniture that moved) now also avoids stacking two
+relocated patrons on the same tile, using the identical free-tile search.
+
+**Client (`public/tavern.js`).** `occupiedByOther`/`playerAt` read
+directly from `state.players[].x/y` (already effective position from the
+server), so pathfinding (`findPath`), the dpad/WASD single-step check,
+and every click surface agree with the server's own rule without
+re-deriving it: a path is never planned through another patron, and a
+destination that becomes occupied mid-walk is caught and abandoned
+rather than walked through. `findApproachTile` is the one function
+behind "click an occupied tile and walk to the nearest free neighbour,
+never into them" — picks whichever free, walkable, in-bounds orthogonal
+neighbour of the target is closest to the clicker's own current
+position, which simultaneously implements "prefer the side facing the
+clicker" and "fall back to nearest reachable" with one sort, and returns
+null (a toast, no movement) when every neighbour is blocked. A player
+click takes priority over the floor/seat/chair beneath them on every
+click surface that can reach that tile — the canvas itself, a dining/
+stool seat-target button, and a game-chair button all needed the same
+`playerAt`-first check added, since the two button types are separate
+DOM elements layered over the canvas and never go through its own click
+handler at all.
+
+**A real bug the shared test server's own parallelism caught
+immediately**: `spec/bar.test.ts`'s "accepts a single adjacent step"
+test assumed a fixed `+1,0` neighbour of spawn was always free — with
+real occupancy enforced, a concurrently-running test file's own patron
+could legitimately already be standing there. Fixed the same way
+`spec/live.test.ts` already handled the identical class of problem (try
+all four cardinal neighbours, require at least one to succeed) rather
+than asserting a specific direction. A second instance of the same root
+cause surfaced in `spec/chat.test.ts`'s own "walked apart" test once the
+new spawn-jitter was added (below) — fixed identically.
+
+## Part 3 — proximity-triggered 1:1 chat
+
+**Data model (new, `src/db.ts`)**: `chat_threads` (id = the two player
+ids sorted and joined, so a pair has exactly one thread regardless of who
+initiates) and `chat_messages` (`UNIQUE(thread_id, sender_id,
+client_msg_id)` — the idempotency key for a retried send). Never joined
+into, or exposed through, the public bar/room SSE payloads.
+
+**Server (new `src/chat.ts`, `src/live.ts`'s new `chatInboxSubscribers`,
+`src/server.ts`'s new routes)**: `openThread` and `sendMessage` each
+independently re-validate — real session, both parties online, and
+adjacent via effective position — never trusting that an earlier check
+(or the client's own walk having just finished) still holds. Delivery is
+per-player, not per-thread or broadcast: a sent message reaches exactly
+its sender's and recipient's own authenticated inbox channel
+(`GET /api/bar/chat/events`, query-param-authenticated since SSE can't
+send a body or custom headers), each independently verified before
+subscribing. A per-sender sliding-window rate limiter and a 1–500
+character plain-text limit round out the direct abuse surface.
+
+**Client (`public/tavern.js`)**: clicking another patron within 3 tiles
+(Manhattan) walks them to a free adjacent tile (the same
+`findApproachTile` Part 2 built) and opens the dialog on arrival; beyond
+3 tiles the same walk happens without auto-opening (click again once
+near). The walk-toward-chat gesture (`chatChase`) re-checks the target
+every tick it's in flight — re-plans a bounded number of times if they
+move, gives up with a clear message if they log off, never chases
+unboundedly. Messages render via `textContent`, never `innerHTML`. A
+small floating banner (`chatBanner`) surfaces an incoming message for a
+thread that isn't currently open, naming the sender, openable by a
+click — the chat inbox stream only ever runs while the bar canvas itself
+is mounted, so it's structurally impossible for it to interrupt an
+ongoing game (a different route/page entirely, per CLAUDE.md's existing
+bar/game separation).
+
+## Verification
+
+`spec/occupancy.test.ts` (8 cases) and `spec/chat.test.ts` (10 cases),
+both direct-DB (same pattern as `spec/tableExpiry.test.ts`) for exact
+control over presence/distance without waiting out real thresholds:
+refusing a move onto a connected occupant, accepting one onto a vacated
+tile, two joins landing on different tiles, `findFreeTile`'s own
+contract, rejoin repairing a stolen tile without failing recovery,
+`effectivePosition` reporting a chair tile for a present occupant and
+the raw coordinate for a departed one; opening/sending success and every
+refusal path (too far, offline, self, not-a-participant, empty, too
+long, rate-limited), idempotent retry, and a third identity refused both
+`requireThreadAccess` and a forged secret. All 192 tests green, `pnpm
+check` run three times straight (the parallel-test-occupancy class of
+flake above made a single green run insufficient evidence this time).
+
+**Live verification, two and three real independent browser contexts
+(Playwright, local)**: two patrons spawned near each other; one clicked
+directly on the other's tile and landed exactly adjacent, never
+overlapping, confirmed by both the client's own reported position and a
+direct raw `/api/bar/move` call onto the same tile separately refused
+(409) at the server — proving the server's own check, not just the
+client's approach-tile logic, is what actually holds. Chat: clicking
+opened the dialog with the correct nickname; the recipient (who hadn't
+opened anything) saw a notification banner, opened it, and saw the
+message; replied, and the first patron saw the reply live with no
+reload; one patron then genuinely walked away (arrow keys, after closing
+her own open dialog so movement wasn't disabled by it — the same rule
+every dialog already follows) and the other's next send was refused with
+a "too far" message while the existing transcript stayed exactly as it
+was. A third identity, several tiles from the first two, was refused
+opening a chat with either (`too_far`) and, separately, refused reading
+the real pair's own thread by its real (deterministic, guessable) id
+directly (`403 unauthorized`) — the access check, not the id's obscurity,
+is what's actually protecting it. A dedicated reconnect check dropped one
+participant's network entirely (Chromium context offline) mid-
+conversation, sent a message from the other side while she was
+disconnected, then restored her connection — her already-open dialog
+caught up on the missed message within about a second of reconnecting,
+with no manual reload, via the inbox stream's own `onopen` catch-up
+fetch. A separate real-restart check (the dev server process killed and
+restarted, data directory preserved) confirmed a chat thread's messages
+and a patron's bar position both survive exactly as a SQLite-backed
+feature should — not an in-memory one quietly reset by the restart.
+
+**Regression**: the full existing suite (direction-hold, seating
+sit/stand, online-table approval, NPC games, SSE restart recovery) stayed
+green throughout — see the "All 192 tests green" note above; nothing in
+that suite needed behavior changes, only the two occupancy-fragile tests
+already described.
+
+`pnpm check:evidence` green. Not yet done as of this entry: commit/push,
+CI, and production verification. 等待用户验收.

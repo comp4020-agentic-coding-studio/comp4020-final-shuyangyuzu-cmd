@@ -500,6 +500,129 @@ destination, but submits and awaits each legal step individually. Camera
 coordinates must never be sent as world coordinates. Keyboard and touch
 controls share these same movement checks.
 
+## No two patrons occupy the same tile, and "occupied" has one definition
+
+Product-direction-update: a tile is occupied exactly when some *other*,
+*currently connected* bar identity's **effective position**
+(`src/position.ts`) is there — never a raw, unconditional "someone's row
+says this x/y". Checked and written inside one synchronous transaction
+everywhere it matters (`src/bar.ts`'s `moveBar`, `joinBar`'s spawn
+search, `rejoinBar`'s repair step, `db.ts`'s migration-time relocation),
+the same reasoning idempotency's own version check already relies on:
+one Node process, one connection, nothing else can run between the check
+and the write, so two simultaneous claims on a tile can never both
+succeed. "Connected" reuses the bar's own existing presence threshold
+(`PRESENCE_STALE_MS`) — a disconnected patron's old tile is *never* a
+permanent obstacle, and this is what keeps that true without a second,
+bar-specific definition of "gone" to maintain. A returning identity's own
+recovery can never fail or collide over this either: `rejoinBar` repairs
+a now-invalid stored position (claimed by someone else while this
+identity was away, or no longer walkable after a layout change) before
+ever reporting it back, the same way a fresh join finds a free tile near
+spawn rather than assuming the canonical spawn point is free. Spawn
+search itself starts from a small random jitter around that canonical
+point, not the exact same tile every time — a burst of simultaneous
+joins spreads out instead of packing into one ever-tightening ring.
+
+**Effective position, not a frozen pre-game coordinate.** A bar identity
+actively, *presently* seated at a game table (connected, or an NPC seat —
+which has no "away" concept — and not mid an away-from-table departure)
+is really *at* its real chair tile (`GAME_CHAIRS`), never wherever it
+happened to be standing before the table dialog opened. This is one
+function (`src/position.ts::effectivePosition`), deliberately a third
+module beneath both `bar.ts` and `tables.ts` rather than making either
+depend on the other (`tables.ts` already imports `bar.ts` for
+`requireBarSession`; a `bar.ts` → `tables.ts` edge would cycle back). It
+governs every place position matters uniformly: `getPublicBarState`'s
+reported x/y, tile-occupancy checks, click-targeting, and the proximity-
+chat trigger below — never a frozen bar coordinate competing with a real
+chair tile for what's "true." A departed (away) occupant falls back to
+their raw bar coordinate, matching exactly how the existing chair
+rendering already stops drawing a body there and shows "away" instead.
+
+**The client mirrors this, not a separate notion of "occupied."**
+`public/tavern.js`'s own `occupiedByOther`/`playerAt` read directly from
+`state.players[].x/y` — which the server already reports as effective
+position — so pathfinding, the dpad/WASD step check, and every click
+surface (the canvas itself, a seat-target button, a game-chair button)
+agree with the server's own rule without re-deriving it. A path is never
+planned through another patron's tile; a destination that becomes
+occupied mid-walk is detected and re-planned or abandoned, never walked
+through. Clicking an occupied tile never walks into it: `findApproachTile`
+picks whichever free, in-bounds, walkable orthogonal neighbour of the
+target is closest (Manhattan) to the clicker's own current position —
+naturally the side facing them when one exists, and simply the nearest
+reachable fallback otherwise — and a short toast explains it when no
+neighbour is free at all, never a teleport, never an overlap. A player
+click takes priority over the floor, a seat, or a game chair underneath
+them, on every click surface that can reach that tile (checked first,
+before any furniture-specific logic) — including a present game occupant,
+clicked at their real chair tile, same priority as anyone standing on
+the open floor. Clicking your own tile is a deliberate no-op.
+
+## Proximity chat is private, authenticated, and re-validated at send time
+
+Product-direction-update, part 3: a 1:1 conversation between two bar
+identities, triggered by walking up to someone, is a genuinely separate,
+isolated channel from every other piece of real-time state in this app —
+never folded into the public bar SSE stream, and never readable by a
+third party even one who has computed the thread id (a sorted pair of
+player ids, so not itself a secret — what actually keeps anyone else out
+is `src/chat.ts`'s `requireThreadAccess`, checked on every read/subscribe,
+not the id being hard to guess).
+
+**Trigger, client-side.** "Within 3 tiles" (Manhattan) is the trigger
+radius for walking over automatically; the dialog itself only ever opens
+once genuinely **adjacent** (Manhattan distance exactly 1), the same
+`findApproachTile` the general occupied-tile-click rule above already
+uses. Beyond 3 tiles, a click only walks closer (no auto-open) — clicking
+again once near enough opens it. The walk-to-chat gesture (`chatChase`,
+mirroring `pendingSitSeat`'s own shape and lifecycle) re-checks the
+target's position each tick it's still in flight: if they've moved, it
+re-plans a bounded number of times (never an unbounded chase); if they
+log off entirely, it stops and says so.
+
+**Every one of the server's own guarantees is re-checked at the moment
+that matters, not trusted from an earlier check.** Opening a thread and
+sending a message each independently re-verify, server-side: real
+identity via `requireBarSession` (never a client-supplied nickname or
+id), both parties currently online (the bar's own presence threshold),
+and adjacency via effective position — a client's own walk having just
+finished a moment ago proves nothing on its own. Walking apart after a
+thread is already open refuses further sends (`too_far`) without losing
+anything already shown — the transcript stays exactly as it was, the
+compose box keeps the unsent text, and the error explains what's needed
+to try again.
+
+**Delivery is per-recipient, never broadcast.** `src/live.ts` gets one
+new registry, `chatInboxSubscribers`, keyed by *player id* — not by
+thread — so a sent message is pushed to exactly its sender's and its
+recipient's own authenticated channel (each delivered twice: once so the
+sender's own other open tabs/devices stay in sync too), through a route
+(`GET /api/bar/chat/events`) that verifies the subscribing session before
+ever registering it. A GET or an SSE subscribe has no body to carry
+`{playerId, sessionSecret}` in — EventSource can't set custom headers
+either — so these two read-only chat routes accept the identical pair as
+query parameters instead; the server-side check
+(`requireBarSession`/`requireThreadAccess`) is exactly the same check
+every POST already makes, only where the proof travels differs.
+
+**Idempotent send, bounded history, rate-limited.** A client-generated
+`clientMsgId` per outgoing message is the idempotency key
+(`UNIQUE(thread_id, sender_id, client_msg_id)` plus a check-before-insert
+inside one transaction) — a retried send after a dropped response returns
+the already-stored message rather than creating a second one. Messages
+are plain text, 1–500 characters, rendered as `textContent` (never
+`innerHTML`) so nothing in a message body can execute. A reconnecting
+inbox stream's `onopen` re-fetches anything past the last message this
+client actually rendered for whichever thread is currently open
+(`GET .../messages?afterId=`) — the same "a dropped connection is never
+trusted to have delivered everything" rule the room/bar channels already
+follow, scoped to chat. A per-sender sliding-window limiter
+(`src/chat.ts`, in-memory, env-overridable like every other threshold in
+this file) caps burst sending without needing a persistent rate-limit
+table.
+
 ## The bar is a full-screen world, with a following camera
 
 The entry flow is a floating character editor over the visible map, with

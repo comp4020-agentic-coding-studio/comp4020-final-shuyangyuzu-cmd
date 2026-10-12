@@ -6,6 +6,7 @@
 import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { findFreeTile } from "./bar.ts";
 import { BAR_SEATS, GAME_TABLES, defaultSpawn, isWalkable } from "./barLayout.ts";
 import type { RoomState } from "./types.ts";
 
@@ -17,11 +18,17 @@ export function openDb(path: string): Database.Database {
   migrate(db);
   seedBarFurniture(db);
   seedBarSeats(db);
-  const spawn = defaultSpawn();
   // Furniture can move on deploy. Keep seated patrons on their updated
-  // chair (seedBarSeats above); move only obstructed floor positions.
+  // chair (seedBarSeats above); relocate only obstructed floor positions
+  // — each one to its own free tile (product-direction-update: a layout
+  // migration must not strand two migrated patrons on the identical
+  // tile), found fresh per player so an earlier relocation in this same
+  // loop is already visible to a later one's own search.
   for (const p of db.prepare("SELECT id, x, y FROM bar_players").all() as Array<{ id: string; x: number; y: number }>) {
-    if (!isWalkable(p.x, p.y)) db.prepare("UPDATE bar_players SET x = ?, y = ? WHERE id = ?").run(spawn.x, spawn.y, p.id);
+    if (!isWalkable(p.x, p.y)) {
+      const free = findFreeTile(db, defaultSpawn(), p.id);
+      db.prepare("UPDATE bar_players SET x = ?, y = ? WHERE id = ?").run(free.x, free.y, p.id);
+    }
   }
   return db;
 }
@@ -118,6 +125,36 @@ function migrate(db: Database.Database): void {
       table_id TEXT NOT NULL,
       left_at TEXT NOT NULL
     );
+
+    -- Proximity-triggered 1:1 chat (product-direction-update, part 3).
+    -- One thread per unordered pair of bar identities — id is the two
+    -- player ids sorted and joined, so "does this pair already have a
+    -- thread" is a plain primary-key lookup regardless of who initiates.
+    -- Never merged with, or readable through, the public bar/room SSE
+    -- channels (CLAUDE.md) — a message is only ever delivered to its two
+    -- participants, over their own authenticated channel (src/live.ts).
+    CREATE TABLE IF NOT EXISTS chat_threads (
+      id TEXT PRIMARY KEY,
+      player_a TEXT NOT NULL REFERENCES bar_players(id),
+      player_b TEXT NOT NULL REFERENCES bar_players(id),
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS chat_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      thread_id TEXT NOT NULL REFERENCES chat_threads(id),
+      sender_id TEXT NOT NULL REFERENCES bar_players(id),
+      client_msg_id TEXT NOT NULL,
+      body TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    -- A sender's retried send (a doubled click, a retry after a dropped
+    -- response) carries the same client_msg_id — this is what makes a
+    -- second INSERT attempt for the identical logical message detectable
+    -- as a duplicate rather than a second real message (src/chat.ts
+    -- checks for this row before ever inserting, so this index is a
+    -- backstop, not the only thing idempotency depends on).
+    CREATE UNIQUE INDEX IF NOT EXISTS chat_messages_dedup ON chat_messages(thread_id, sender_id, client_msg_id);
+    CREATE INDEX IF NOT EXISTS chat_messages_thread ON chat_messages(thread_id, id);
   `);
 
   // Added after the first deploy. "CREATE TABLE IF NOT EXISTS" above is a

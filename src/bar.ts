@@ -7,8 +7,9 @@
 
 import type Database from "better-sqlite3";
 import { randomBytes, randomUUID } from "node:crypto";
-import { BAR_SEATS, defaultSpawn, FURNITURE, isValidStep } from "./barLayout.ts";
+import { BAR_SEATS, defaultSpawn, FURNITURE, GRID_COLS, GRID_ROWS, isValidStep, isWalkable } from "./barLayout.ts";
 import { isConnected } from "./presence.ts";
+import { effectivePosition } from "./position.ts";
 
 // A separate, larger palette from the Vegas table's 4 (PLAN.md decision:
 // the bar isn't capped at 4 patrons). Keep in sync with public/app.js's
@@ -38,6 +39,84 @@ function barLastSeenTimes(db: Database.Database): Map<string, string> {
     last_seen_at: string;
   }>;
   return new Map(rows.map((r) => [r.player_id, r.last_seen_at]));
+}
+
+// ---- Tile occupancy (product-direction-update: "avoid two characters on
+// the same tile") ----
+//
+// "Occupied" means one specific thing everywhere in this file: some
+// *other*, *currently connected* bar identity's effective position
+// (src/position.ts — a game-table occupant's real chair tile, not their
+// frozen pre-game coordinate) is exactly this tile. A disconnected
+// patron's old tile is never a permanent obstacle — it simply stops
+// counting the moment their heartbeat goes stale past the same
+// PRESENCE_STALE_MS threshold the bar's own "who's online" list already
+// uses (src/presence.ts's isConnected), with no second, bar-specific
+// definition of "gone" to keep in sync with that one. This is also what
+// keeps a returning identity's own recovery unbroken: reconnecting never
+// fails because "your own tile is yours" — see isTileOccupiedByOther's
+// `excludePlayerId` and rejoinBar's repair step below.
+function isTileOccupiedByOther(
+  db: Database.Database,
+  x: number,
+  y: number,
+  excludePlayerId: string,
+  now = new Date(),
+): boolean {
+  // Checked against each online patron's *effective* position
+  // (src/position.ts), not a direct SQL match on stored x/y — a game-
+  // table occupant's real chair tile is what blocks, not their frozen
+  // pre-game coordinate (CLAUDE.md). Online patron counts are small
+  // enough at this app's scale that a per-row lookup here is cheap; a
+  // SQL-only equality check can't express "effective position" at all,
+  // since that's resolved through the game room's own state, not a
+  // column on this table.
+  const rows = db
+    .prepare(
+      `SELECT bp.id as id, pr.last_seen_at as lastSeen
+       FROM bar_players bp JOIN bar_presence pr ON pr.player_id = bp.id
+       WHERE bp.id != ?`,
+    )
+    .all(excludePlayerId) as Array<{ id: string; lastSeen: string }>;
+  for (const r of rows) {
+    if (!isConnected(r.lastSeen, now)) continue;
+    const pos = effectivePosition(db, r.id);
+    if (pos && pos.x === x && pos.y === y) return true;
+  }
+  return false;
+}
+
+/** A free, walkable tile at or near `near` — used for a brand-new join's
+ * spawn point, and to repair a reconnecting or just-migrated identity
+ * whose stored tile is no longer walkable or has since been legitimately
+ * claimed by someone else while this identity was away. Expanding
+ * outward ring by ring from `near` keeps the result close to where the
+ * caller actually wanted to land, rather than jumping to an arbitrary
+ * free tile anywhere on the map. Always terminates: the grid is finite,
+ * and realistic patron counts never come close to filling it — the
+ * degenerate "searched everywhere, found nothing" case falls back to
+ * `near` itself rather than throwing, which is never reached in practice
+ * but keeps the function total. */
+export function findFreeTile(
+  db: Database.Database,
+  near: { x: number; y: number },
+  excludePlayerId: string,
+  now = new Date(),
+): { x: number; y: number } {
+  const free = (x: number, y: number) => isWalkable(x, y) && !isTileOccupiedByOther(db, x, y, excludePlayerId, now);
+  if (free(near.x, near.y)) return near;
+  const maxRadius = GRID_COLS + GRID_ROWS;
+  for (let radius = 1; radius <= maxRadius; radius++) {
+    for (let dx = -radius; dx <= radius; dx++) {
+      for (let dy = -radius; dy <= radius; dy++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius) continue; // ring only, inner tiles already checked
+        const x = near.x + dx;
+        const y = near.y + dy;
+        if (free(x, y)) return { x, y };
+      }
+    }
+  }
+  return near;
 }
 
 export class BarError extends Error {
@@ -71,17 +150,36 @@ export function joinBar(db: Database.Database, nickname: string, color: BarColor
   const id = randomUUID();
   const sessionSecret = newSessionSecret();
   const now = new Date().toISOString();
-  const { x, y } = defaultSpawn();
 
   const tx = db.transaction(() => {
+    // Found inside the same transaction as the INSERT — two joins
+    // landing in the same synchronous transaction callback can never
+    // interleave (one Node process, one connection, better-sqlite3's
+    // transactions are synchronous), so two patrons joining at once
+    // always get two different tiles, never a race where both compute
+    // the same "free" tile before either is actually seated there. A
+    // brand-new identity never appears in bar_presence yet, so it can
+    // never exclude itself from its own search — "" never matches a real
+    // bar_players.id, which is always a UUID.
+    //
+    // A small random jitter around the canonical spawn point — rather
+    // than always spiralling outward from the exact same fixed tile —
+    // keeps a burst of simultaneous joins from packing into one
+    // ever-tightening ring around a single point; each lands "near"
+    // spawn, not stacked shoulder-to-shoulder against whoever joined a
+    // moment earlier.
+    const spawn = defaultSpawn();
+    const jitter = { x: spawn.x + Math.floor(Math.random() * 5) - 2, y: spawn.y + Math.floor(Math.random() * 5) - 2 };
+    const { x, y } = findFreeTile(db, jitter, "", new Date(now));
     db.prepare(
       `INSERT INTO bar_players (id, nickname, color, skin, x, y, current_table_id, current_seat_id, created_at)
        VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
     ).run(id, trimmed, color, skin, x, y, now);
     db.prepare(`INSERT INTO bar_sessions (player_id, session_secret) VALUES (?, ?)`).run(id, sessionSecret);
     recordBarHeartbeat(db, id, new Date(now));
+    return { x, y };
   });
-  tx();
+  const { x, y } = tx();
 
   return { playerId: id, sessionSecret, x, y };
 }
@@ -98,9 +196,31 @@ export function requireBarSession(db: Database.Database, playerId: string, sessi
   }
 }
 
+/** Re-authenticates and refreshes this identity's own heartbeat — and,
+ * because a tile that was legitimately free while this identity was
+ * disconnected may since have been claimed by someone else (a stale
+ * patron is never a permanent obstacle — isTileOccupiedByOther above),
+ * repairs a now-invalid stored position before it's ever reported back
+ * to this returning identity. This is "占位释放规则...不能破坏身份恢复"
+ * made concrete: recovery itself can never fail or collide just because
+ * someone else validly moved into this identity's old spot while it was
+ * away. A no-op in the overwhelmingly common case (nobody took it). */
 export function rejoinBar(db: Database.Database, playerId: string, sessionSecret: string): void {
   requireBarSession(db, playerId, sessionSecret);
-  recordBarHeartbeat(db, playerId);
+  const tx = db.transaction(() => {
+    const row = db.prepare(`SELECT x, y FROM bar_players WHERE id = ?`).get(playerId) as
+      | { x: number; y: number }
+      | undefined;
+    if (row) {
+      const now = new Date();
+      if (!isWalkable(row.x, row.y) || isTileOccupiedByOther(db, row.x, row.y, playerId, now)) {
+        const free = findFreeTile(db, row, playerId, now);
+        db.prepare(`UPDATE bar_players SET x = ?, y = ? WHERE id = ?`).run(free.x, free.y, playerId);
+      }
+    }
+    recordBarHeartbeat(db, playerId);
+  });
+  tx();
 }
 
 export function updateAppearance(db: Database.Database, playerId: string, sessionSecret: string, nickname: string, color: BarColor, skin: string): void {
@@ -127,6 +247,17 @@ export function moveBar(db: Database.Database, playerId: string, sessionSecret: 
     if (!row) throw new BarError("no such bar identity", "player_not_found", 404);
     if (!isValidStep(row.x, row.y, x, y)) {
       throw new BarError("not a valid move from your current tile", "invalid_move", 409);
+    }
+    // Checked and written inside this one synchronous transaction, the
+    // same reason joinBar's own spawn search is race-free: two patrons
+    // stepping onto the same tile at once can never both see it as free,
+    // because nothing else can run between this check and the write
+    // below (CLAUDE.md's idempotency section — this is that same
+    // optimistic-concurrency principle, just a direct atomic check
+    // rather than a version column, since a single UPDATE here needs no
+    // separate "did someone else already write" re-check after the fact).
+    if (isTileOccupiedByOther(db, x, y, playerId)) {
+      throw new BarError("someone is already standing there", "tile_occupied", 409);
     }
     db.prepare(`UPDATE bar_players SET x = ?, y = ? WHERE id = ?`).run(x, y, playerId);
     // Moving away is an implicit stand-up — a seat's occupancy must never
@@ -274,15 +405,24 @@ export function getPublicBarState(db: Database.Database): PublicBarState {
     }>).map((s) => [s.occupied_by, s.id]),
   );
   return {
-    players: online.map((p) => ({
-      id: p.id,
-      nickname: p.nickname,
-      color: p.color,
-      skin: p.skin,
-      x: p.x,
-      y: p.y,
-      seatId: seatedBy.get(p.id) ?? null,
-    })),
+    players: online.map((p) => {
+      // A present game-table occupant is reported at their real chair
+      // tile, never their frozen pre-game coordinate (src/position.ts) —
+      // this is what makes another patron's pathfinding/click-targeting
+      // and the proximity-chat trigger agree with what's actually drawn
+      // at the chair, rather than an invisible stale position nobody can
+      // see or reach (CLAUDE.md).
+      const pos = effectivePosition(db, p.id) ?? { x: p.x, y: p.y };
+      return {
+        id: p.id,
+        nickname: p.nickname,
+        color: p.color,
+        skin: p.skin,
+        x: pos.x,
+        y: pos.y,
+        seatId: seatedBy.get(p.id) ?? null,
+      };
+    }),
   };
 }
 

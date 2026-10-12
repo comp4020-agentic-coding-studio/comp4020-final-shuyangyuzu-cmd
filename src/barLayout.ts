@@ -58,9 +58,19 @@ const CORE_FURNITURE: readonly Furniture[] = [
   { id: "stool-5", kind: "stool", x: 15, y: 2, w: 1, h: 1, label: "Stool", blocksMovement: false },
   // Dining chairs are north/south of each table. Stool tiles above and
   // all game chairs below are included in the same collision test.
+  //
+  // Four tables, spaced as evenly as integer tiles allow across the same
+  // [1,19) span the two game-table rows already align to (gaps 3,4,3 —
+  // the closest a width-2x4 row can get to even spacing while starting
+  // and ending exactly on that shared boundary, the same tradeoff the
+  // NPC row below already made for the same reason). Stools no longer
+  // constrain this (their own seat is now the stool's own walkable tile,
+  // not a tile south of it), so unlike an earlier layout revision, these
+  // four columns don't need to dodge a stool column.
   { id: "dining-a", kind: "dining_table", x: 1, y: 4, w: 2, h: 2, label: "Table" },
-  { id: "dining-b", kind: "dining_table", x: 10, y: 4, w: 2, h: 2, label: "Table" },
-  { id: "dining-c", kind: "dining_table", x: 17, y: 4, w: 2, h: 2, label: "Table" },
+  { id: "dining-b", kind: "dining_table", x: 6, y: 4, w: 2, h: 2, label: "Table" },
+  { id: "dining-c", kind: "dining_table", x: 12, y: 4, w: 2, h: 2, label: "Table" },
+  { id: "dining-d", kind: "dining_table", x: 17, y: 4, w: 2, h: 2, label: "Table" },
   // Nine tables, two labelled rows (Crit 9 phase 8's product-direction-
   // update): online (shared, host-approved — see src/rooms.ts's
   // pendingRequests) on top, a visitor's own private NPC game below.

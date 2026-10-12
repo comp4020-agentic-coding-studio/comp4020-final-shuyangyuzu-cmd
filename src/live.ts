@@ -178,3 +178,41 @@ export function publishBar(payload: unknown): void {
   const data = JSON.stringify(payload);
   for (const send of barSubscribers) send(data);
 }
+
+// ---- Private 1:1 chat (product-direction-update, part 3) ----
+//
+// One channel per bar identity, never per thread and never the shared
+// bar channel above: a message is pushed only to its sender and its
+// recipient's own authenticated subscription, so a third party — even
+// one who's guessed or computed a thread id — has no channel to listen
+// on at all (src/server.ts's subscribe route re-checks the subscriber's
+// own session before ever registering it here, same as every other
+// bar/chat endpoint; this registry itself is keyed by player id purely
+// as routing, not as its own access control).
+const chatInboxSubscribers = new Map<string, Set<Send>>();
+
+export function subscribeChatInbox(playerId: string, send: Send): () => void {
+  let set = chatInboxSubscribers.get(playerId);
+  if (!set) {
+    set = new Set();
+    chatInboxSubscribers.set(playerId, set);
+  }
+  set.add(send);
+  return () => {
+    set!.delete(send);
+    if (set!.size === 0) chatInboxSubscribers.delete(playerId);
+  };
+}
+
+/** Delivers `payload` to one player's own inbox channel only — called
+ * twice per sent message (once for the sender's other open tabs/devices,
+ * once for the recipient), never broadcast. A no-op if that player has
+ * no open subscription right now; a message is still safely persisted
+ * (src/chat.ts) and picked up by their next GET .../messages catch-up
+ * fetch whenever they do reconnect. */
+export function publishToPlayer(playerId: string, payload: unknown): void {
+  const set = chatInboxSubscribers.get(playerId);
+  if (!set || set.size === 0) return;
+  const data = JSON.stringify(payload);
+  for (const send of set) send(data);
+}
