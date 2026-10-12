@@ -2849,3 +2849,141 @@ feature) — the `tile_occupied` path itself is covered by
 `spec/occupancy.test.ts` and was independently confirmed with two real
 adjacent browser contexts in the earlier local verification, and CI ran
 that exact suite against this exact commit before it was deployed. 等待用户验收.
+
+# User acceptance feedback (2026-10-12): private chat → public speech bubbles, two map texts removed
+
+The student's own manual acceptance testing of the previous entry
+rejected the private 1:1 chat's basic shape outright: "我希望发送的文字直接
+显示在发送者头上的气泡里,酒馆里的其他玩家都能看到,不再是一对一私聊" (I
+want sent text to show directly in a bubble over the sender's head,
+visible to every other patron in the bar — no longer 1:1 private). They
+also asked for the two row-banner map texts removed, and, mid-session via
+a side message, that the bubble specifically use a semi-transparent gray
+background with white text (overriding this plan's own first instinct of
+a light-background/dark-text bubble, matching the rest of the world's
+existing light-dialog palette).
+
+## Design change: private chat → public speech, and why it's a genuine architecture change, not a reskin
+
+The previous entry's whole design was built around a *recipient*: a
+thread between two specific identities, a per-player authenticated
+delivery channel, a proximity trigger that walked you up to someone and
+opened a dialog once adjacent, server-side adjacency re-validated at
+send time. None of that machinery has a recipient to re-validate against
+once speech has no addressee at all — so this isn't "put the old
+messages in a bubble instead of a dialog," it's a different feature built
+on different primitives, landing on top of the *same* already-existing
+public bar snapshot/SSE broadcast instead of inventing (or keeping) a
+second, private one. See CLAUDE.md's "Public tavern speech superseded
+private 1:1 chat" section for the settled design and exactly what was
+kept, what was removed, and what never changed in the first place
+(tile occupancy, seating, approval, NPC games — none of that was ever
+chat-specific, so none of it moved).
+
+**Explicitly preserved, not touched**: `src/chat.ts`, `chat_threads`/
+`chat_messages`, the `/api/bar/chat/*` routes, and `src/live.ts`'s
+`chatInboxSubscribers` registry are all still there, unchanged, still
+passing their own original test suite (`spec/chat.test.ts`, 10/10) — the
+student's own instruction was explicit that existing private records
+must keep their original access control rather than leaking just because
+the *client* stopped using that feature. Only `public/tavern.js`'s use of
+them was removed (`beginApproachAndChat`/`chatChase`, the dialog, the
+notification banner, the recipient-selection concept).
+
+**New (`bar_speech`, `src/bar.ts::say`, `POST /api/bar/say`)**: one
+active utterance per bar identity — not an append-only log, since
+there's no history to show, just "what are they saying right now, if
+anything." `expires_at` is an absolute timestamp set once at send time;
+`getPublicBarState` filters it lazily (the lobby-disconnect-grace
+pattern, not a sweep), which is what makes a reconnect report the
+*remaining* window rather than restarting it, and what lets a bubble's
+natural expiry piggyback on the exact same presence-ticker signature-diff
+that already notices "someone went offline" — `speech` is just one more
+field in the same `players` array that diff already compares, so a
+bubble disappearing on its own gets pushed to everyone within about a
+second with zero new ticker logic. Idempotency means something specific
+here: a retried send with the same `clientMsgId` must NOT restart the
+clock (a network retry of the identical utterance), while a genuinely
+new one from the same person both replaces the old bubble and does
+restart it — these are different code paths precisely because this is a
+single-current-value row, not a message history.
+
+**Client (`public/tavern.js`)**: a persistent, always-visible input +
+Send button (Enter submits), no dialog, no targeting at all — clicking a
+player still walks you up next to them (`approachPlayer`, renamed from
+`beginApproachAndChat`, chat side-effect removed), since that was always
+part 2's own rule, never chat-specific. The bubble itself
+(`drawSpeechBubble`) is drawn directly on the canvas, so it can never
+intercept a click underneath it; `wrapBubbleText` handles both space-
+delimited wrapping and a character-level fallback for a single "word"
+wider than the whole bubble (long CJK, a long no-space token), iterating
+by Unicode code point so a surrogate-pair emoji is never split. Follows
+whatever screen position a patron's nickname tag already uses — a
+present game-chair occupant's real chair tile just as much as a standing
+or dining/stool-seated patron's own interpolated position — so movement,
+sitting down, and the camera panning all carry it for free.
+
+## The two map texts
+
+`public/tavern.js`'s `rowBanner` function and its two calls ("◆ ONLINE —
+REQUEST TO JOIN", "◆ SOLO VS. 3 NPCS") are deleted outright, per the
+explicit "只删除这两行地图横幅文字及对应绘制代码" instruction — every
+table's own on-table label, the table dialog's own explanatory copy, and
+the online/NPC mode logic itself are all unchanged.
+
+## Verification
+
+`spec/speech.test.ts` (9 cases, direct-DB like `spec/chat.test.ts`):
+visibility through the ordinary public state read (including a third
+identity's own read, proving it's genuinely public, not addressed),
+trim/empty/length validation, auth, a genuinely new send replacing the
+bubble and advancing its expiry, a retried `clientMsgId` being a true
+no-op (identical stored row, not just identical visible text), natural
+expiry reported as `null`, a reconnect-equivalent plain re-read reporting
+the *same* absolute expiry rather than a freshly-computed one, and the
+rate limiter tripping on a real burst. All 201 tests (192 prior + 9 new)
+green, `pnpm check` run twice clean, `pnpm check:evidence` green.
+`spec/chat.test.ts`'s own 10 cases needed zero changes and still pass,
+confirming the old private module's behavior and access control are
+genuinely untouched.
+
+**Live verification, real browser contexts (Playwright, local, screenshots
+taken of each)**: three independent identities — one spoke, and *both*
+others saw the bubble on their own independent read of `/api/bar/state`
+with no click, no approach, no proximity at all, confirming this is
+actually public broadcast rather than a disguised 1:1. Content variety
+checked visually: a short Chinese phrase, a long Chinese sentence
+(wraps across 3 lines, no overflow), a long single English word with no
+spaces (`Supercalifragilistic...`, wraps mid-word by character), and a
+mixed English/emoji/Chinese string (renders correctly, wraps across 2
+lines) — all against the bubble's actual rendered max-width, not just
+unit-tested wrapping logic in isolation. Sending again replaced the
+bubble with only the newest text ever visible. Walking several tiles
+south (real arrow-key movement) kept the bubble correctly anchored above
+the moving character as the camera panned. Sitting at a real dining chair
+(reached via an actual BFS-pathed walk and a real seat-button click, not
+a teleport) kept the bubble correctly following the seated position.
+
+A dedicated timing check against a server instance started with
+`SPEECH_DISPLAY_MS=2500` (a real, shorter window — not mocked) confirmed
+all three expiry/reconnect rules precisely: a bubble vanishes on its own
+after the window with no further action; a context dropped (Chromium
+`setOffline`) while a bubble is still active and restored partway through
+still shows it, then still expires at the *original* time rather than
+getting a fresh window from the reconnect; and a context dropped until
+well past expiry and restored afterward never replays the vanished
+bubble. A separate check confirmed zero requests to `/api/bar/chat/*`
+occur during an entire ordinary session (join, speak, move, sit, stand) —
+the old private endpoints are reachable only by someone who still has
+code calling them directly, never by anything the current client does.
+
+**Regression**: a real BFS-pathed walk to a dining chair, a real click on
+the seat button, sitting, and standing back up all worked identically to
+before this pivot (`seatId` set then cleared correctly) — tile occupancy,
+online-table approval, and NPC games are unchanged code paths, already
+covered by the full 201-test suite rerun above, not retested by hand
+beyond this one live touch.
+
+Not yet done as of this entry: commit/push, CI, and production
+verification (next), including a versioned screenshot per the student's
+own request. 等待用户验收.

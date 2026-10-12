@@ -426,13 +426,15 @@ an **NPC** row (solo, instant, never shown as joinable). Only the Vegas
 slot is actually playable in either row this round; every other game type
 keeps its existing "not yet open" reserved treatment in both rows — a
 reserved slot still carries a real `tableMode`, it's just `available:
-false`. The client paints a banner above each row directly from the
-fixtures the server sent (`public/tavern.js`'s `rowBanner`, computed from
-the actual `x`/`y`/`w` of that row's own fixtures, not a hardcoded pixel
-position), so a future layout revision can't silently leave a banner
-pointing at the wrong row the way the old hardcoded default-spawn tile
-once drifted into furniture — a real bug this phase hit and fixed, see
-`src/barLayout.ts`'s `defaultSpawn` comment.
+false`. (An earlier version of this round drew a text banner above each
+row naming its mode; the student's own acceptance testing asked for both
+removed as a map-decluttering pass, 2026-10-12 — the mode distinction
+itself is unchanged and still readable from each table's own label and
+its dialog's own copy, just no longer duplicated as floating map text.)
+A real bug this phase hit and fixed along the way: the old hardcoded
+default-spawn tile once drifted into furniture when a table row moved —
+see `src/barLayout.ts`'s `defaultSpawn` comment for the fix (deriving it
+from the actual table layout instead of a fixed number).
 
 **A solo NPC table (`startNpcGame`/`createSoloNpcGame`) is architecturally
 a different kind of fixture, not an online table with no opponents.** An
@@ -560,68 +562,91 @@ before any furniture-specific logic) — including a present game occupant,
 clicked at their real chair tile, same priority as anyone standing on
 the open floor. Clicking your own tile is a deliberate no-op.
 
-## Proximity chat is private, authenticated, and re-validated at send time
+## Public tavern speech superseded private 1:1 chat (2026-10-12, after the student's own acceptance testing)
 
-Product-direction-update, part 3: a 1:1 conversation between two bar
-identities, triggered by walking up to someone, is a genuinely separate,
-isolated channel from every other piece of real-time state in this app —
-never folded into the public bar SSE stream, and never readable by a
-third party even one who has computed the thread id (a sorted pair of
-player ids, so not itself a secret — what actually keeps anyone else out
-is `src/chat.ts`'s `requireThreadAccess`, checked on every read/subscribe,
-not the id being hard to guess).
+Part 3 was originally built as a private, proximity-triggered 1:1 chat
+(walk up to someone, open a dialog only the two of you could read). The
+student's own manual acceptance testing rejected that shape outright: the
+actual requirement is public speech — anyone says something and it shows
+as a bubble over their own head, visible to every patron in the bar, no
+targeting, no approval step, no dialog at all. This section documents
+what replaced what; the design that follows is the one the client
+actually implements today.
 
-**Trigger, client-side.** "Within 3 tiles" (Manhattan) is the trigger
-radius for walking over automatically; the dialog itself only ever opens
-once genuinely **adjacent** (Manhattan distance exactly 1), the same
-`findApproachTile` the general occupied-tile-click rule above already
-uses. Beyond 3 tiles, a click only walks closer (no auto-open) — clicking
-again once near enough opens it. The walk-to-chat gesture (`chatChase`,
-mirroring `pendingSitSeat`'s own shape and lifecycle) re-checks the
-target's position each tick it's still in flight: if they've moved, it
-re-plans a bounded number of times (never an unbounded chase); if they
-log off entirely, it stops and says so.
+**Superseded outright, removed from the client entirely:** the private
+chat dialog, the proximity trigger and its "walk up to someone, open on
+arrival" gesture (`beginApproachAndChat`/`chatChase`), the incoming-
+message notification banner, and the recipient-selection concept (there
+is no recipient — speech has no addressee). `src/chat.ts`, its
+`chat_threads`/`chat_messages` tables, its server routes, and
+`src/live.ts`'s `chatInboxSubscribers` registry are all **still present
+and still fully functional, unchanged** — deliberately: "已经保存的私聊
+记录继续保持原访问权限" (existing private records keep their original
+access control) means the data and the checks that gate it were never
+touched, only the client's use of them was removed. `requireBarSession`/
+`requireThreadAccess` still refuse anyone who isn't an actual participant
+exactly as before; nothing about making chat public retroactively exposed
+an old private conversation, because old private conversations are a
+completely separate code path that the public-speech feature below never
+reads from or writes into.
 
-**Every one of the server's own guarantees is re-checked at the moment
-that matters, not trusted from an earlier check.** Opening a thread and
-sending a message each independently re-verify, server-side: real
-identity via `requireBarSession` (never a client-supplied nickname or
-id), both parties currently online (the bar's own presence threshold),
-and adjacency via effective position — a client's own walk having just
-finished a moment ago proves nothing on its own. Walking apart after a
-thread is already open refuses further sends (`too_far`) without losing
-anything already shown — the transcript stays exactly as it was, the
-compose box keeps the unsent text, and the error explains what's needed
-to try again.
+**What carried over unchanged, because it was never chat-specific to
+begin with:** clicking a player still walks you to a free adjacent tile
+rather than into them (`findApproachTile`, `approachPlayer` — the
+original, pre-chat part 2 rule: see "No two patrons occupy the same
+tile" above). Tile occupancy, seating, online-table approval, NPC games,
+and the disconnect-recovery rules are all exactly as documented
+elsewhere in this file — this pivot touched none of them.
 
-**Delivery is per-recipient, never broadcast.** `src/live.ts` gets one
-new registry, `chatInboxSubscribers`, keyed by *player id* — not by
-thread — so a sent message is pushed to exactly its sender's and its
-recipient's own authenticated channel (each delivered twice: once so the
-sender's own other open tabs/devices stay in sync too), through a route
-(`GET /api/bar/chat/events`) that verifies the subscribing session before
-ever registering it. A GET or an SSE subscribe has no body to carry
-`{playerId, sessionSecret}` in — EventSource can't set custom headers
-either — so these two read-only chat routes accept the identical pair as
-query parameters instead; the server-side check
-(`requireBarSession`/`requireThreadAccess`) is exactly the same check
-every POST already makes, only where the proof travels differs.
+**Public tavern speech, the actual design.** One active utterance per
+bar identity at a time (`bar_speech`, a single row per player — not an
+append-only log: there is no history to browse, just "what is this
+person saying right now, if anything"), sent via `POST /api/bar/say` and
+delivered through the *existing* public bar snapshot/SSE broadcast —
+deliberately no new transport. A speech bubble is exactly as visible to
+everyone watching the bar as a patron moving or sitting down already is,
+with zero new plumbing beyond adding a `speech: string | null` field to
+`PublicBarPlayer`. `expires_at` is an absolute timestamp set once at send
+time (`SPEECH_DISPLAY_MS`, 8s by default) — `getPublicBarState` filters
+by it lazily (`expires_at > now`, the same "evaluated fresh on every
+read" principle as the lobby disconnect grace), which is what makes a
+reconnect or a plain poll report the *remaining* window rather than
+restarting it, with no sweep and no client-side countdown. A bubble
+naturally expiring with nothing else changing is still pushed to anyone
+watching within about a second, for free: `speech` is part of the same
+`players` array `tickBarPresence`'s signature-diff already compares every
+tick, so "a bubble just disappeared" is detected and republished exactly
+like "a patron just went offline" always was.
 
-**Idempotent send, bounded history, rate-limited.** A client-generated
-`clientMsgId` per outgoing message is the idempotency key
-(`UNIQUE(thread_id, sender_id, client_msg_id)` plus a check-before-insert
-inside one transaction) — a retried send after a dropped response returns
-the already-stored message rather than creating a second one. Messages
-are plain text, 1–500 characters, rendered as `textContent` (never
-`innerHTML`) so nothing in a message body can execute. A reconnecting
-inbox stream's `onopen` re-fetches anything past the last message this
-client actually rendered for whichever thread is currently open
-(`GET .../messages?afterId=`) — the same "a dropped connection is never
-trusted to have delivered everything" rule the room/bar channels already
-follow, scoped to chat. A per-sender sliding-window limiter
-(`src/chat.ts`, in-memory, env-overridable like every other threshold in
-this file) caps burst sending without needing a persistent rate-limit
-table.
+**Server-side, per the general send-something-public shape:** real
+identity via `requireBarSession` (never a client-supplied nickname),
+1–500 characters trimmed, a per-sender sliding-window rate limit
+(`SPEECH_RATE_LIMIT_COUNT`/`_WINDOW_MS`, the same in-memory shape
+`src/chat.ts`'s own limiter used, just not shared code since it's a
+different action with its own threshold), and a client-generated
+`clientMsgId` as the idempotency key — but idempotency means something
+specific here, different from an append-only message log: a retried send
+with the *same* id is a pure no-op that must **not** restart the 8-second
+clock, while a **genuinely new** utterance from the same person replaces
+whatever bubble they already had and *does* restart it. Rendered client-
+side as `fillText`, never `innerHTML`, so nothing in a bubble's text can
+execute.
+
+**Client-side bubble rendering.** Drawn directly on the canvas
+(`drawSpeechBubble`/`wrapBubbleText` in `public/tavern.js`), never a DOM
+element — it therefore can never intercept a click on the floor, a
+character, or a chair underneath it, since every click is resolved from
+grid coordinates alone, independent of anything drawn. Word-wrapped to a
+fixed max width, clamped to stay on screen; a single "word" wider than
+the whole bubble (a long CJK run, a long no-space token) is broken by
+character instead, iterating by Unicode code point (`for...of`, never
+`split('')`) so a surrogate-pair emoji is never cut in half. Follows
+whatever screen position the nickname tag above a patron's head already
+uses — a present game-table occupant's real chair tile
+(`src/position.ts`, unchanged by this pivot) just as much as an ordinary
+standing or dining/stool-seated patron's interpolated position — so
+movement, sitting down, and the camera panning all carry the bubble with
+them for free, with no separate position-tracking code of its own.
 
 ## The bar is a full-screen world, with a following camera
 

@@ -372,17 +372,15 @@ button.enter-world { background:#62506e; color:#fff6e6; border-radius:10px; padd
 .game-dialog form,.game-dialog .return-banner { background:#eee5d8; border-color:#dac7ad; }
 .game-dialog input { background:#fffaf3; color:#453b3f; border-color:#d9cec0; }
 .game-dialog .note { color:#877568; }
-/* Proximity-triggered 1:1 chat (product-direction-update, part 3). */
-.chat-dialog { width:min(420px,100%); display:flex; flex-direction:column; }
-.chat-messages { display:flex; flex-direction:column; gap:8px; max-height:50vh; min-height:120px; overflow-y:auto; margin:4px 0 12px; padding:4px 2px; }
-.chat-bubble { margin:0; padding:9px 13px; border-radius:14px; font-size:13px; line-height:1.4; max-width:80%; word-break:break-word; white-space:pre-wrap; }
-.chat-theirs { align-self:flex-start; background:#eee5d8; color:#40383f; border-bottom-left-radius:4px; }
-.chat-mine { align-self:flex-end; background:#62506e; color:#fff6e6; border-bottom-right-radius:4px; }
-.chat-compose { display:flex; gap:8px; align-items:center; }
-.chat-input { flex:1; background:#fffaf3; border:1px solid #d9cec0; color:#453b3f; padding:12px; font-size:14px; border-radius:10px; }
-button.chat-send { padding:12px 18px; margin:0; }
-button.chat-banner { position:absolute; top:84px; right:24px; pointer-events:auto; background:#62506eed; animation:chat-banner-in .2s ease-out; }
-@keyframes chat-banner-in { from { transform:translateY(-8px); opacity:0; } to { transform:translateY(0); opacity:1; } }
+/* Public tavern speech (product-direction-update, part 3's replacement
+ * for private 1:1 chat, after the student's own acceptance testing) — a
+ * compact always-visible input, never a dialog; the bubble itself is
+ * drawn on the canvas (public/tavern.js's drawSpeechBubble), not DOM, so
+ * it can never intercept a click. */
+.speech-bar { position:absolute; bottom:80px; left:24px; right:184px; display:flex; gap:8px; pointer-events:auto; }
+.speech-input { flex:1; background:#272531ed; color:#f3e2c7; border:1px solid #d9b27b40; border-radius:12px; padding:11px 14px; font-size:13px; }
+.speech-input::placeholder { color:#c0af9d; }
+button.speech-send { padding:11px 18px; margin:0; }
 @media(max-width:600px) {
   .world-hud { top:12px; left:12px; right:12px; align-items:flex-start; }
   .world-brand { padding:9px 11px; gap:6px; }
@@ -398,8 +396,7 @@ button.chat-banner { position:absolute; top:84px; right:24px; pointer-events:aut
   .avatar-preview { display:flex; align-items:center; justify-content:center; height:120px; }
   .avatar-preview canvas { width:128px; height:128px; }
   .avatar-preview span { padding:0; max-width:70px; }
-  .chat-dialog { width:100%; }
-  button.chat-banner { top:64px; right:12px; left:12px; width:auto; text-align:center; }
+  .speech-bar { left:12px; right:12px; bottom:150px; }
   button.avatar-swatch { width:32px; height:32px; }
   .world-toast { bottom:20px; font-size:10px; padding:9px 15px; }
 }

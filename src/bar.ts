@@ -348,6 +348,69 @@ export function standFromSeat(db: Database.Database, playerId: string, sessionSe
   recordBarHeartbeat(db, playerId);
 }
 
+// ---- Public tavern speech (product-direction-update, part 3's
+// replacement for private 1:1 chat, after the student's own acceptance
+// testing — CLAUDE.md's "Public tavern speech" section has the full
+// design) ----
+
+const SPEECH_MAX_LENGTH = 500;
+const SPEECH_DISPLAY_MS = Number(process.env.SPEECH_DISPLAY_MS ?? 8000);
+// Same in-memory sliding-window shape as src/chat.ts's own limiter —
+// not shared code, since this is a different action with its own
+// threshold, but the same reasoning (cheap at this app's scale,
+// env-overridable so a test can trip it without a production-sized
+// burst).
+const SPEECH_RATE_LIMIT_COUNT = Number(process.env.SPEECH_RATE_LIMIT_COUNT ?? 5);
+const SPEECH_RATE_LIMIT_WINDOW_MS = Number(process.env.SPEECH_RATE_LIMIT_WINDOW_MS ?? 10000);
+const speechTimestamps = new Map<string, number[]>();
+
+function checkSpeechRateLimit(playerId: string, now: number): void {
+  const recent = (speechTimestamps.get(playerId) ?? []).filter((t) => now - t < SPEECH_RATE_LIMIT_WINDOW_MS);
+  if (recent.length >= SPEECH_RATE_LIMIT_COUNT) {
+    throw new BarError("sending too fast — wait a moment", "rate_limited", 429);
+  }
+  recent.push(now);
+  speechTimestamps.set(playerId, recent);
+}
+
+/** Says something publicly — everyone watching the bar sees it as a
+ * bubble over this patron's head (reported via the ordinary
+ * `getPublicBarState`/bar SSE channel, no separate transport). Identity
+ * and nickname are the server's own (`requireBarSession`), never a
+ * client-supplied value. `clientMsgId` is the idempotency key: a retried
+ * send with the same id is a silent no-op — it must NOT restart the
+ * 8-second display clock, the one thing that actually distinguishes a
+ * genuine resend-with-a-fresh-utterance (which *does* replace the bubble
+ * and restart the clock, by product decision) from a network retry of
+ * the exact same one. */
+export function say(db: Database.Database, playerId: string, sessionSecret: string, clientMsgId: string, text: string): void {
+  requireBarSession(db, playerId, sessionSecret);
+  if (typeof clientMsgId !== "string" || !clientMsgId) {
+    throw new BarError("missing client message id", "bad_request", 400);
+  }
+  const trimmed = (text ?? "").toString().trim();
+  if (!trimmed) throw new BarError("message can't be empty", "empty_message", 400);
+  if (trimmed.length > SPEECH_MAX_LENGTH) {
+    throw new BarError(`message must be at most ${SPEECH_MAX_LENGTH} characters`, "too_long", 400);
+  }
+
+  const tx = db.transaction(() => {
+    const existing = db.prepare(`SELECT client_msg_id FROM bar_speech WHERE player_id = ?`).get(playerId) as
+      | { client_msg_id: string }
+      | undefined;
+    if (existing?.client_msg_id === clientMsgId) return; // a retry of the bubble already showing — no-op, no re-timing
+
+    checkSpeechRateLimit(playerId, Date.now());
+    const expiresAt = new Date(Date.now() + SPEECH_DISPLAY_MS).toISOString();
+    db.prepare(
+      `INSERT INTO bar_speech (player_id, text, client_msg_id, expires_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(player_id) DO UPDATE SET text = excluded.text, client_msg_id = excluded.client_msg_id, expires_at = excluded.expires_at`,
+    ).run(playerId, trimmed, clientMsgId, expiresAt);
+  });
+  tx();
+  recordBarHeartbeat(db, playerId);
+}
+
 export interface PublicBarPlayer {
   id: string;
   nickname: string;
@@ -361,6 +424,15 @@ export interface PublicBarPlayer {
    * room's own player roster, since that's a different occupancy
    * concept entirely — PLAN.md's product-direction-update entry). */
   seatId: string | null;
+  /** This patron's current speech bubble text, or null if they have none
+   * active right now — computed fresh on every read by comparing
+   * `bar_speech.expires_at` against "now" (the same lazy-evaluation
+   * principle as the lobby disconnect grace: no sweep, no timer, just
+   * "is this still true as of this exact read"). Never the absolute
+   * expiry itself: the client doesn't run its own countdown, it just
+   * draws whatever's here and stops the moment a fresh snapshot omits it
+   * (CLAUDE.md's "Public tavern speech" section). */
+  speech: string | null;
 }
 
 export interface PublicGameTable {
@@ -404,14 +476,20 @@ export function getPublicBarState(db: Database.Database): PublicBarState {
       occupied_by: string;
     }>).map((s) => [s.occupied_by, s.id]),
   );
+  const nowIso = now.toISOString();
+  const speechBy = new Map(
+    (db.prepare(`SELECT player_id, text FROM bar_speech WHERE expires_at > ?`).all(nowIso) as Array<{
+      player_id: string;
+      text: string;
+    }>).map((s) => [s.player_id, s.text]),
+  );
   return {
     players: online.map((p) => {
       // A present game-table occupant is reported at their real chair
       // tile, never their frozen pre-game coordinate (src/position.ts) —
       // this is what makes another patron's pathfinding/click-targeting
-      // and the proximity-chat trigger agree with what's actually drawn
-      // at the chair, rather than an invisible stale position nobody can
-      // see or reach (CLAUDE.md).
+      // agree with what's actually drawn at the chair, rather than an
+      // invisible stale position nobody can see or reach (CLAUDE.md).
       const pos = effectivePosition(db, p.id) ?? { x: p.x, y: p.y };
       return {
         id: p.id,
@@ -421,6 +499,7 @@ export function getPublicBarState(db: Database.Database): PublicBarState {
         x: pos.x,
         y: pos.y,
         seatId: seatedBy.get(p.id) ?? null,
+        speech: speechBy.get(p.id) ?? null,
       };
     }),
   };

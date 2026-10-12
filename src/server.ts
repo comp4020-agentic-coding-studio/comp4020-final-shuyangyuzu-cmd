@@ -531,6 +531,25 @@ app.post("/api/bar/move", async (c) => {
   return c.json(snap);
 });
 
+// Public tavern speech (product-direction-update, part 3's replacement
+// for private 1:1 chat) — rides the same public bar snapshot/SSE
+// broadcast every other bar mutation already does, no separate channel:
+// a bubble appearing is exactly as visible to everyone watching as a
+// patron moving or sitting down already is.
+app.post("/api/bar/say", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody & { clientMsgId?: unknown; text?: unknown };
+  bar.say(
+    db,
+    barPlayerId(body),
+    barSessionSecret(body),
+    typeof body.clientMsgId === "string" ? body.clientMsgId : "",
+    typeof body.text === "string" ? body.text : "",
+  );
+  const snap = barSnapshot(live.bumpBarSeq());
+  live.publishBar(snap);
+  return c.json(snap);
+});
+
 // ---- Phase 2 (product-direction-update): real dining/stool seats ----
 
 app.post("/api/bar/seats/:seatId/sit", async (c) => {

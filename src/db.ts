@@ -127,12 +127,18 @@ function migrate(db: Database.Database): void {
     );
 
     -- Proximity-triggered 1:1 chat (product-direction-update, part 3).
-    -- One thread per unordered pair of bar identities — id is the two
-    -- player ids sorted and joined, so "does this pair already have a
-    -- thread" is a plain primary-key lookup regardless of who initiates.
-    -- Never merged with, or readable through, the public bar/room SSE
-    -- channels (CLAUDE.md) — a message is only ever delivered to its two
-    -- participants, over their own authenticated channel (src/live.ts).
+    -- SUPERSEDED as the client-facing feature by public speech bubbles
+    -- below, after the student's own acceptance testing (CLAUDE.md's
+    -- "Public tavern speech..." section has the full story) — kept here,
+    -- schema and server routes both, purely to preserve existing private
+    -- records under their original access control; the client no longer
+    -- creates or reads through this table at all. One thread per
+    -- unordered pair of bar identities — id is the two player ids sorted
+    -- and joined, so "does this pair already have a thread" is a plain
+    -- primary-key lookup regardless of who initiates. Never merged with,
+    -- or readable through, the public bar/room SSE channels (CLAUDE.md) —
+    -- a message is only ever delivered to its two participants, over
+    -- their own authenticated channel (src/live.ts).
     CREATE TABLE IF NOT EXISTS chat_threads (
       id TEXT PRIMARY KEY,
       player_a TEXT NOT NULL REFERENCES bar_players(id),
@@ -155,6 +161,23 @@ function migrate(db: Database.Database): void {
     -- backstop, not the only thing idempotency depends on).
     CREATE UNIQUE INDEX IF NOT EXISTS chat_messages_dedup ON chat_messages(thread_id, sender_id, client_msg_id);
     CREATE INDEX IF NOT EXISTS chat_messages_thread ON chat_messages(thread_id, id);
+
+    -- Public tavern speech (product-direction-update, part 3 replacement,
+    -- 2026-10-12): one active "bubble" per bar identity, never a message
+    -- log — the previous line a patron said is simply gone once a new
+    -- one replaces it or it expires, so one row per player (not an
+    -- append-only table like chat_messages above) is the correct shape.
+    -- expires_at is an absolute timestamp set once at send time, which is
+    -- what lets a reconnect or a plain poll show the *remaining* display
+    -- window rather than restarting it (src/bar.ts's getPublicBarState
+    -- filters by it lazily, the same "evaluated fresh on every read"
+    -- principle as the lobby disconnect grace — no sweep, no timer).
+    CREATE TABLE IF NOT EXISTS bar_speech (
+      player_id TEXT PRIMARY KEY REFERENCES bar_players(id),
+      text TEXT NOT NULL,
+      client_msg_id TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    );
   `);
 
   // Added after the first deploy. "CREATE TABLE IF NOT EXISTS" above is a
