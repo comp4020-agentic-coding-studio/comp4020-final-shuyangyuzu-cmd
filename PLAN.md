@@ -2984,6 +2984,20 @@ online-table approval, and NPC games are unchanged code paths, already
 covered by the full 201-test suite rerun above, not retested by hand
 beyond this one live touch.
 
-Not yet done as of this entry: commit/push, CI, and production
-verification (next), including a versioned screenshot per the student's
-own request. 等待用户验收.
+Committed (`73b312f`), pushed, CI's `checks` job passed (run
+`38193682181`).
+
+**Deployed and verified live**: `/version` on
+`https://comp4020-final-shuyangyuzu-cmd.fly.dev` returns `740908f3f0`,
+matching the local build exactly (the same hash visible in every local
+screenshot above). Two throwaway probe identities, created in the real
+production tavern alongside the student's own two actual patrons at the
+time (visible in the screenshots, never interacted with) — one spoke
+("Hello from production! 你好 🎉"), and the other's own independent read of
+`/api/bar/state`, from its own separate camera view, saw the bubble with
+no approach or click at all, confirmed by a screenshot from each
+patron's own page showing the identical bubble and the real build number
+in the corner. A second message during the same session confirmed, via
+request logging, zero calls to any `/api/bar/chat/*` endpoint — the old
+private module is live and intact (unused) in production too, never
+reached by normal use. 等待用户验收.
