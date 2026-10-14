@@ -19,6 +19,7 @@ function expectedVersion(): string {
   hash.update(readFileSync("public/styles.css"));
   hash.update(readFileSync("public/tavern.js"));
   hash.update(readFileSync("public/liveSync.js"));
+  hash.update(readFileSync("public/favicon.svg"));
   return hash.digest("hex").slice(0, 10);
 }
 
@@ -28,6 +29,7 @@ it("serves / with a version token matching a hash of the actual deployed assets"
   const version = expectedVersion();
   expect(html).toContain(`/app.js?v=${version}`);
   expect(html).toContain(`/styles.css?v=${version}`);
+  expect(html).toContain(`/favicon.svg?v=${version}`);
   // Visible on the page itself, not just in the asset URLs — the point
   // is a person can check what they're looking at without opening
   // devtools.
