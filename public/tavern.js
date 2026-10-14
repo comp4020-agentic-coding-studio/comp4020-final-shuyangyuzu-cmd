@@ -127,7 +127,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     }},'Stand up');
     standBtn.style.display='none';
     const hud=el('header',{class:'world-hud'},[
-      el('div',{class:'world-brand'},[el('span',{class:'brand-mark'},'◆'),el('div',{},[el('strong',{},'THE AMBER ROOM'),el('small',{},'A little place to be together')])]),
+      el('div',{class:'world-brand'},[el('span',{class:'brand-mark'},'◆'),el('div',{},[el('strong',{},'拉斯维加斯'),el('small',{},'A little place to be together')])]),
       el('div',{class:'hud-actions'},[online,standBtn,el('button',{class:'hud-button',onclick:()=>{path=[];chooseCharacter();}},'Your character'),el('button',{class:'hud-button',onclick:()=>openGames()},'Join by code')]),
     ]);
     const directions=el('div',{class:'world-dpad','aria-label':'Movement controls'});
@@ -455,7 +455,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         try{const appearance={nickname:input.value.trim(),color,skin};let resp;if(session){resp=await post('/appearance',{...session,...appearance});applyIncoming(resp);session={...session,...appearance};}else{resp=await post('/join',appearance);session={...resp,...appearance};}activeSeat=resp.activeSeat??null;try{localStorage.setItem(sessionKey,JSON.stringify(session));}catch{}overlay.replaceChildren();applyIncoming(await read('/state'));begin();}
         catch(err){error.textContent=err.message||'Could not enter';enter.disabled=false;}
       }},[
-        el('p',{class:'eyebrow'},'THE AMBER ROOM · OPEN ALL EVENING'),el('h1',{},'Come as you are.'),el('p',{class:'dialog-subtitle'},'Make yourself a little character. Your friends are inside.'),
+        el('p',{class:'eyebrow'},'拉斯维加斯 · OPEN ALL EVENING'),el('h1',{},'Come as you are.'),el('p',{class:'dialog-subtitle'},'Make yourself a little character. Your friends are inside.'),
         el('div',{class:'avatar-editor'},[el('div',{class:'avatar-preview'},[preview,el('span',{},'YOUR LITTLE SELF')]),el('div',{class:'avatar-options'},[
           el('label',{for:'patron-nickname'},'What should we call you?'),input,
           el('span',{class:'option-label'},'Clothes'),makeChoices(colors,'Clothes',v=>color=v),
@@ -600,7 +600,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         box(fc,x-3,y+9,w+6,h,'#37282b');box(fc,x,y+5,w,h-10,'#b58153');box(fc,x,y+13,w,5,'#dfb979');box(fc,x,y+h-8,w,8,'#6b4635');
         for(let i=12;i<w;i+=64){box(fc,x+i,y+29,46,25,'#815636');box(fc,x+i+2,y+30,42,2,'#cf9c5e');}
         for(let i=32;i<w;i+=80){box(fc,x+i,y-24,9,22,'#729f80');box(fc,x+i+2,y-29,5,6,'#d8b873');box(fc,x+i+14,y-15,7,13,'#ddc6a0');}
-        fc.font='bold 17px monospace';fc.textAlign='center';fc.fillStyle='#e4bf7e';fc.fillText('THE AMBER ROOM',x+w/2,y-43);
+        fc.font='bold 17px monospace';fc.textAlign='center';fc.fillStyle='#e4bf7e';fc.fillText('拉斯维加斯',x+w/2,y-43);
       }else if(f.kind==='stool'){
         // Drawn below from the same seat tile the player can click.
       }else if(f.kind==='restroom'){

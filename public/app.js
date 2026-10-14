@@ -322,7 +322,7 @@ async function renderJoinOrClosed(code) {
   } catch {
     render(
       el("div", { class: "entry" }, [
-        el("h1", {}, "Vegas"),
+        el("h1", {}, "拉斯维加斯"),
         el("p", { class: "error" }, `No room found for code ${code}.`),
         backToHomeButton(),
       ]),
@@ -333,7 +333,7 @@ async function renderJoinOrClosed(code) {
   if (state.closed) {
     render(
       el("div", { class: "entry" }, [
-        el("h1", {}, "Vegas"),
+        el("h1", {}, "拉斯维加斯"),
         el("p", {}, `Room ${code} has closed.`),
         backToHomeButton(),
       ]),
@@ -344,7 +344,7 @@ async function renderJoinOrClosed(code) {
   if (state.phase !== "lobby") {
     render(
       el("div", { class: "entry" }, [
-        el("h1", {}, "Vegas"),
+        el("h1", {}, "拉斯维加斯"),
         el("p", {}, `Room ${code} has already started, and this browser doesn't hold a seat in it.`),
         backToHomeButton(),
       ]),
@@ -420,7 +420,7 @@ function renderJoinForm(code, initialState) {
 
     render(
       el("div", { class: "entry" }, [
-        el("h1", {}, "Vegas"),
+        el("h1", {}, "拉斯维加斯"),
         el("p", { class: "note" }, [
           "Built for a handful of friends sitting around one table, each on ",
           "their own phone — not for matchmaking with strangers.",
@@ -452,7 +452,7 @@ function enterRoom(code, session) {
     .catch(() => {
       render(
         el("div", { class: "entry" }, [
-          el("h1", {}, "Vegas"),
+          el("h1", {}, "拉斯维加斯"),
           el(
             "p",
             { class: "error" },
@@ -559,7 +559,7 @@ function startLive(code, session, initialState) {
       clearSession(code);
       render(
         el("div", { class: "entry" }, [
-          el("h1", {}, "Vegas"),
+          el("h1", {}, "拉斯维加斯"),
           el("p", {}, "You were removed from this room (disconnected too long, or a pending request was declined or expired)."),
           backToHomeButton(),
         ]),
@@ -663,7 +663,7 @@ function renderPendingRequest(code, session, state) {
   const mine = (state.pendingRequests ?? []).find((r) => r.id === session.playerId);
   render(
     el("div", { class: "entry" }, [
-      el("h1", {}, "Vegas"),
+      el("h1", {}, "拉斯维加斯"),
       el("p", {}, `Waiting for the host of room ${code} to approve your request to join${mine ? ` as ${mine.nickname}` : ""}.`),
       el(
         "p",
@@ -701,7 +701,7 @@ function renderTable(code, session, state) {
     clearSession(code);
     render(
       el("div", { class: "entry" }, [
-        el("h1", {}, "Vegas"),
+        el("h1", {}, "拉斯维加斯"),
         el("p", {}, `Room ${code} has closed.`),
         backToHomeButton(),
       ]),
@@ -715,7 +715,7 @@ function renderTable(code, session, state) {
   const shareLink = `${location.origin}/?room=${code}`;
 
   const header = el("header", {}, [
-    el("h1", {}, "Vegas"),
+    el("h1", {}, "拉斯维加斯"),
     el("p", {}, ["Room ", el("strong", {}, code)]),
     copyInviteLinkControl(shareLink),
   ]);

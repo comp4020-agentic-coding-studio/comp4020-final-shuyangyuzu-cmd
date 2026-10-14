@@ -26,6 +26,7 @@ function computeVersion(): string {
   hash.update(readFileSync("public/styles.css"));
   hash.update(readFileSync("public/tavern.js"));
   hash.update(readFileSync("public/liveSync.js"));
+  hash.update(readFileSync("public/favicon.svg"));
   return hash.digest("hex").slice(0, 10);
 }
 
