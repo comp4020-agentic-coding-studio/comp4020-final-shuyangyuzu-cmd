@@ -3236,10 +3236,11 @@ and live verification with two separate Chrome-profile identities.
   `formatActionLogLine` exported separately from the `console.log`
   side-effect for unit testing) plus every existing `logEvent` call
   site in `src/rooms.ts` gaining a sibling `logAction` call, inside
-  the same transaction, after the same write, before any later throw —
-  so a rolled-back write is structurally incapable of being logged as
-  a success (the same transaction `logEvent` itself already relied on
-  for the identical guarantee).
+  the same transaction, after the same write, before any later throw.
+  **This commit's own claim that this made a rolled-back write
+  "structurally incapable of being logged as a success" was wrong — see
+  the correction entry below, dated 2026-10-17, for the real bug this
+  turned out to have and the actual fix.**
 - `481fc5c` — bar and table-binding actions that previously wrote no
   event anywhere (`move`, `sit`, `stand`, `say`, `join_bar`,
   `rejoin_bar`, `update_appearance`, `create_table`, `join_table`,
@@ -3259,13 +3260,13 @@ and live verification with two separate Chrome-profile identities.
   reading a claimed identity best-effort from the already-parsed JSON
   body (Hono's `HonoRequest.json()` caches its parsed result, so a
   second call here after a handler already consumed it is free) or,
-  for the chat GET/SSE routes, from query params. A rejection whose
-  code is `unauthorized` is tagged `verified: false` and keeps the
-  claimed id but never a nickname — nicknames only ever come from a
-  verified DB row elsewhere. `spec/actionLog.test.ts` (12 new tests,
-  direct-DB style since the HTTP-level spec files run against a
-  separate process and can't spy on its stdout) added in the same
-  commit.
+  for the chat GET/SSE routes, from query params. **This commit's own
+  `verified: err.code !== "unauthorized"` heuristic was wrong — see the
+  correction entry below for the real bug and the actual fix
+  (real evidence via `wasIdentityVerified()`, not an inference from the
+  error code).** `spec/actionLog.test.ts` (12 new tests, direct-DB style
+  since the HTTP-level spec files run against a separate process and
+  can't spy on its stdout) added in the same commit.
 - `87f423b` — `ADR-access-control.md`, written against the actually-
   running code (every file:line citation re-checked while writing it;
   no mismatch found between the document's claims and the code).
@@ -3276,12 +3277,14 @@ and live verification with two separate Chrome-profile identities.
 `pnpm check` against an isolated temp `DATA_DIR` (same method as the
 prep baseline): 213/213 tests pass (201 original + 12 new), typecheck
 clean. `pnpm check:evidence` green (27 cited commits in PROCESS.md, all
-resolve). Confirmed directly during development, not just inferred:
-captured log output from a local run showed no `sessionSecret` string
-anywhere, `create_table`/`join_table` lines correctly pairing a bar id
-with the room player id it became, and rejection lines (`not_host`,
-`not_your_turn`, `unauthorized`) all present with `verified` set
-correctly.
+resolve). Captured log output from a local run showed no `sessionSecret`
+string anywhere and `create_table`/`join_table` lines correctly pairing a
+bar id with the room player id it became — both of those claims held up.
+**The claim that rejection lines' `verified` field was "set correctly"
+did not hold up**: it was computed from the error's own code
+(`err.code !== "unauthorized"`), not from any actual record of whether a
+session check had run — see the correction entry below for the bug this
+was (confirmed, not hypothetical) and the fix.
 
 **CI and deploy:** pushed as 5 commits (`31b605e`..`0e2cc90`). CI run
 `38893718915` completed `success` on `0e2cc90` (both its `check` and
@@ -3361,3 +3364,134 @@ layer being identical either way is a reasonable inference, not a
 substitute for actually doing it. The student should run the real
 two-profile version once before the crit itself, which this session
 could not perform.
+
+## Crit 10 correction (2026-10-17) — two real bugs the student's own agent found in the logging fix above
+
+The student had their own agent review the logging implementation above
+and report back two concrete, reproducible defects — not stylistic
+concerns, both genuine correctness bugs in what the two entries above
+claimed was already correct. Both are documented here with what the bug
+actually was, how it was reproduced (a failing test *before* any fix, not
+just asserted), and what the real fix turned out to need — because the
+first fix attempt for bug 1 was itself incomplete, which is its own
+useful record of why "move the log call later" isn't a sufficient fix
+for this class of problem.
+
+### Bug 1: a rolled-back outer transaction could still log success
+
+**The claim that turned out to be false:** the 2026-10-16 entry above
+said every `logAction` call sat "inside the same transaction, after the
+same write, before any later throw," making a rolled-back write
+"structurally incapable of being logged as a success." This reasoning
+holds for a single, non-nested `db.transaction()` call, but
+`src/tables.ts`'s `createTableRoom` wraps a call to `rooms.createRoom`,
+which has its own `db.transaction()` — real nesting that already existed
+in production code, not a contrived scenario. better-sqlite3 implements
+nesting as a SAVEPOINT/RELEASE pair: when `createRoom`'s own inner
+transaction finishes successfully, its SAVEPOINT is RELEASEd immediately
+— committed, as far as SQLite is concerned — even though the *outer*
+transaction (`createTableRoom`'s own) hasn't decided anything yet.
+`console.log` has no rollback semantics at all: a log call made during
+that inner, successfully-released transaction has already printed by the
+time an unrelated failure later rolls the *outer* transaction back.
+
+**Reproduction, confirmed failing before any fix:** `spec/actionLog.test.ts`'s
+`"a rolled-back OUTER transaction around createRoom leaves no room row
+AND no success log line"` wraps a call to `rooms.createRoom` in a raw
+`db.transaction()` that deliberately throws immediately afterward. Run
+against the original code, this failed exactly as predicted: `SELECT
+COUNT(*) FROM rooms` correctly showed 0 (the write did roll back), but
+the captured `console.log` spy still showed one `"room_created"`,
+`"outcome":"ok"` line.
+
+**The first fix attempt was itself incomplete.** The obvious fix —
+introduce a `transact(db, fn)` helper that checks `db.inTransaction` to
+decide whether it's the outermost call, and buffers logging accordingly,
+with every call site migrated from raw `db.transaction()` to this helper
+— passed the reproduction test above on the first attempt, because that
+test happens to nest two calls that *both* go through the new helper
+(`createTableRoom`'s own `transact()` wrapping `createRoom`'s own
+`transact()`). But the regression test as originally written used a raw
+`db.transaction()` for the *outer* call specifically to mirror the
+user's own bug report, and against the helper-only fix, it still failed
+identically — a raw outer `db.transaction()` wrapping an inner
+`transact()`-using call has no way to know the helper's own
+`pendingByDb` buffer exists at all, so nothing ever flushed or discarded
+it when the outer raw transaction committed or rolled back. This is
+recorded here specifically because it's the kind of fix that looks
+complete (it passes `pnpm check`, it passes the one test written to
+describe the original bug) while still depending on every call site
+remembering to use the new helper instead of calling `db.transaction()`
+directly — exactly the discipline-dependent shape that let the original
+bug exist in the first place.
+
+**The actual fix:** `src/actionLog.ts`'s `installTransactionLogging`
+patches `Database.prototype.transaction` itself — not a new wrapper
+function callers have to remember to use, but the method every call site
+(old or new, migrated or not) already calls. `src/db.ts`'s `openDb`
+installs this patch once, immediately after opening the connection,
+before any other code can call `db.transaction`. Every transaction on
+that connection — invoked via the `transact()` convenience export or a
+raw `db.transaction(fn)()` — now buffers what it logs and flushes that
+buffer to stdout only when the actually-outermost transaction commits,
+discarding it unconditionally on a throw at any nesting depth. Because
+this is keyed off the identical `db.inTransaction` flag better-sqlite3
+itself uses to decide SAVEPOINT-vs-BEGIN, the two can never disagree
+about what counts as "outermost." Re-run against this fix, the original
+regression test (raw outer `db.transaction()`, `transact()`-using inner
+`createRoom` call) passes, and a live local server run reproduced the
+same nested shape for real HTTP traffic (`createTableRoom` → `createRoom`
+→ `startGameLogic` for the solo-NPC path): the full chain of
+`solo_npc_room_created`/`game_started`/`start_npc_game` log lines all
+appeared together, correctly, confirming the fix holds outside the test
+suite too.
+
+### Bug 2: `verified` was inferred from the error code, not from real proof
+
+**The claim that turned out to be false:** the 2026-10-16 entry said
+`app.onError` tags `verified: false` "specifically when the rejection
+was a failed identity check," implemented as `err.code !== "unauthorized"`.
+This is wrong on inspection of `src/rooms.ts` itself: `loadOpenRoom`/
+`loadRoomAfterSweep` — called at the start of nearly every mutating
+function, before `requireSession` — can throw `room_not_found` or
+`room_closed`. Neither of those codes is `"unauthorized"`, so the old
+heuristic logged `verified: true` for a request whose claimed identity
+was never checked at all, falsely implying a session check had passed.
+
+**Reproduction:** `spec/actionLog.test.ts`'s
+`"wasIdentityVerified is false when no session check ever ran during the
+tracked scope"` calls `rooms.roll` against a nonexistent room code
+(reaching `loadOpenRoom`'s own throw before `requireSession` is ever
+called) and confirms no verification was ever recorded for that attempt.
+Live `flyctl logs`/local-server output from before this fix is not
+separately preserved, but the code path is unambiguous: `roll`
+(`src/rooms.ts`) calls `loadOpenRoom` as its first line, `requireSession`
+as its second — a thrown `room_not_found` from the first line never
+reaches the second at all.
+
+**The fix:** `src/actionLog.ts`'s `runWithVerificationTracking`/
+`markIdentityVerified`/`wasIdentityVerified`, backed by
+`AsyncLocalStorage` (not a plain shared variable — Hono's handlers are
+async, and two concurrent requests' handlers can genuinely interleave at
+an `await` boundary, which a shared mutable flag would race). A new
+outermost middleware in `src/server.ts` establishes a fresh, unverified
+context for every incoming request; `requireSession` (`src/rooms.ts`) and
+`requireBarSession` (`src/bar.ts`) — and only these two — call
+`markIdentityVerified()` the instant their own check actually succeeds,
+never speculatively, never from a catch block. `app.onError` reads
+`wasIdentityVerified()` instead of inspecting the error code. Verified
+directly: a non-existent-room rejection now logs `verified: false`; a
+`not_host` rejection (where `requireSession` genuinely passed before the
+host check failed) still correctly logs `verified: true` — the two cases
+the old heuristic could not actually tell apart from each other with any
+real evidence. `spec/actionLog.test.ts` also confirms a tracked scope
+never leaks verification state into the next one (two sequential
+`runWithVerificationTracking` calls, the second starting fresh).
+
+**Verification performed for this correction:** `pnpm check` (217/217
+tests — 213 prior + 4 new regression tests directly exercising both
+bugs) and `pnpm check:evidence`, both green, against an isolated local
+`DATA_DIR`, same method as every prior entry. CI and deploy confirmation
+for the commits containing this fix are recorded immediately below.
+No game rule changed; `src/orders.ts` untouched; `crit-8`/`crit-9` tags
+unmoved; no `crit-10` tag created.

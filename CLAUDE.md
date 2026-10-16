@@ -29,6 +29,58 @@ transaction. Never split these across two writes — a crash or a
 concurrent request between them must not be able to leave an event logged
 with no matching state change, or vice versa.
 
+## A terminal-facing log line is held to the same transaction honesty as the DB event it accompanies
+
+Crit 10's own server-side action log (`src/actionLog.ts`, `flyctl logs`)
+sits beside the SQLite `events` table this section already governs, and
+is held to the identical rule: a "success" line reaches stdout if and
+only if the write it describes actually committed. `console.log` itself
+has no rollback — once called, the line is out — so this can never be
+achieved by placing the log call inside a `db.transaction()` callback and
+reasoning "a throw rolls the whole callback back together." That
+reasoning is incomplete the moment one transaction is nested inside
+another (`src/tables.ts`'s `createTableRoom` calling `rooms.createRoom`,
+which has its own transaction — real production nesting, not a
+hypothetical): better-sqlite3 commits a nested call's own SAVEPOINT
+immediately on its own successful return, before the outer transaction
+has decided anything — a log call made at that point has already printed
+by the time an unrelated failure later rolls the *outer* transaction
+back. This was a real bug, caught by an independent review and
+reproduced directly (`spec/actionLog.test.ts`): a deliberately-failing
+outer transaction around `createRoom` left zero room rows but one
+`"outcome":"ok"` log line.
+
+The fix is not "move the log call later" — any call-site-local fix
+reintroduces the same bug the next time a function gets called from
+inside someone else's transaction, which is exactly the shape nobody
+can fully audit for by reading each call site in isolation. The actual
+fix patches `db.transaction` itself, once, in `src/db.ts`'s `openDb`
+(`installTransactionLogging`): every transaction on that connection,
+however it's invoked — through the `transact()` convenience wrapper or a
+raw `db.transaction(fn)()` — buffers whatever it logs and only flushes
+that buffer to stdout when the **outermost** transaction actually
+commits, discarding it unconditionally on a throw at any nesting depth.
+This is what makes the guarantee hold regardless of which function
+happens to call which other function inside a transaction, rather than
+depending on every call site remembering to opt in.
+
+A rejection's own `verified` field carries the identical "real evidence,
+not inference" standard: it is set `true` only when `requireSession`
+(`src/rooms.ts`) or `requireBarSession` (`src/bar.ts`) actually ran and
+passed for the request being logged — never inferred afterward from
+whatever error code the eventual rejection happens to carry. An earlier
+version of this inferred `verified` from `error.code !== "unauthorized"`,
+which was wrong: most mutations in `src/rooms.ts` reach `loadOpenRoom`
+(which can throw `room_not_found`/`room_closed`) *before* calling
+`requireSession` at all, so a request that never got anywhere near a
+session check was still logged as `verified: true`. The actual
+mechanism (`src/actionLog.ts`'s `runWithVerificationTracking`/
+`markIdentityVerified`/`wasIdentityVerified`, backed by
+`AsyncLocalStorage` so it survives the `await` boundaries Hono's own
+handlers already have, without racing a concurrent request) records the
+real fact the instant a check actually passes, and reads that fact back
+— never a guess — when a rejection needs logging.
+
 ## Idempotency
 
 Duplicate requests happen — a doubled click, a retried fetch after a
