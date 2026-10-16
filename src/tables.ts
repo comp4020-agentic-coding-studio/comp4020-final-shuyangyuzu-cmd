@@ -13,6 +13,7 @@
 // time, enforced server-side" actually checkable.
 
 import type Database from "better-sqlite3";
+import { logAction } from "./actionLog.ts";
 import { requireBarSession } from "./bar.ts";
 import { GAME_TABLES } from "./barLayout.ts";
 import { RoomError } from "./rooms.ts";
@@ -377,6 +378,20 @@ export function createTableRoom(
       created.playerId,
       barPlayerId,
     );
+    // Carries both identities together in one line — the one place a
+    // presenter can correlate a tavern character to the game player it
+    // just became, since rooms.ts itself deliberately stays bar-agnostic
+    // (CLAUDE.md's bar/game separation) and every later rolled/placed
+    // line only ever carries the room's own playerId.
+    logAction({
+      action: "create_table",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "bar", id: barPlayerId, nickname },
+      room: { code: created.code },
+      table: { id: tableId },
+      detail: { roomPlayerId: created.playerId.slice(0, 8), color },
+    });
     return { ...created, pending: false };
   });
   return tx();
@@ -431,6 +446,15 @@ export function joinTableRoom(
       requested.playerId,
       barPlayerId,
     );
+    logAction({
+      action: "join_table",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "bar", id: barPlayerId, nickname },
+      room: { code: open.code },
+      table: { id: tableId },
+      detail: { roomPlayerId: requested.playerId.slice(0, 8), color, pending: true },
+    });
     return { code: open.code, playerId: requested.playerId, sessionSecret: requested.sessionSecret, pending: true };
   });
   return tx();
@@ -477,6 +501,15 @@ export function startNpcGame(
       created.playerId,
       barPlayerId,
     );
+    logAction({
+      action: "start_npc_game",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "bar", id: barPlayerId, nickname },
+      room: { code: created.code },
+      table: { id: tableId },
+      detail: { roomPlayerId: created.playerId.slice(0, 8), color },
+    });
     return { ...created, pending: false };
   });
   return tx();
@@ -501,6 +534,13 @@ export function departActiveTable(db: Database.Database, barPlayerId: string, ba
     `INSERT INTO table_departures (bar_player_id, table_id, left_at) VALUES (?, ?, ?)
      ON CONFLICT(bar_player_id) DO UPDATE SET table_id = excluded.table_id, left_at = excluded.left_at`,
   ).run(barPlayerId, row.current_table_id, new Date().toISOString());
+  logAction({
+    action: "depart_table",
+    outcome: "ok",
+    verified: true,
+    actor: { kind: "bar", id: barPlayerId },
+    table: { id: row.current_table_id },
+  });
 }
 
 /** Explicitly marks "I've just gone back to my table" — the one thing
@@ -516,7 +556,19 @@ export function departActiveTable(db: Database.Database, barPlayerId: string, ba
  * the table. A no-op if there's no pending departure at all. */
 export function resumeActiveTable(db: Database.Database, barPlayerId: string, barSessionSecret: string): void {
   requireBarSession(db, barPlayerId, barSessionSecret);
-  db.prepare(`DELETE FROM table_departures WHERE bar_player_id = ?`).run(barPlayerId);
+  const existing = db.prepare(`SELECT table_id FROM table_departures WHERE bar_player_id = ?`).get(barPlayerId) as
+    | { table_id: string }
+    | undefined;
+  const result = db.prepare(`DELETE FROM table_departures WHERE bar_player_id = ?`).run(barPlayerId);
+  if (result.changes > 0) {
+    logAction({
+      action: "resume_table",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "bar", id: barPlayerId },
+      table: existing ? { id: existing.table_id } : null,
+    });
+  }
 }
 
 /** Resolves every table_departures row older than `awayMs` — pre-start,
@@ -560,12 +612,36 @@ export function enforceExpiredDepartures(db: Database.Database, awayMs: number):
       try {
         rooms.leaveRoom(db, open.code, bp.current_game_player_id, sessionRow.session_secret);
         affected.add(open.code);
+        // rooms.leaveRoom already logs its own "player_left"/"room_closed"/
+        // "host_transferred" action lines — this is the table-layer event
+        // that explains *why* that happened (a lobby seat's own 2-minute
+        // away-from-table clock expiring), not a duplicate of it.
+        logAction({
+          action: "table_departure_expired_lobby",
+          outcome: "ok",
+          verified: true,
+          actor: { kind: "bar", id: dep.bar_player_id },
+          room: { code: open.code },
+          table: { id: dep.table_id },
+        });
       } catch {
         // Already left, room closed in the meantime, etc. — fine.
       }
     } else {
       rooms.handoffToNpc(db, open.code, bp.current_game_player_id);
       affected.add(open.code);
+      // rooms.handoffToNpc already logs "npc_takeover" for the room-side
+      // seat change — this is the table-layer event explaining why (the
+      // same 2-minute away-from-table clock, but on an already-started
+      // game, per CLAUDE.md's leave/exit states).
+      logAction({
+        action: "table_departure_expired_handoff",
+        outcome: "ok",
+        verified: true,
+        actor: { kind: "bar", id: dep.bar_player_id },
+        room: { code: open.code },
+        table: { id: dep.table_id },
+      });
     }
   }
   return [...affected];

@@ -7,6 +7,7 @@
 
 import type Database from "better-sqlite3";
 import { randomBytes, randomUUID } from "node:crypto";
+import { logAction } from "./actionLog.ts";
 import { BAR_SEATS, defaultSpawn, FURNITURE, GRID_COLS, GRID_ROWS, isValidStep, isWalkable } from "./barLayout.ts";
 import { isConnected } from "./presence.ts";
 import { effectivePosition } from "./position.ts";
@@ -181,6 +182,14 @@ export function joinBar(db: Database.Database, nickname: string, color: BarColor
   });
   const { x, y } = tx();
 
+  logAction({
+    action: "join_bar",
+    outcome: "ok",
+    verified: true,
+    actor: { kind: "bar", id, nickname: trimmed },
+    detail: { color, skin },
+  });
+
   return { playerId: id, sessionSecret, x, y };
 }
 
@@ -208,8 +217,8 @@ export function requireBarSession(db: Database.Database, playerId: string, sessi
 export function rejoinBar(db: Database.Database, playerId: string, sessionSecret: string): void {
   requireBarSession(db, playerId, sessionSecret);
   const tx = db.transaction(() => {
-    const row = db.prepare(`SELECT x, y FROM bar_players WHERE id = ?`).get(playerId) as
-      | { x: number; y: number }
+    const row = db.prepare(`SELECT x, y, nickname FROM bar_players WHERE id = ?`).get(playerId) as
+      | { x: number; y: number; nickname: string }
       | undefined;
     if (row) {
       const now = new Date();
@@ -219,6 +228,12 @@ export function rejoinBar(db: Database.Database, playerId: string, sessionSecret
       }
     }
     recordBarHeartbeat(db, playerId);
+    logAction({
+      action: "rejoin_bar",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "bar", id: playerId, nickname: row?.nickname },
+    });
   });
   tx();
 }
@@ -230,6 +245,13 @@ export function updateAppearance(db: Database.Database, playerId: string, sessio
   if (!BAR_SKINS.includes(skin as typeof BAR_SKINS[number])) throw new BarError("not a valid skin tone", "bad_skin", 400);
   db.prepare("UPDATE bar_players SET nickname = ?, color = ?, skin = ? WHERE id = ?").run(nickname.trim(), color, skin, playerId);
   recordBarHeartbeat(db, playerId);
+  logAction({
+    action: "update_appearance",
+    outcome: "ok",
+    verified: true,
+    actor: { kind: "bar", id: playerId, nickname: nickname.trim() },
+    detail: { color, skin },
+  });
 }
 
 export function barHeartbeat(db: Database.Database, playerId: string, sessionSecret: string): void {
@@ -237,8 +259,24 @@ export function barHeartbeat(db: Database.Database, playerId: string, sessionSec
   recordBarHeartbeat(db, playerId);
 }
 
+// A bar move fires on every single tile step — logging every one of them
+// would flood `flyctl logs` and actively hurt the crit's own "narrate from
+// logs" readability (a constant stream of "moved to (12,7)" lines, where
+// the useful signal is "they're here and active," not the exact path
+// taken). A move is logged only once per BAR_MOVE_LOG_WINDOW_MS per
+// player — same env-overridable-threshold pattern as every other
+// time-based constant in this codebase (src/presence.ts,
+// SPEECH_DISPLAY_MS above), and the same in-memory per-player map shape
+// `speechTimestamps` below already uses for its own rate limit.
+const BAR_MOVE_LOG_WINDOW_MS = Number(process.env.BAR_MOVE_LOG_WINDOW_MS ?? 3000);
+const lastLoggedMoveAt = new Map<string, number>();
+
 export function moveBar(db: Database.Database, playerId: string, sessionSecret: string, x: number, y: number): void {
   requireBarSession(db, playerId, sessionSecret);
+
+  const nickname = db.prepare(`SELECT nickname FROM bar_players WHERE id = ?`).get(playerId) as
+    | { nickname: string }
+    | undefined;
 
   const tx = db.transaction(() => {
     const row = db.prepare(`SELECT x, y FROM bar_players WHERE id = ?`).get(playerId) as
@@ -269,6 +307,19 @@ export function moveBar(db: Database.Database, playerId: string, sessionSecret: 
   });
   tx();
   recordBarHeartbeat(db, playerId);
+
+  const now = Date.now();
+  const last = lastLoggedMoveAt.get(playerId);
+  if (last === undefined || now - last >= BAR_MOVE_LOG_WINDOW_MS) {
+    lastLoggedMoveAt.set(playerId, now);
+    logAction({
+      action: "move",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "bar", id: playerId, nickname: nickname?.nickname },
+      detail: { x, y },
+    });
+  }
 }
 
 export interface PublicSeat {
@@ -297,11 +348,14 @@ export function sitAtSeat(db: Database.Database, playerId: string, sessionSecret
   const seat = BAR_SEATS.find((s) => s.id === seatId);
   if (!seat) throw new BarError("no such seat", "seat_not_found", 404);
 
+  let nickname: string | undefined;
+  let alreadySeated = false;
   const tx = db.transaction(() => {
-    const player = db.prepare(`SELECT x, y, current_table_id FROM bar_players WHERE id = ?`).get(playerId) as
-      | { x: number; y: number; current_table_id: string | null }
+    const player = db.prepare(`SELECT x, y, nickname, current_table_id FROM bar_players WHERE id = ?`).get(playerId) as
+      | { x: number; y: number; nickname: string; current_table_id: string | null }
       | undefined;
     if (!player) throw new BarError("no such bar identity", "player_not_found", 404);
+    nickname = player.nickname;
     if (player.x !== seat.x || player.y !== seat.y) {
       throw new BarError("walk to the seat before sitting down", "not_at_seat", 409);
     }
@@ -310,7 +364,10 @@ export function sitAtSeat(db: Database.Database, playerId: string, sessionSecret
       | { id: string }
       | undefined;
     if (mine) {
-      if (mine.id === seatId) return; // already sitting here
+      if (mine.id === seatId) {
+        alreadySeated = true;
+        return; // already sitting here
+      }
       throw new BarError("stand up from your current seat first", "already_seated_elsewhere", 409);
     }
 
@@ -339,13 +396,33 @@ export function sitAtSeat(db: Database.Database, playerId: string, sessionSecret
   });
   tx();
   recordBarHeartbeat(db, playerId);
+  if (!alreadySeated) {
+    logAction({
+      action: "sit",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "bar", id: playerId, nickname },
+      detail: { seatId },
+    });
+  }
 }
 
 /** Idempotent: standing when not seated anywhere is a harmless no-op. */
 export function standFromSeat(db: Database.Database, playerId: string, sessionSecret: string): void {
   requireBarSession(db, playerId, sessionSecret);
-  db.prepare(`UPDATE bar_seats SET occupied_by = NULL WHERE occupied_by = ?`).run(playerId);
+  const row = db.prepare(`SELECT nickname FROM bar_players WHERE id = ?`).get(playerId) as
+    | { nickname: string }
+    | undefined;
+  const result = db.prepare(`UPDATE bar_seats SET occupied_by = NULL WHERE occupied_by = ?`).run(playerId);
   recordBarHeartbeat(db, playerId);
+  if (result.changes > 0) {
+    logAction({
+      action: "stand",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "bar", id: playerId, nickname: row?.nickname },
+    });
+  }
 }
 
 // ---- Public tavern speech (product-direction-update, part 3's
@@ -394,7 +471,13 @@ export function say(db: Database.Database, playerId: string, sessionSecret: stri
     throw new BarError(`message must be at most ${SPEECH_MAX_LENGTH} characters`, "too_long", 400);
   }
 
+  let isNew = false;
+  let nickname: string | undefined;
   const tx = db.transaction(() => {
+    const player = db.prepare(`SELECT nickname FROM bar_players WHERE id = ?`).get(playerId) as
+      | { nickname: string }
+      | undefined;
+    nickname = player?.nickname;
     const existing = db.prepare(`SELECT client_msg_id FROM bar_speech WHERE player_id = ?`).get(playerId) as
       | { client_msg_id: string }
       | undefined;
@@ -406,9 +489,27 @@ export function say(db: Database.Database, playerId: string, sessionSecret: stri
       `INSERT INTO bar_speech (player_id, text, client_msg_id, expires_at) VALUES (?, ?, ?, ?)
        ON CONFLICT(player_id) DO UPDATE SET text = excluded.text, client_msg_id = excluded.client_msg_id, expires_at = excluded.expires_at`,
     ).run(playerId, trimmed, clientMsgId, expiresAt);
+    isNew = true;
   });
   tx();
   recordBarHeartbeat(db, playerId);
+  // Logs the sender, message id, and length only — never the text itself
+  // (the spec's own constraint: a speech action's log entry doesn't need
+  // the body to be useful for narration, and logging public chat content
+  // verbatim is unnecessary exposure this file doesn't need to take on).
+  // Only a genuinely new utterance is logged — a retried send with the
+  // same clientMsgId is the idempotent no-op above and must not produce a
+  // second "ok" line for what is, from the operator's perspective, one
+  // single action.
+  if (isNew) {
+    logAction({
+      action: "say",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "bar", id: playerId, nickname },
+      detail: { clientMsgId, length: trimmed.length },
+    });
+  }
 }
 
 export interface PublicBarPlayer {
