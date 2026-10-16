@@ -12,7 +12,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { formatActionLogLine } from "../src/actionLog.ts";
+import { formatActionLogLine, markIdentityVerified, runWithVerificationTracking, wasIdentityVerified } from "../src/actionLog.ts";
 import { joinBar, moveBar, say, sitAtSeat } from "../src/bar.ts";
 import { BAR_SEATS } from "../src/barLayout.ts";
 import { openDb } from "../src/db.ts";
@@ -263,4 +263,98 @@ it("host approval logs the approving host, not the approved player, as the actor
   expect(lines).toHaveLength(1);
   const parsed = JSON.parse(lines[0].replace("[action] ", ""));
   expect(parsed.actor.id).toBe(created.playerId.slice(0, 8));
+});
+
+// ---- Regression: a rolled-back OUTER transaction must never leave an
+// "ok" log line behind, even though the INNER call (createRoom) commits
+// its own nested transaction (a SAVEPOINT under better-sqlite3, since
+// db.inTransaction is already true) successfully before the outer
+// caller goes on to fail and roll the whole thing back. A follow-up
+// review caught that the original fix only moved logAction to sit
+// after the INNER tx()'s own commit — which is still "inside" the
+// outer transaction from SQLite's perspective, and gets undone by the
+// outer ROLLBACK same as the row it describes. ----
+it("a rolled-back OUTER transaction around createRoom leaves no room row AND no success log line", () => {
+  const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+  const outer = db.transaction(() => {
+    createRoom(db, "Nested", "red");
+    throw new Error("simulated failure after the inner call committed its own savepoint");
+  });
+  expect(() => outer()).toThrow("simulated failure");
+  const lines = captureLogLines(spy).filter((l) => l.includes('"action":"room_created"'));
+  spy.mockRestore();
+
+  const roomCount = (db.prepare(`SELECT COUNT(*) AS n FROM rooms`).get() as { n: number }).n;
+  expect(roomCount).toBe(0); // confirms the DB write really did roll back
+  expect(lines).toHaveLength(0); // the log line must have rolled back with it
+});
+
+// ---- Regression: `verified` must be real proof that a session check
+// actually succeeded for the claimed identity, never inferred from "the
+// error code happens not to be literally unauthorized." The old
+// implementation computed `verified: err.code !== "unauthorized"` in
+// app.onError, which is wrong on both sides: a request that never
+// reaches requireSession at all (room_not_found, thrown by loadOpenRoom
+// BEFORE requireSession runs) still got logged as verified: true, and
+// there was no way for a genuinely-passed check followed by a different
+// rejection (not_host) to be told apart from one that never ran at all —
+// both just happened to have a non-"unauthorized" code. These tests
+// exercise runWithVerificationTracking/markIdentityVerified/
+// wasIdentityVerified directly — the actual mechanism app.onError now
+// reads from — rather than only the DB-level throw, since the real bug
+// lived in the HTTP-layer inference, not in rooms.ts's own throws. ----
+it("wasIdentityVerified is false when no session check ever ran during the tracked scope", () => {
+  const verified = runWithVerificationTracking(() => {
+    // Simulates loadOpenRoom's own room_not_found throw happening before
+    // requireSession is ever reached — src/rooms.ts's roll() calls
+    // loadOpenRoom first. No markIdentityVerified() call happens on this
+    // path at all.
+    try {
+      roll(db, "NOSUCHROOM", "fake-player-id", "fake-secret");
+    } catch {
+      // the throw itself isn't the point here — what matters is nothing
+      // on this path ever called markIdentityVerified()
+    }
+    return wasIdentityVerified();
+  });
+  expect(verified).toBe(false);
+});
+
+it("wasIdentityVerified is true after a real session check passes, even if a later, different check then fails", () => {
+  const host = createRoom(db, "RealHost", "red");
+  const other = joinRoom(db, host.code, "NotTheHost", "blue");
+  const verified = runWithVerificationTracking(() => {
+    // other's own session is real and checks out — requireSession
+    // passes — but they are refused for a completely different reason
+    // (not_host). The claim really was them; it was just refused.
+    try {
+      startGame(db, host.code, other.playerId, other.sessionSecret);
+    } catch {
+      // expected: not_host
+    }
+    return wasIdentityVerified();
+  });
+  expect(verified).toBe(true);
+});
+
+it("each runWithVerificationTracking scope starts fresh — a previous request's verification never leaks into the next", () => {
+  const host = createRoom(db, "FreshHost", "red");
+  // First tracked scope: a real session check passes.
+  runWithVerificationTracking(() => {
+    markIdentityVerified();
+    expect(wasIdentityVerified()).toBe(true);
+  });
+  // A second, independent tracked scope must start unverified again —
+  // this is the actual race AsyncLocalStorage exists to prevent: without
+  // it, a shared module-level flag left over from a previous request
+  // could make an unrelated later rejection look falsely verified.
+  const secondScopeVerified = runWithVerificationTracking(() => {
+    try {
+      roll(db, "NOSUCHROOM", host.playerId, "fake-secret");
+    } catch {
+      // expected: room_not_found, no session check reached
+    }
+    return wasIdentityVerified();
+  });
+  expect(secondScopeVerified).toBe(false);
 });

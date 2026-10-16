@@ -13,7 +13,7 @@
 // time, enforced server-side" actually checkable.
 
 import type Database from "better-sqlite3";
-import { logAction } from "./actionLog.ts";
+import { logAction, transact } from "./actionLog.ts";
 import { requireBarSession } from "./bar.ts";
 import { GAME_TABLES } from "./barLayout.ts";
 import { RoomError } from "./rooms.ts";
@@ -352,7 +352,7 @@ export function createTableRoom(
     throw new TableError("not a playable table", "table_not_found", 404);
   }
 
-  const tx = db.transaction(() => {
+  return transact(db, () => {
     const existing = checkExistingSeat(db, barPlayerId, tableId);
     if (existing) return existing; // re-clicking the table you're already at, not a new game
 
@@ -366,6 +366,13 @@ export function createTableRoom(
     const nickname = getBarNickname(db, barPlayerId);
     let created: rooms.CreatedRoom;
     try {
+      // rooms.createRoom calls transact(db, ...) itself — since this
+      // outer call is also transact(db, ...), that inner call becomes a
+      // SAVEPOINT nested inside this one (db.inTransaction is already
+      // true), and its own logAction calls correctly join THIS buffer
+      // rather than flushing early — see src/actionLog.ts's header for
+      // why an earlier version of this file, using raw db.transaction()
+      // here, let the inner call's logging escape an outer rollback.
       created = rooms.createRoom(db, nickname, color);
     } catch (err) {
       if (err instanceof RoomError) throw new TableError(err.message, err.code, err.status);
@@ -383,7 +390,7 @@ export function createTableRoom(
     // just became, since rooms.ts itself deliberately stays bar-agnostic
     // (CLAUDE.md's bar/game separation) and every later rolled/placed
     // line only ever carries the room's own playerId.
-    logAction({
+    logAction(db, {
       action: "create_table",
       outcome: "ok",
       verified: true,
@@ -394,7 +401,6 @@ export function createTableRoom(
     });
     return { ...created, pending: false };
   });
-  return tx();
 }
 
 /** Submits a request to join a table that already has a host — never an
@@ -423,7 +429,7 @@ export function joinTableRoom(
   if (!furniture?.available || furniture.tableMode !== "online") {
     throw new TableError("not a playable online table", "table_not_found", 404);
   }
-  const tx = db.transaction(() => {
+  return transact(db, () => {
     const existing = checkExistingSeat(db, barPlayerId, tableId);
     if (existing) return existing; // re-clicking the table you're already at/pending for, not a new request
 
@@ -436,7 +442,7 @@ export function joinTableRoom(
     const nickname = getBarNickname(db, barPlayerId);
     let requested: rooms.RequestedJoin;
     try {
-      requested = rooms.requestJoin(db, open.code, nickname, color);
+      requested = rooms.requestJoin(db, open.code, nickname, color); // nested under this call's own transact(db, ...) — see createTableRoom's comment above
     } catch (err) {
       if (err instanceof RoomError) throw new TableError(err.message, err.code, err.status);
       throw err;
@@ -446,7 +452,7 @@ export function joinTableRoom(
       requested.playerId,
       barPlayerId,
     );
-    logAction({
+    logAction(db, {
       action: "join_table",
       outcome: "ok",
       verified: true,
@@ -457,7 +463,6 @@ export function joinTableRoom(
     });
     return { code: open.code, playerId: requested.playerId, sessionSecret: requested.sessionSecret, pending: true };
   });
-  return tx();
 }
 
 /** Starts (or resumes) this visitor's own private game at a solo Vegas-
@@ -484,14 +489,14 @@ export function startNpcGame(
     throw new TableError("not a solo NPC table", "table_not_found", 404);
   }
 
-  const tx = db.transaction(() => {
+  return transact(db, () => {
     const existing = checkExistingSeat(db, barPlayerId, tableId);
     if (existing) return existing; // already mid-game here — hand back that same game, don't start a second
 
     const nickname = getBarNickname(db, barPlayerId);
     let created: rooms.CreatedRoom;
     try {
-      created = rooms.createSoloNpcGame(db, nickname, color);
+      created = rooms.createSoloNpcGame(db, nickname, color); // nested under this call's own transact(db, ...) — see createTableRoom's comment above
     } catch (err) {
       if (err instanceof RoomError) throw new TableError(err.message, err.code, err.status);
       throw err;
@@ -501,7 +506,7 @@ export function startNpcGame(
       created.playerId,
       barPlayerId,
     );
-    logAction({
+    logAction(db, {
       action: "start_npc_game",
       outcome: "ok",
       verified: true,
@@ -512,7 +517,6 @@ export function startNpcGame(
     });
     return { ...created, pending: false };
   });
-  return tx();
 }
 
 // ---- The 2-minute away-from-table clock (CLAUDE.md's leave/exit states) ----
@@ -534,7 +538,7 @@ export function departActiveTable(db: Database.Database, barPlayerId: string, ba
     `INSERT INTO table_departures (bar_player_id, table_id, left_at) VALUES (?, ?, ?)
      ON CONFLICT(bar_player_id) DO UPDATE SET table_id = excluded.table_id, left_at = excluded.left_at`,
   ).run(barPlayerId, row.current_table_id, new Date().toISOString());
-  logAction({
+  logAction(db, {
     action: "depart_table",
     outcome: "ok",
     verified: true,
@@ -561,7 +565,7 @@ export function resumeActiveTable(db: Database.Database, barPlayerId: string, ba
     | undefined;
   const result = db.prepare(`DELETE FROM table_departures WHERE bar_player_id = ?`).run(barPlayerId);
   if (result.changes > 0) {
-    logAction({
+    logAction(db, {
       action: "resume_table",
       outcome: "ok",
       verified: true,
@@ -616,7 +620,7 @@ export function enforceExpiredDepartures(db: Database.Database, awayMs: number):
         // "host_transferred" action lines — this is the table-layer event
         // that explains *why* that happened (a lobby seat's own 2-minute
         // away-from-table clock expiring), not a duplicate of it.
-        logAction({
+        logAction(db, {
           action: "table_departure_expired_lobby",
           outcome: "ok",
           verified: true,
@@ -634,7 +638,7 @@ export function enforceExpiredDepartures(db: Database.Database, awayMs: number):
       // seat change — this is the table-layer event explaining why (the
       // same 2-minute away-from-table clock, but on an already-started
       // game, per CLAUDE.md's leave/exit states).
-      logAction({
+      logAction(db, {
         action: "table_departure_expired_handoff",
         outcome: "ok",
         verified: true,

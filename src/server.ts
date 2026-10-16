@@ -7,7 +7,7 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { streamSSE } from "hono/streaming";
-import { logAction } from "./actionLog.ts";
+import { logAction, runWithVerificationTracking, wasIdentityVerified } from "./actionLog.ts";
 import * as bar from "./bar.ts";
 import { BarError } from "./bar.ts";
 import { FURNITURE, GAME_CHAIRS, GRID_COLS, GRID_ROWS, TILE_SIZE } from "./barLayout.ts";
@@ -211,6 +211,24 @@ function scheduleNpcTurnIfNeeded(code: string): void {
 const db = openDb(dbPathFromEnv());
 const app = new Hono();
 
+// Establishes a fresh, per-request verification context BEFORE anything
+// else runs — the outermost middleware, registered first, so its
+// AsyncLocalStorage context is still active for every later middleware,
+// every route handler, and (critically) app.onError itself when a
+// handler throws. Hono's own compose() calls onError from the exact
+// dispatch frame that caught the exception, which is still nested inside
+// this middleware's own `await next()` call (nothing here ever escapes
+// to a new macrotask via setTimeout/setImmediate, so the ALS context
+// genuinely survives every await in between) — confirmed by reading
+// node_modules/hono/dist/compose.js's dispatch() implementation. Without
+// this, there is no way for app.onError to know whether THIS specific
+// request's own call to requireSession/requireBarSession actually
+// succeeded before whatever got rejected — src/actionLog.ts's own header
+// explains why guessing that from the rejection's error code was wrong.
+app.use("*", async (c, next) => {
+  await runWithVerificationTracking(() => next());
+});
+
 // No Cache-Control header at all (the previous state) lets a browser
 // serve app.js/index.html/styles.css straight from its own disk cache
 // on a normal reload, with no request ever reaching the server — so a
@@ -257,17 +275,20 @@ app.onError(async (err, c) => {
   if (err instanceof RoomError || err instanceof BarError || err instanceof TableError || err instanceof ChatError) {
     const status = err.status as 400 | 403 | 404 | 409 | 410 | 429;
     const actor = await claimedRejectionActor(c);
-    // "unauthorized" is specifically requireSession's/requireBarSession's/
-    // requireThreadAccess's own identity-check failure, thrown before any
-    // other check in every function that calls it — every other rejection
-    // code (not_host, wrong_turn, room_closed, etc.) is only ever reached
-    // after that same check already passed, so the caller genuinely was
-    // who they claimed; only "unauthorized" means the claimed identity
-    // itself didn't check out.
-    logAction({
+    // `wasIdentityVerified()` is real evidence, not an inference from the
+    // error's own code: a follow-up review caught that the original
+    // `err.code !== "unauthorized"` heuristic was wrong, because most
+    // rejections in src/rooms.ts never reach requireSession at all —
+    // loadOpenRoom/loadRoomAfterSweep throw room_not_found/room_closed
+    // first, and the old code logged verified: true for those too,
+    // falsely implying a session check had run and passed when none ever
+    // did. This reads whether requireSession/requireBarSession actually
+    // ran and succeeded at any point during THIS request (via the
+    // AsyncLocalStorage context the middleware above established).
+    logAction(db, {
       action: `${c.req.method} ${c.req.path}`,
       outcome: "rejected",
-      verified: err.code !== "unauthorized",
+      verified: wasIdentityVerified(),
       actor,
       error: { code: err.code, message: err.message },
     });

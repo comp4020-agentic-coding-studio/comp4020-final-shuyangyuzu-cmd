@@ -5,7 +5,7 @@
 
 import type Database from "better-sqlite3";
 import { randomBytes, randomInt, randomUUID } from "node:crypto";
-import { logAction, shortIdFor } from "./actionLog.ts";
+import { logAction, markIdentityVerified, shortIdFor, transact } from "./actionLog.ts";
 import { freshDeck } from "./deck.ts";
 import { applyPlacement, applyRoll, GameError, startGame as startGameLogic } from "./game.ts";
 import { chooseNpcPlacement } from "./npc.ts";
@@ -138,7 +138,7 @@ function sweepStaleLobbyPlayers(db: Database.Database, row: RoomRow): void {
   const staleRequestIds = state.pendingRequests.filter((r) => isPastGrace(r.requestedAt, now)).map((r) => r.id);
   if (staleIds.length === 0 && staleRequestIds.length === 0) return;
 
-  const tx = db.transaction(() => {
+  transact(db, () => {
     const fresh = db
       .prepare(`SELECT state_json, version, host_player_id, closed_at FROM rooms WHERE id = ?`)
       .get(row.id) as { state_json: string; version: number; host_player_id: string; closed_at: string | null };
@@ -153,7 +153,7 @@ function sweepStaleLobbyPlayers(db: Database.Database, row: RoomRow): void {
         forgetPresence(db, id);
         anyRemoved = true;
         logEvent(db, row.id, "player_timed_out", { playerId: id });
-        logAction({
+        logAction(db, {
           action: "player_timed_out",
           outcome: "ok",
           verified: true,
@@ -169,7 +169,7 @@ function sweepStaleLobbyPlayers(db: Database.Database, row: RoomRow): void {
         db.prepare(`DELETE FROM sessions WHERE player_id = ?`).run(id);
         anyRemoved = true;
         logEvent(db, row.id, "join_request_expired", { playerId: id });
-        logAction({
+        logAction(db, {
           action: "join_request_expired",
           outcome: "ok",
           verified: true,
@@ -187,7 +187,7 @@ function sweepStaleLobbyPlayers(db: Database.Database, row: RoomRow): void {
       if (next === null) {
         closedAt = now.toISOString();
         logEvent(db, row.id, "room_closed", { reason: "last player timed out" });
-        logAction({
+        logAction(db, {
           action: "room_closed",
           outcome: "ok",
           verified: true,
@@ -198,7 +198,7 @@ function sweepStaleLobbyPlayers(db: Database.Database, row: RoomRow): void {
       } else {
         hostId = next;
         logEvent(db, row.id, "host_transferred", { newHostId: hostId, reason: "previous host timed out" });
-        logAction({
+        logAction(db, {
           action: "host_transferred",
           outcome: "ok",
           verified: true,
@@ -213,7 +213,6 @@ function sweepStaleLobbyPlayers(db: Database.Database, row: RoomRow): void {
       `UPDATE rooms SET state_json = ?, host_player_id = ?, closed_at = ?, version = version + 1 WHERE id = ? AND version = ?`,
     ).run(JSON.stringify(freshState), hostId, closedAt, row.id, fresh.version);
   });
-  tx();
 }
 
 function requireSession(db: Database.Database, roomId: string, playerId: string, sessionSecret: string): void {
@@ -223,6 +222,13 @@ function requireSession(db: Database.Database, roomId: string, playerId: string,
   if (!row || row.session_secret !== sessionSecret) {
     throw new RoomError("not authorized for this player in this room", "unauthorized", 403);
   }
+  // Real proof, recorded the instant the check actually passes — never
+  // inferred afterward from whatever error code a later rejection
+  // happens to carry (src/actionLog.ts's own header explains why that
+  // inference was wrong: most callers here reach loadOpenRoom/
+  // loadRoomAfterSweep, which can throw room_not_found/room_closed,
+  // BEFORE this function is even called).
+  markIdentityVerified();
 }
 
 function requireSeated(state: RoomState, playerId: string): void {
@@ -265,7 +271,7 @@ export function createRoom(db: Database.Database, nickname: string, color: Color
     controller: "human",
   };
 
-  const tx = db.transaction(() => {
+  transact(db, () => {
     db.prepare(
       `INSERT INTO rooms (id, code, host_player_id, created_at, state_json, version)
        VALUES (?, ?, ?, ?, ?, 1)`,
@@ -277,7 +283,7 @@ export function createRoom(db: Database.Database, nickname: string, color: Color
     );
     recordHeartbeat(db, roomId, playerId, new Date(now));
     logEvent(db, roomId, "room_created", { playerId, nickname: trimmed, color });
-    logAction({
+    logAction(db, {
       action: "room_created",
       outcome: "ok",
       verified: true,
@@ -286,7 +292,6 @@ export function createRoom(db: Database.Database, nickname: string, color: Color
       detail: { color },
     });
   });
-  tx();
 
   return { code, playerId, sessionSecret };
 }
@@ -344,7 +349,7 @@ export function createSoloNpcGame(db: Database.Database, nickname: string, color
     };
   });
 
-  const tx = db.transaction(() => {
+  transact(db, () => {
     db.prepare(
       `INSERT INTO rooms (id, code, host_player_id, created_at, state_json, version) VALUES (?, ?, ?, ?, ?, 1)`,
     ).run(roomId, code, humanId, now, JSON.stringify(state));
@@ -355,7 +360,7 @@ export function createSoloNpcGame(db: Database.Database, nickname: string, color
     );
     recordHeartbeat(db, roomId, humanId, new Date(now));
     logEvent(db, roomId, "solo_npc_room_created", { playerId: humanId, nickname: trimmed, color });
-    logAction({
+    logAction(db, {
       action: "solo_npc_room_created",
       outcome: "ok",
       verified: true,
@@ -377,7 +382,7 @@ export function createSoloNpcGame(db: Database.Database, nickname: string, color
       roomId,
     );
     logEvent(db, roomId, "game_started", { turnOrder: started.turnOrder });
-    logAction({
+    logAction(db, {
       action: "game_started",
       outcome: "ok",
       verified: true,
@@ -386,7 +391,6 @@ export function createSoloNpcGame(db: Database.Database, nickname: string, color
       detail: { playerCount: started.turnOrder.length },
     });
   });
-  tx();
 
   return { code, playerId: humanId, sessionSecret };
 }
@@ -405,7 +409,7 @@ export function joinRoom(db: Database.Database, code: string, nickname: string, 
   const playerId = randomUUID();
   const sessionSecret = newSessionSecret();
 
-  const tx = db.transaction(() => {
+  transact(db, () => {
     const fresh = db
       .prepare(`SELECT state_json, version, closed_at FROM rooms WHERE id = ?`)
       .get(row.id) as { state_json: string; version: number; closed_at: string | null };
@@ -448,7 +452,7 @@ export function joinRoom(db: Database.Database, code: string, nickname: string, 
     );
     recordHeartbeat(db, row.id, playerId, new Date(now));
     logEvent(db, row.id, "player_joined", { playerId, nickname: trimmed, color });
-    logAction({
+    logAction(db, {
       action: "player_joined",
       outcome: "ok",
       verified: true,
@@ -457,7 +461,6 @@ export function joinRoom(db: Database.Database, code: string, nickname: string, 
       detail: { color },
     });
   });
-  tx();
 
   return { playerId, sessionSecret };
 }
@@ -485,7 +488,7 @@ export function requestJoin(db: Database.Database, code: string, nickname: strin
   const playerId = randomUUID();
   const sessionSecret = newSessionSecret();
 
-  const tx = db.transaction(() => {
+  transact(db, () => {
     const fresh = db
       .prepare(`SELECT state_json, version, closed_at FROM rooms WHERE id = ?`)
       .get(row.id) as { state_json: string; version: number; closed_at: string | null };
@@ -516,7 +519,7 @@ export function requestJoin(db: Database.Database, code: string, nickname: strin
       sessionSecret,
     );
     logEvent(db, row.id, "join_requested", { playerId, nickname: trimmed, color });
-    logAction({
+    logAction(db, {
       action: "join_requested",
       outcome: "ok",
       verified: true,
@@ -525,7 +528,6 @@ export function requestJoin(db: Database.Database, code: string, nickname: strin
       detail: { color },
     });
   });
-  tx();
 
   return { playerId, sessionSecret };
 }
@@ -550,7 +552,7 @@ export function approveJoin(
     throw new RoomError("only the host can approve a join request", "not_host", 403);
   }
 
-  const tx = db.transaction(() => {
+  transact(db, () => {
     const fresh = db
       .prepare(`SELECT state_json, version FROM rooms WHERE id = ?`)
       .get(row.id) as { state_json: string; version: number };
@@ -593,7 +595,7 @@ export function approveJoin(
     // same reasoning joinRoom's own recordHeartbeat call already has.
     recordHeartbeat(db, row.id, req.id, new Date(now));
     logEvent(db, row.id, "join_approved", { playerId: req.id, nickname: req.nickname, color: req.color });
-    logAction({
+    logAction(db, {
       action: "join_approved",
       outcome: "ok",
       verified: true,
@@ -602,7 +604,6 @@ export function approveJoin(
       detail: { approvedPlayerId: shortIdFor(req.id), color: req.color },
     });
   });
-  tx();
 }
 
 /** Host-only: declines a pending request outright. The request's own
@@ -621,7 +622,7 @@ export function rejectJoin(
     throw new RoomError("only the host can decline a join request", "not_host", 403);
   }
 
-  const tx = db.transaction(() => {
+  transact(db, () => {
     const fresh = db
       .prepare(`SELECT state_json, version FROM rooms WHERE id = ?`)
       .get(row.id) as { state_json: string; version: number };
@@ -637,7 +638,7 @@ export function rejectJoin(
     );
     db.prepare(`DELETE FROM sessions WHERE player_id = ?`).run(req.id);
     logEvent(db, row.id, "join_rejected", { playerId: req.id });
-    logAction({
+    logAction(db, {
       action: "join_rejected",
       outcome: "ok",
       verified: true,
@@ -646,7 +647,6 @@ export function rejectJoin(
       detail: { rejectedPlayerId: shortIdFor(req.id) },
     });
   });
-  tx();
 }
 
 /** The requester's own cancel — proven by their own session, same as any
@@ -655,7 +655,7 @@ export function cancelJoinRequest(db: Database.Database, code: string, playerId:
   const row = loadOpenRoom(db, code);
   requireSession(db, row.id, playerId, sessionSecret);
 
-  const tx = db.transaction(() => {
+  transact(db, () => {
     const fresh = db
       .prepare(`SELECT state_json, version FROM rooms WHERE id = ?`)
       .get(row.id) as { state_json: string; version: number };
@@ -671,7 +671,7 @@ export function cancelJoinRequest(db: Database.Database, code: string, playerId:
     );
     db.prepare(`DELETE FROM sessions WHERE player_id = ?`).run(playerId);
     logEvent(db, row.id, "join_request_cancelled", { playerId });
-    logAction({
+    logAction(db, {
       action: "join_request_cancelled",
       outcome: "ok",
       verified: true,
@@ -679,7 +679,6 @@ export function cancelJoinRequest(db: Database.Database, code: string, playerId:
       room: { code: row.code },
     });
   });
-  tx();
 }
 
 /** Confirms a returning player's identity. Deliberately doesn't throw on
@@ -716,7 +715,7 @@ export function setReady(
   const row = loadOpenRoom(db, code);
   requireSession(db, row.id, playerId, sessionSecret);
 
-  const tx = db.transaction(() => {
+  transact(db, () => {
     const fresh = db
       .prepare(`SELECT state_json, version FROM rooms WHERE id = ?`)
       .get(row.id) as { state_json: string; version: number };
@@ -733,7 +732,7 @@ export function setReady(
       fresh.version,
     );
     logEvent(db, row.id, "ready_changed", { playerId, ready });
-    logAction({
+    logAction(db, {
       action: "ready_changed",
       outcome: "ok",
       verified: true,
@@ -742,7 +741,6 @@ export function setReady(
       detail: { ready },
     });
   });
-  tx();
 }
 
 /** Voluntary leave, lobby-only (a started game keeps its existing
@@ -753,7 +751,7 @@ export function leaveRoom(db: Database.Database, code: string, playerId: string,
   const row = loadOpenRoom(db, code);
   requireSession(db, row.id, playerId, sessionSecret);
 
-  const tx = db.transaction(() => {
+  transact(db, () => {
     const fresh = db
       .prepare(`SELECT state_json, version, host_player_id FROM rooms WHERE id = ?`)
       .get(row.id) as { state_json: string; version: number; host_player_id: string };
@@ -766,7 +764,7 @@ export function leaveRoom(db: Database.Database, code: string, playerId: string,
     delete state.players[playerId];
     forgetPresence(db, playerId);
     logEvent(db, row.id, "player_left", { playerId });
-    logAction({
+    logAction(db, {
       action: "player_left",
       outcome: "ok",
       verified: true,
@@ -781,7 +779,7 @@ export function leaveRoom(db: Database.Database, code: string, playerId: string,
       if (next === null) {
         closedAt = new Date().toISOString();
         logEvent(db, row.id, "room_closed", { reason: "last player left" });
-        logAction({
+        logAction(db, {
           action: "room_closed",
           outcome: "ok",
           verified: true,
@@ -792,7 +790,7 @@ export function leaveRoom(db: Database.Database, code: string, playerId: string,
       } else {
         hostId = next;
         logEvent(db, row.id, "host_transferred", { newHostId: hostId, reason: "host left" });
-        logAction({
+        logAction(db, {
           action: "host_transferred",
           outcome: "ok",
           verified: true,
@@ -807,7 +805,6 @@ export function leaveRoom(db: Database.Database, code: string, playerId: string,
       `UPDATE rooms SET state_json = ?, host_player_id = ?, closed_at = ?, version = version + 1 WHERE id = ? AND version = ?`,
     ).run(JSON.stringify(state), hostId, closedAt, row.id, fresh.version);
   });
-  tx();
 }
 
 /** Host-only, lobby-only, and requires an explicit confirm — this
@@ -830,7 +827,7 @@ export function disbandRoom(
     throw new RoomError("disbanding a room needs explicit confirmation", "confirm_required", 400);
   }
 
-  const tx = db.transaction(() => {
+  transact(db, () => {
     const fresh = db.prepare(`SELECT state_json, version FROM rooms WHERE id = ?`).get(row.id) as {
       state_json: string;
       version: number;
@@ -845,7 +842,7 @@ export function disbandRoom(
       fresh.version,
     );
     logEvent(db, row.id, "room_disbanded", { byPlayerId: playerId });
-    logAction({
+    logAction(db, {
       action: "room_disbanded",
       outcome: "ok",
       verified: true,
@@ -853,7 +850,6 @@ export function disbandRoom(
       room: { code: row.code },
     });
   });
-  tx();
 }
 
 /** Hands a seat to NPC control without touching its dice, winnings, or
@@ -870,7 +866,7 @@ export function handoffToNpc(db: Database.Database, code: string, playerId: stri
   const row = getRoomRow(db, code);
   if (row.closed_at) return;
 
-  const tx = db.transaction(() => {
+  transact(db, () => {
     const fresh = db.prepare(`SELECT state_json, version FROM rooms WHERE id = ?`).get(row.id) as {
       state_json: string;
       version: number;
@@ -885,7 +881,7 @@ export function handoffToNpc(db: Database.Database, code: string, playerId: stri
       fresh.version,
     );
     logEvent(db, row.id, "npc_takeover", { playerId });
-    logAction({
+    logAction(db, {
       action: "npc_takeover",
       outcome: "ok",
       verified: true,
@@ -893,7 +889,6 @@ export function handoffToNpc(db: Database.Database, code: string, playerId: stri
       room: { code: row.code },
     });
   });
-  tx();
 }
 
 /** Internal, server-scheduled turn-taking for an NPC-controlled seat —
@@ -919,7 +914,7 @@ export function npcRoll(db: Database.Database, code: string): boolean {
   if (row.closed_at) return false;
 
   let acted = false;
-  const tx = db.transaction(() => {
+  transact(db, () => {
     const fresh = db.prepare(`SELECT state_json, version, closed_at FROM rooms WHERE id = ?`).get(row.id) as {
       state_json: string;
       version: number;
@@ -943,7 +938,7 @@ export function npcRoll(db: Database.Database, code: string): boolean {
       fresh.version,
     );
     logEvent(db, row.id, "rolled", { playerId: player.id, values: next.lastRoll?.values, controller: "npc" });
-    logAction({
+    logAction(db, {
       action: "rolled",
       outcome: "ok",
       verified: true,
@@ -953,7 +948,6 @@ export function npcRoll(db: Database.Database, code: string): boolean {
     });
     acted = true;
   });
-  tx();
   return acted;
 }
 
@@ -966,7 +960,7 @@ export function npcPlace(db: Database.Database, code: string): boolean {
   if (row.closed_at) return false;
 
   let acted = false;
-  const tx = db.transaction(() => {
+  transact(db, () => {
     const fresh = db.prepare(`SELECT state_json, version, closed_at FROM rooms WHERE id = ?`).get(row.id) as {
       state_json: string;
       version: number;
@@ -992,7 +986,7 @@ export function npcPlace(db: Database.Database, code: string): boolean {
       fresh.version,
     );
     logEvent(db, row.id, "placed", { playerId: player.id, value, controller: "npc" });
-    logAction({
+    logAction(db, {
       action: "placed",
       outcome: "ok",
       verified: true,
@@ -1007,7 +1001,7 @@ export function npcPlace(db: Database.Database, code: string): boolean {
       logEvent(db, row.id, "round_settled", {
         wonBills: Object.fromEntries(Object.values(next.players).map((p) => [p.id, p.wonBills])),
       });
-      logAction({
+      logAction(db, {
         action: "round_settled",
         outcome: "ok",
         verified: true,
@@ -1017,7 +1011,6 @@ export function npcPlace(db: Database.Database, code: string): boolean {
     }
     acted = true;
   });
-  tx();
   return acted;
 }
 
@@ -1028,7 +1021,7 @@ export function startGame(db: Database.Database, code: string, playerId: string,
     throw new RoomError("only the host can start the game", "not_host", 403);
   }
 
-  const tx = db.transaction(() => {
+  transact(db, () => {
     const fresh = db
       .prepare(`SELECT state_json, version FROM rooms WHERE id = ?`)
       .get(row.id) as { state_json: string; version: number };
@@ -1056,7 +1049,7 @@ export function startGame(db: Database.Database, code: string, playerId: string,
       fresh.version,
     );
     logEvent(db, row.id, "game_started", { turnOrder: next.turnOrder });
-    logAction({
+    logAction(db, {
       action: "game_started",
       outcome: "ok",
       verified: true,
@@ -1065,7 +1058,6 @@ export function startGame(db: Database.Database, code: string, playerId: string,
       detail: { playerCount: next.turnOrder.length },
     });
   });
-  tx();
 }
 
 /** A player whose seat has been handed to NPC control (CLAUDE.md's
@@ -1091,7 +1083,7 @@ export function roll(db: Database.Database, code: string, playerId: string, sess
   const row = loadOpenRoom(db, code);
   requireSession(db, row.id, playerId, sessionSecret);
 
-  const tx = db.transaction(() => {
+  transact(db, () => {
     const fresh = db
       .prepare(`SELECT state_json, version FROM rooms WHERE id = ?`)
       .get(row.id) as { state_json: string; version: number };
@@ -1112,7 +1104,7 @@ export function roll(db: Database.Database, code: string, playerId: string, sess
       fresh.version,
     );
     logEvent(db, row.id, "rolled", { playerId, values: next.lastRoll?.values });
-    logAction({
+    logAction(db, {
       action: "rolled",
       outcome: "ok",
       verified: true,
@@ -1121,7 +1113,6 @@ export function roll(db: Database.Database, code: string, playerId: string, sess
       detail: { values: (next.lastRoll?.values ?? []).join(",") },
     });
   });
-  tx();
 }
 
 export function place(
@@ -1134,7 +1125,7 @@ export function place(
   const row = loadOpenRoom(db, code);
   requireSession(db, row.id, playerId, sessionSecret);
 
-  const tx = db.transaction(() => {
+  transact(db, () => {
     const fresh = db
       .prepare(`SELECT state_json, version FROM rooms WHERE id = ?`)
       .get(row.id) as { state_json: string; version: number };
@@ -1155,7 +1146,7 @@ export function place(
       fresh.version,
     );
     logEvent(db, row.id, "placed", { playerId, value });
-    logAction({
+    logAction(db, {
       action: "placed",
       outcome: "ok",
       verified: true,
@@ -1167,7 +1158,7 @@ export function place(
       logEvent(db, row.id, "round_settled", {
         wonBills: Object.fromEntries(Object.values(next.players).map((p) => [p.id, p.wonBills])),
       });
-      logAction({
+      logAction(db, {
         action: "round_settled",
         outcome: "ok",
         verified: true,
@@ -1176,7 +1167,6 @@ export function place(
       });
     }
   });
-  tx();
 }
 
 export function getPublicState(db: Database.Database, code: string): PublicState {

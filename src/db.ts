@@ -6,6 +6,7 @@
 import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { installTransactionLogging } from "./actionLog.ts";
 import { findFreeTile } from "./bar.ts";
 import { BAR_SEATS, GAME_TABLES, defaultSpawn, isWalkable } from "./barLayout.ts";
 import type { RoomState } from "./types.ts";
@@ -15,6 +16,13 @@ export function openDb(path: string): Database.Database {
   const db = new Database(path);
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
+  // Patches db.transaction itself so every transaction on this
+  // connection — however it's invoked — gets rollback-safe action
+  // logging automatically (src/actionLog.ts's own header explains why
+  // this can't just rely on every call site remembering to opt in).
+  // Installed before migrate/seed below run any transactions of their
+  // own, and before this db is handed back to any caller.
+  installTransactionLogging(db);
   migrate(db);
   seedBarFurniture(db);
   seedBarSeats(db);
