@@ -3365,17 +3365,19 @@ substitute for actually doing it. The student should run the real
 two-profile version once before the crit itself, which this session
 could not perform.
 
-## Crit 10 correction (2026-10-17) — two real bugs the student's own agent found in the logging fix above
+## Crit 10 correction (2026-10-17) — real bugs the student's own agent found in the logging fix above, across two review passes
 
 The student had their own agent review the logging implementation above
-and report back two concrete, reproducible defects — not stylistic
-concerns, both genuine correctness bugs in what the two entries above
-claimed was already correct. Both are documented here with what the bug
-actually was, how it was reproduced (a failing test *before* any fix, not
-just asserted), and what the real fix turned out to need — because the
-first fix attempt for bug 1 was itself incomplete, which is its own
-useful record of why "move the log call later" isn't a sufficient fix
-for this class of problem.
+and report back concrete, reproducible defects — not stylistic concerns,
+genuine correctness bugs in what earlier entries claimed was already
+correct. Each is documented here with what the bug actually was, how it
+was reproduced (a failing test *before* any fix, not just asserted), and
+what the real fix turned out to need. Bug 1 took **two** attempts to
+actually fix — the first attempt itself turned out to be incomplete, and
+is kept in this record rather than silently replaced, because it's a
+genuinely useful example of why "buffer the log call and flush on
+commit" is not, by itself, a complete description of the fix needed
+here.
 
 ### Bug 1: a rolled-back outer transaction could still log success
 
@@ -3425,26 +3427,88 @@ remembering to use the new helper instead of calling `db.transaction()`
 directly — exactly the discipline-dependent shape that let the original
 bug exist in the first place.
 
-**The actual fix:** `src/actionLog.ts`'s `installTransactionLogging`
+**The second fix attempt:** `src/actionLog.ts`'s `installTransactionLogging`
 patches `Database.prototype.transaction` itself — not a new wrapper
 function callers have to remember to use, but the method every call site
 (old or new, migrated or not) already calls. `src/db.ts`'s `openDb`
 installs this patch once, immediately after opening the connection,
 before any other code can call `db.transaction`. Every transaction on
 that connection — invoked via the `transact()` convenience export or a
-raw `db.transaction(fn)()` — now buffers what it logs and flushes that
-buffer to stdout only when the actually-outermost transaction commits,
-discarding it unconditionally on a throw at any nesting depth. Because
-this is keyed off the identical `db.inTransaction` flag better-sqlite3
-itself uses to decide SAVEPOINT-vs-BEGIN, the two can never disagree
-about what counts as "outermost." Re-run against this fix, the original
-regression test (raw outer `db.transaction()`, `transact()`-using inner
-`createRoom` call) passes, and a live local server run reproduced the
-same nested shape for real HTTP traffic (`createTableRoom` → `createRoom`
-→ `startGameLogic` for the solo-NPC path): the full chain of
-`solo_npc_room_created`/`game_started`/`start_npc_game` log lines all
-appeared together, correctly, confirming the fix holds outside the test
-suite too.
+raw `db.transaction(fn)()` — now gets buffering handled automatically.
+Because this is keyed off the identical `db.inTransaction` flag
+better-sqlite3 itself uses to decide SAVEPOINT-vs-BEGIN, the two can
+never disagree about what counts as "outermost." Re-run against this
+fix, the original regression test (raw outer `db.transaction()`,
+`transact()`-using inner `createRoom` call) passed, and a live local
+server run reproduced the same nested shape for real HTTP traffic
+(`createTableRoom` → `createRoom` → `startGameLogic` for the solo-NPC
+path): the full chain of `solo_npc_room_created`/`game_started`/
+`start_npc_game` log lines all appeared together, correctly. **This
+attempt used a single flat buffer per database connection — still
+pushed one more bug, documented next, that this specific test shape
+didn't exercise.**
+
+### Bug 1b: a single flat buffer couldn't tell an inner rollback from an outer commit
+
+**The claim that turned out to be false:** the previous paragraph's "now
+buffers what it logs and flushes that buffer to stdout only when the
+actually-outermost transaction commits" described a **single buffer per
+db connection**, shared across every nesting level. This is correct for
+"outer commits, outer rolls back" and for "outer rolls back after an
+inner transaction already committed" (the two shapes the first
+regression test actually exercises) — but wrong for a third shape a
+second review pass specifically constructed: an **inner** transaction's
+own SAVEPOINT rolling back, **caught by the outer transaction**, which
+then recovers and goes on to commit something else entirely for real.
+With one flat buffer, the inner call's own `"outcome":"ok"` entry and the
+outer call's own later, genuinely-successful entry have nothing
+distinguishing them from each other — both just sit in the same array,
+and the outer transaction's real commit flushes both, even though the
+inner transaction's own database row never existed once its own
+SAVEPOINT rolled back.
+
+**Reproduction, confirmed failing before any fix:** a new
+`spec/actionLog.test.ts` case constructs exactly this shape directly: an
+outer `db.transaction()` that runs an inner `db.transaction()` calling
+`rooms.createRoom("DoomedNested", ...)` and then throws, catches that
+throw immediately, then calls `rooms.createRoom("SurvivingNested", ...)`
+a second time and lets the outer transaction commit for real. Run
+against the flat-buffer fix, this failed exactly as predicted: only one
+room (`SurvivingNested`) actually existed in the database afterward, but
+**two** `"room_created"` lines were captured — one for the surviving
+room and one for the doomed, rolled-back `DoomedNested` attempt that was
+caught and recovered from.
+
+**The actual fix:** a **stack** of buffers per database connection, one
+per currently-open transaction level, rather than one flat buffer for
+the whole connection. Entering a transaction (`installTransactionLogging`'s
+patched `db.transaction`, at any nesting depth) pushes a fresh, empty
+buffer onto that db's own stack — this is "recording the buffer's
+starting point for this specific level," the precise fix this
+correction's own review asked for. That level's own rollback (its ROLLBACK
+TO, or the real ROLLBACK if outermost) pops and discards **only that
+level's own buffer** — every enclosing level's own, already-buffered
+entries are left completely untouched on the stack beneath it, which is
+exactly what lets the outer transaction's later, independent success
+still log correctly even though an inner attempt failed and was
+discarded first. That level's own commit (RELEASE, or the real COMMIT if
+outermost) pops its buffer and, if there is still an enclosing level,
+merges those entries into whichever buffer is now on top of the stack —
+rising with that enclosing transaction's own fate from here on, exactly
+mirroring how the level's own SAVEPOINT/RELEASE just became part of the
+enclosing transaction's still-open unit of work in SQLite itself. Only
+when the outermost level's own commit empties the stack for that db does
+anything actually print to stdout.
+
+Re-run against this stack-based fix, all three shapes now hold correctly
+in the same test file: the original outer-rollback case (zero rooms,
+zero log lines), the new inner-rollback-caught-by-outer case (one room,
+one log line naming the surviving room, never the doomed one), and every
+pre-existing nested-success case (e.g. `createTableRoom` → `createRoom`)
+continues to merge and print exactly as before. 218/218 tests pass;
+`pnpm check:evidence` green. A live production spot-check after deploy
+confirmed the fix holds for real server traffic, not just the test
+suite.
 
 ### Bug 2: `verified` was inferred from the error code, not from real proof
 
@@ -3488,10 +3552,20 @@ real evidence. `spec/actionLog.test.ts` also confirms a tracked scope
 never leaks verification state into the next one (two sequential
 `runWithVerificationTracking` calls, the second starting fresh).
 
-**Verification performed for this correction:** `pnpm check` (217/217
-tests — 213 prior + 4 new regression tests directly exercising both
-bugs) and `pnpm check:evidence`, both green, against an isolated local
-`DATA_DIR`, same method as every prior entry. CI and deploy confirmation
-for the commits containing this fix are recorded immediately below.
+**Verification performed for the first review round (bugs 1 and 2):**
+`pnpm check` (217/217 tests — 213 prior + 4 new regression tests directly
+exercising both bugs) and `pnpm check:evidence`, both green, against an
+isolated local `DATA_DIR`, same method as every prior entry.
+
+**Verification performed for the second review round (bug 1b):**
+`pnpm check` (218/218 tests — 217 prior + 1 new regression test directly
+exercising the flat-buffer defect) and `pnpm check:evidence`, both green,
+same method. A live production spot-check after that fix's own deploy
+confirmed real server traffic (bar join, a rejected nonexistent-room
+request) logged correctly post-fix.
+
+CI and deploy confirmation for every commit containing these fixes is
+recorded immediately below, for each review round separately.
 No game rule changed; `src/orders.ts` untouched; `crit-8`/`crit-9` tags
-unmoved; no `crit-10` tag created.
+unmoved; no `crit-10` tag created; no visual/UI change made (the second
+review round's own explicit instruction).

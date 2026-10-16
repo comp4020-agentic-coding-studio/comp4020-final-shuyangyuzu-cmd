@@ -111,26 +111,35 @@ every existing `logEvent` call (and at new call sites bar/table actions
 never had before), plus every rejection, from the one choke point
 `app.onError` already sees every typed error through.
 
-Two real correctness bugs were found in this logging mechanism by a
-follow-up review after it first shipped, both fixed and both recorded in
-`PLAN.md`'s own 2026-10-17 correction entry — this paragraph states the
-corrected design, not the first attempt. First: a success line must only
-ever reach stdout if the write it describes actually committed, including
-when one function's own transaction is called from inside another
-function's transaction (`src/tables.ts`'s `createTableRoom` calling
-`rooms.createRoom`, which already nests this way in production). Simply
-placing the log call inside a `db.transaction()` callback is not enough —
-better-sqlite3 commits a nested call's own SAVEPOINT immediately on
-success, before the outer transaction has decided anything, so a log call
-made there can print even though the outer transaction later rolls
-everything back. `src/actionLog.ts`'s `installTransactionLogging` patches
-`Database.prototype.transaction` itself (installed once, in `src/db.ts`'s
-`openDb`) so every transaction on that connection — however it's called —
-buffers what it logs and only flushes to stdout when the truly outermost
-transaction commits, discarding unconditionally on any throw at any
-nesting depth. Second: a rejection's `verified` field is real evidence
-that `requireSession`/`requireBarSession` actually ran and passed for
-that request, recorded the instant the check succeeds
+Real correctness bugs were found in this logging mechanism across two
+follow-up review rounds after it first shipped, each fixed and each
+recorded in `PLAN.md`'s own 2026-10-17 correction entry — this paragraph
+states the corrected design, not any earlier attempt. First: a success
+line must only ever reach stdout if the write it describes actually
+committed, including when one function's own transaction is called from
+inside another function's transaction (`src/tables.ts`'s `createTableRoom`
+calling `rooms.createRoom`, which already nests this way in production).
+Simply placing the log call inside a `db.transaction()` callback is not
+enough — better-sqlite3 commits a nested call's own SAVEPOINT immediately
+on success, before the outer transaction has decided anything, so a log
+call made there can print even though the outer transaction later rolls
+everything back. The fix that actually holds is a **stack** of log
+buffers per database connection, one per currently-open transaction
+level, installed once by patching `Database.prototype.transaction` itself
+(`src/actionLog.ts`'s `installTransactionLogging`, called from `src/db.ts`'s
+`openDb`) so every transaction on that connection gets this regardless of
+how it's invoked: a level's own rollback discards *only that level's own*
+buffered entries, leaving every enclosing level's own entries untouched;
+a level's own commit merges its buffer into the next level out, rising
+with that enclosing transaction's own eventual fate; only the truly
+outermost level's own commit actually prints anything. A single flat
+buffer (the first fix attempt) is not equivalent to this — it cannot tell
+an inner transaction's own caught-and-recovered-from rollback apart from
+the outer transaction's own later, genuinely successful commit, and
+logged both as if they'd both committed when only one row actually
+existed afterward. Second: a rejection's `verified` field is real
+evidence that `requireSession`/`requireBarSession` actually ran and
+passed for that request, recorded the instant the check succeeds
 (`markIdentityVerified`, read back by `app.onError` as
 `wasIdentityVerified`) — never inferred afterward from the rejection's
 own error code, which the first version of this logging did and which
@@ -182,25 +191,32 @@ deliberate restraint.
 Every file:line citation above was checked against the actual code while
 writing this document, not recalled from memory or from an earlier
 review. The access-control citations themselves held up; the logging
-mechanism's own correctness did not, on first pass — a follow-up review
-found two real bugs in it (a rollback that still logged success across
-nested transactions, and a `verified` field inferred from an error code
-rather than real evidence), both reproduced with failing tests before
-being fixed, both recorded in `PLAN.md`'s own 2026-10-17 correction
-entry. This document's description above is the corrected design, not
-the first attempt — stating that plainly here rather than quietly
-rewriting history is itself part of what this document owes a reader.
-The structured logging this document describes is new this week; its
-commits, and the live two-Chrome-profile rehearsal that exercises it,
-are recorded in `PLAN.md`'s Crit 10 entry. Tests cover: distinct log
-lines for same-nickname identities, a rejection never producing a
-success line for the same call, an idempotent retry logging success once
-rather than per-attempt, no log line ever containing a session secret,
-a rolled-back outer transaction (nested or not) never leaving a success
-line behind, and `verified` reflecting real session-check evidence
-rather than an inference from the rejection's own error code
-(`spec/actionLog.test.ts`). What this document cannot establish on its
-own: that a person watching only `flyctl logs` at a real crit can, in
-practice, follow along without confusion — that is
-what the live rehearsal is for, and its outcome is recorded separately
-rather than assumed from the tests passing.
+mechanism's own correctness did not, across two separate follow-up
+review rounds — the first found a rollback that still logged success
+across nested transactions and a `verified` field inferred from an
+error code rather than real evidence; the second found that the first
+round's own rollback fix (a single flat log buffer per database
+connection) could not distinguish an inner transaction's own
+caught-and-recovered-from rollback from the outer transaction's own
+later, genuinely successful commit. All three are reproduced with
+failing tests before being fixed and recorded in `PLAN.md`'s own
+2026-10-17 correction entry, in the order they were actually found. This
+document's description above is the design as it stands after both
+rounds, not any earlier attempt — stating that plainly here rather than
+quietly rewriting history is itself part of what this document owes a
+reader. The structured logging this document describes is new this
+week; its commits, and the live two-Chrome-profile rehearsal that
+exercises it, are recorded in `PLAN.md`'s Crit 10 entry. Tests cover:
+distinct log lines for same-nickname identities, a rejection never
+producing a success line for the same call, an idempotent retry logging
+success once rather than per-attempt, no log line ever containing a
+session secret, a rolled-back outer transaction (nested or not) never
+leaving a success line behind, an inner transaction's own rollback
+caught and recovered from by an outer transaction logging only the
+outer's own real commit — never the doomed inner attempt — and
+`verified` reflecting real session-check evidence rather than an
+inference from the rejection's own error code (`spec/actionLog.test.ts`).
+What this document cannot establish on its own: that a person watching
+only `flyctl logs` at a real crit can, in practice, follow along without
+confusion — that is what the live rehearsal is for, and its outcome is
+recorded separately rather than assumed from the tests passing.

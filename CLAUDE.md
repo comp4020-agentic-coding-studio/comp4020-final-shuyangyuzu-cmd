@@ -57,12 +57,32 @@ can fully audit for by reading each call site in isolation. The actual
 fix patches `db.transaction` itself, once, in `src/db.ts`'s `openDb`
 (`installTransactionLogging`): every transaction on that connection,
 however it's invoked — through the `transact()` convenience wrapper or a
-raw `db.transaction(fn)()` — buffers whatever it logs and only flushes
-that buffer to stdout when the **outermost** transaction actually
-commits, discarding it unconditionally on a throw at any nesting depth.
-This is what makes the guarantee hold regardless of which function
-happens to call which other function inside a transaction, rather than
-depending on every call site remembering to opt in.
+raw `db.transaction(fn)()` — gets this handled automatically, regardless
+of which function happens to call which other function inside a
+transaction, rather than depending on every call site remembering to
+opt in.
+
+**A single flat buffer per database connection is not enough, and was
+itself a second real bug** (also caught by independent review, also
+reproduced directly before being fixed): an inner transaction's own
+SAVEPOINT can roll back while the *outer* transaction catches that
+failure and recovers, going on to commit something else for real. With
+one flat buffer, the inner call's own "ok" entry and the outer call's
+own later, genuinely-successful entry have nothing distinguishing
+them — the outer commit flushes both, even though the inner
+transaction's own row never existed once its own SAVEPOINT rolled back.
+The actual mechanism is a **stack** of buffers, one per currently-open
+transaction level: entering a transaction (at any depth) pushes a fresh
+buffer onto the stack for that level specifically; that level's own
+rollback pops and discards *only its own* buffer, leaving every
+enclosing level's own, already-buffered entries untouched; that level's
+own commit pops its buffer and merges it into whichever buffer is now on
+top of the stack (the next level out) — rising with that enclosing
+transaction's own fate from here on, exactly mirroring how the level's
+own SAVEPOINT/RELEASE just became part of the enclosing transaction's
+still-open unit of work in SQLite itself. Only the truly outermost
+level's own commit — when the stack for that db becomes empty — actually
+prints anything to stdout.
 
 A rejection's own `verified` field carries the identical "real evidence,
 not inference" standard: it is set `true` only when `requireSession`
