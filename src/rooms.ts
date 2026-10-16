@@ -5,6 +5,7 @@
 
 import type Database from "better-sqlite3";
 import { randomBytes, randomInt, randomUUID } from "node:crypto";
+import { logAction, shortIdFor } from "./actionLog.ts";
 import { freshDeck } from "./deck.ts";
 import { applyPlacement, applyRoll, GameError, startGame as startGameLogic } from "./game.ts";
 import { chooseNpcPlacement } from "./npc.ts";
@@ -152,6 +153,13 @@ function sweepStaleLobbyPlayers(db: Database.Database, row: RoomRow): void {
         forgetPresence(db, id);
         anyRemoved = true;
         logEvent(db, row.id, "player_timed_out", { playerId: id });
+        logAction({
+          action: "player_timed_out",
+          outcome: "ok",
+          verified: true,
+          actor: { kind: "room", id },
+          room: { code: row.code },
+        });
       }
     }
     for (const id of staleRequestIds) {
@@ -161,6 +169,13 @@ function sweepStaleLobbyPlayers(db: Database.Database, row: RoomRow): void {
         db.prepare(`DELETE FROM sessions WHERE player_id = ?`).run(id);
         anyRemoved = true;
         logEvent(db, row.id, "join_request_expired", { playerId: id });
+        logAction({
+          action: "join_request_expired",
+          outcome: "ok",
+          verified: true,
+          actor: { kind: "room", id },
+          room: { code: row.code },
+        });
       }
     }
     if (!anyRemoved) return;
@@ -172,9 +187,25 @@ function sweepStaleLobbyPlayers(db: Database.Database, row: RoomRow): void {
       if (next === null) {
         closedAt = now.toISOString();
         logEvent(db, row.id, "room_closed", { reason: "last player timed out" });
+        logAction({
+          action: "room_closed",
+          outcome: "ok",
+          verified: true,
+          actor: null,
+          room: { code: row.code },
+          detail: { reason: "last player timed out" },
+        });
       } else {
         hostId = next;
         logEvent(db, row.id, "host_transferred", { newHostId: hostId, reason: "previous host timed out" });
+        logAction({
+          action: "host_transferred",
+          outcome: "ok",
+          verified: true,
+          actor: { kind: "room", id: hostId },
+          room: { code: row.code },
+          detail: { reason: "previous host timed out" },
+        });
       }
     }
 
@@ -246,6 +277,14 @@ export function createRoom(db: Database.Database, nickname: string, color: Color
     );
     recordHeartbeat(db, roomId, playerId, new Date(now));
     logEvent(db, roomId, "room_created", { playerId, nickname: trimmed, color });
+    logAction({
+      action: "room_created",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "room", id: playerId, nickname: trimmed },
+      room: { code },
+      detail: { color },
+    });
   });
   tx();
 
@@ -316,6 +355,14 @@ export function createSoloNpcGame(db: Database.Database, nickname: string, color
     );
     recordHeartbeat(db, roomId, humanId, new Date(now));
     logEvent(db, roomId, "solo_npc_room_created", { playerId: humanId, nickname: trimmed, color });
+    logAction({
+      action: "solo_npc_room_created",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "room", id: humanId, nickname: trimmed },
+      room: { code },
+      detail: { color },
+    });
 
     const connectedPlayerIds = new Set(Object.keys(state.players));
     let started: RoomState;
@@ -330,6 +377,14 @@ export function createSoloNpcGame(db: Database.Database, nickname: string, color
       roomId,
     );
     logEvent(db, roomId, "game_started", { turnOrder: started.turnOrder });
+    logAction({
+      action: "game_started",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "room", id: humanId, nickname: trimmed },
+      room: { code },
+      detail: { playerCount: started.turnOrder.length },
+    });
   });
   tx();
 
@@ -393,6 +448,14 @@ export function joinRoom(db: Database.Database, code: string, nickname: string, 
     );
     recordHeartbeat(db, row.id, playerId, new Date(now));
     logEvent(db, row.id, "player_joined", { playerId, nickname: trimmed, color });
+    logAction({
+      action: "player_joined",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "room", id: playerId, nickname: trimmed },
+      room: { code: row.code },
+      detail: { color },
+    });
   });
   tx();
 
@@ -453,6 +516,14 @@ export function requestJoin(db: Database.Database, code: string, nickname: strin
       sessionSecret,
     );
     logEvent(db, row.id, "join_requested", { playerId, nickname: trimmed, color });
+    logAction({
+      action: "join_requested",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "room", id: playerId, nickname: trimmed },
+      room: { code: row.code },
+      detail: { color },
+    });
   });
   tx();
 
@@ -522,6 +593,14 @@ export function approveJoin(
     // same reasoning joinRoom's own recordHeartbeat call already has.
     recordHeartbeat(db, row.id, req.id, new Date(now));
     logEvent(db, row.id, "join_approved", { playerId: req.id, nickname: req.nickname, color: req.color });
+    logAction({
+      action: "join_approved",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "room", id: hostPlayerId },
+      room: { code: row.code },
+      detail: { approvedPlayerId: shortIdFor(req.id), color: req.color },
+    });
   });
   tx();
 }
@@ -558,6 +637,14 @@ export function rejectJoin(
     );
     db.prepare(`DELETE FROM sessions WHERE player_id = ?`).run(req.id);
     logEvent(db, row.id, "join_rejected", { playerId: req.id });
+    logAction({
+      action: "join_rejected",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "room", id: hostPlayerId },
+      room: { code: row.code },
+      detail: { rejectedPlayerId: shortIdFor(req.id) },
+    });
   });
   tx();
 }
@@ -584,6 +671,13 @@ export function cancelJoinRequest(db: Database.Database, code: string, playerId:
     );
     db.prepare(`DELETE FROM sessions WHERE player_id = ?`).run(playerId);
     logEvent(db, row.id, "join_request_cancelled", { playerId });
+    logAction({
+      action: "join_request_cancelled",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "room", id: playerId },
+      room: { code: row.code },
+    });
   });
   tx();
 }
@@ -639,6 +733,14 @@ export function setReady(
       fresh.version,
     );
     logEvent(db, row.id, "ready_changed", { playerId, ready });
+    logAction({
+      action: "ready_changed",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "room", id: playerId },
+      room: { code: row.code },
+      detail: { ready },
+    });
   });
   tx();
 }
@@ -664,6 +766,13 @@ export function leaveRoom(db: Database.Database, code: string, playerId: string,
     delete state.players[playerId];
     forgetPresence(db, playerId);
     logEvent(db, row.id, "player_left", { playerId });
+    logAction({
+      action: "player_left",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "room", id: playerId },
+      room: { code: row.code },
+    });
 
     let hostId = fresh.host_player_id;
     let closedAt: string | null = null;
@@ -672,9 +781,25 @@ export function leaveRoom(db: Database.Database, code: string, playerId: string,
       if (next === null) {
         closedAt = new Date().toISOString();
         logEvent(db, row.id, "room_closed", { reason: "last player left" });
+        logAction({
+          action: "room_closed",
+          outcome: "ok",
+          verified: true,
+          actor: { kind: "room", id: playerId },
+          room: { code: row.code },
+          detail: { reason: "last player left" },
+        });
       } else {
         hostId = next;
         logEvent(db, row.id, "host_transferred", { newHostId: hostId, reason: "host left" });
+        logAction({
+          action: "host_transferred",
+          outcome: "ok",
+          verified: true,
+          actor: { kind: "room", id: hostId },
+          room: { code: row.code },
+          detail: { reason: "host left" },
+        });
       }
     }
 
@@ -720,6 +845,13 @@ export function disbandRoom(
       fresh.version,
     );
     logEvent(db, row.id, "room_disbanded", { byPlayerId: playerId });
+    logAction({
+      action: "room_disbanded",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "room", id: playerId },
+      room: { code: row.code },
+    });
   });
   tx();
 }
@@ -753,6 +885,13 @@ export function handoffToNpc(db: Database.Database, code: string, playerId: stri
       fresh.version,
     );
     logEvent(db, row.id, "npc_takeover", { playerId });
+    logAction({
+      action: "npc_takeover",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "room", id: playerId },
+      room: { code: row.code },
+    });
   });
   tx();
 }
@@ -804,6 +943,14 @@ export function npcRoll(db: Database.Database, code: string): boolean {
       fresh.version,
     );
     logEvent(db, row.id, "rolled", { playerId: player.id, values: next.lastRoll?.values, controller: "npc" });
+    logAction({
+      action: "rolled",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "room", id: player.id, nickname: player.nickname },
+      room: { code: row.code },
+      detail: { controller: "npc", values: (next.lastRoll?.values ?? []).join(",") },
+    });
     acted = true;
   });
   tx();
@@ -845,12 +992,27 @@ export function npcPlace(db: Database.Database, code: string): boolean {
       fresh.version,
     );
     logEvent(db, row.id, "placed", { playerId: player.id, value, controller: "npc" });
+    logAction({
+      action: "placed",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "room", id: player.id, nickname: player.nickname },
+      room: { code: row.code },
+      detail: { controller: "npc", value },
+    });
     // state.phase is already narrowed to "awaiting_placement" above, so
     // (unlike the human place() below) next.phase === "round_end" alone
     // is enough to mean "this placement is what ended it."
     if (next.phase === "round_end") {
       logEvent(db, row.id, "round_settled", {
         wonBills: Object.fromEntries(Object.values(next.players).map((p) => [p.id, p.wonBills])),
+      });
+      logAction({
+        action: "round_settled",
+        outcome: "ok",
+        verified: true,
+        actor: null,
+        room: { code: row.code },
       });
     }
     acted = true;
@@ -894,6 +1056,14 @@ export function startGame(db: Database.Database, code: string, playerId: string,
       fresh.version,
     );
     logEvent(db, row.id, "game_started", { turnOrder: next.turnOrder });
+    logAction({
+      action: "game_started",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "room", id: playerId },
+      room: { code: row.code },
+      detail: { playerCount: next.turnOrder.length },
+    });
   });
   tx();
 }
@@ -942,6 +1112,14 @@ export function roll(db: Database.Database, code: string, playerId: string, sess
       fresh.version,
     );
     logEvent(db, row.id, "rolled", { playerId, values: next.lastRoll?.values });
+    logAction({
+      action: "rolled",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "room", id: playerId },
+      room: { code: row.code },
+      detail: { values: (next.lastRoll?.values ?? []).join(",") },
+    });
   });
   tx();
 }
@@ -977,9 +1155,24 @@ export function place(
       fresh.version,
     );
     logEvent(db, row.id, "placed", { playerId, value });
+    logAction({
+      action: "placed",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "room", id: playerId },
+      room: { code: row.code },
+      detail: { value },
+    });
     if (next.phase === "round_end" && state.phase !== "round_end") {
       logEvent(db, row.id, "round_settled", {
         wonBills: Object.fromEntries(Object.values(next.players).map((p) => [p.id, p.wonBills])),
+      });
+      logAction({
+        action: "round_settled",
+        outcome: "ok",
+        verified: true,
+        actor: null,
+        room: { code: row.code },
       });
     }
   });
