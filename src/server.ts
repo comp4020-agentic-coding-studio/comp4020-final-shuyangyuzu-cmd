@@ -5,7 +5,9 @@
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { streamSSE } from "hono/streaming";
+import { logAction } from "./actionLog.ts";
 import * as bar from "./bar.ts";
 import { BarError } from "./bar.ts";
 import { FURNITURE, GAME_CHAIRS, GRID_COLS, GRID_ROWS, TILE_SIZE } from "./barLayout.ts";
@@ -224,9 +226,52 @@ app.use("*", async (c, next) => {
   c.header("Cache-Control", "no-cache");
 });
 
-app.onError((err, c) => {
+// Best-effort claimed identity for a rejected request — read from the
+// already-parsed JSON body (Hono's HonoRequest.json() caches its parsed
+// result, so a second call here after a handler already consumed it
+// returns the cached value, never a second body read) or, for the few
+// GET/SSE routes that carry identity as query params instead (chat's
+// message history and event stream), from there. Never a nickname here:
+// a nickname only ever comes from a verified DB row elsewhere in this
+// file, never an unverified request — a failed identity claim must not
+// be dressed up as if it were confirmed. Returns null when neither source
+// carries a playerId at all (e.g. a 404 on a nonexistent room code, which
+// has no identity involved).
+async function claimedRejectionActor(c: Context): Promise<{ kind: "bar" | "room"; id: string } | null> {
+  let body: Record<string, unknown> = {};
+  try {
+    body = (await c.req.json()) as Record<string, unknown>;
+  } catch {
+    // No JSON body on this request (a GET, or a body-less retry) — fall
+    // through to query params below.
+  }
+  const fromBody = typeof body.playerId === "string" ? body.playerId : undefined;
+  const fromQuery = c.req.query("playerId");
+  const id = fromBody || fromQuery;
+  if (!id) return null;
+  const kind: "bar" | "room" = c.req.path.startsWith("/api/bar") ? "bar" : "room";
+  return { kind, id };
+}
+
+app.onError(async (err, c) => {
   if (err instanceof RoomError || err instanceof BarError || err instanceof TableError || err instanceof ChatError) {
-    return c.json({ error: err.code, message: err.message }, err.status as 400 | 403 | 404 | 409 | 410 | 429);
+    const status = err.status as 400 | 403 | 404 | 409 | 410 | 429;
+    const actor = await claimedRejectionActor(c);
+    // "unauthorized" is specifically requireSession's/requireBarSession's/
+    // requireThreadAccess's own identity-check failure, thrown before any
+    // other check in every function that calls it — every other rejection
+    // code (not_host, wrong_turn, room_closed, etc.) is only ever reached
+    // after that same check already passed, so the caller genuinely was
+    // who they claimed; only "unauthorized" means the claimed identity
+    // itself didn't check out.
+    logAction({
+      action: `${c.req.method} ${c.req.path}`,
+      outcome: "rejected",
+      verified: err.code !== "unauthorized",
+      actor,
+      error: { code: err.code, message: err.message },
+    });
+    return c.json({ error: err.code, message: err.message }, status);
   }
   console.error(err);
   return c.json({ error: "internal_error", message: "something went wrong" }, 500);
