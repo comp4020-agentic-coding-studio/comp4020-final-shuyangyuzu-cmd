@@ -289,6 +289,55 @@ it("a rolled-back OUTER transaction around createRoom leaves no room row AND no 
   expect(lines).toHaveLength(0); // the log line must have rolled back with it
 });
 
+// ---- Regression: a follow-up review found the fix above was itself
+// incomplete for a DIFFERENT shape — an inner transaction's own
+// SAVEPOINT rolling back, caught by the OUTER transaction, which then
+// goes on to do something else successfully and commits. The first
+// buffering fix kept one single flat buffer per db, flushed or
+// discarded only at the truly-outermost boundary — so a nested
+// SAVEPOINT's own rollback (the inner one failing) had no way to
+// discard only ITS OWN buffered entries; by the time the inner
+// transaction's catch block swallowed the error, the inner call's log
+// entry was still sitting in the single shared buffer, and the later
+// successful outer commit flushed it right alongside the real,
+// successfully-committed room — even though the first room's own row
+// never existed in the database at all. ----
+it("an inner transaction's own rollback, caught and recovered from by the outer transaction, never logs the failed inner attempt — only the outer's own real commit", () => {
+  const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+  let survivingCode = "";
+  const outer = db.transaction(() => {
+    // The inner transaction fails and rolls back its own SAVEPOINT —
+    // but the OUTER transaction catches that failure and recovers,
+    // going on to do a second, genuinely successful thing before
+    // committing for real.
+    try {
+      db.transaction(() => {
+        createRoom(db, "DoomedNested", "red");
+        throw new Error("inner failure, caught by the outer transaction");
+      })();
+    } catch {
+      // swallowed — the outer transaction recovers and continues
+    }
+    const survivor = createRoom(db, "SurvivingNested", "blue");
+    survivingCode = survivor.code;
+  });
+  outer();
+  const lines = captureLogLines(spy).filter((l) => l.includes('"action":"room_created"'));
+  spy.mockRestore();
+
+  // Exactly one room actually exists — the recovered, successfully
+  // committed one.
+  const rooms = db.prepare(`SELECT code FROM rooms`).all() as Array<{ code: string }>;
+  expect(rooms).toHaveLength(1);
+  expect(rooms[0].code).toBe(survivingCode);
+  // Exactly one "room_created" line was logged, and it describes the
+  // room that actually exists — never the doomed inner attempt that
+  // was rolled back and recovered from.
+  expect(lines).toHaveLength(1);
+  const parsed = JSON.parse(lines[0].replace("[action] ", ""));
+  expect(parsed.room.code).toBe(survivingCode);
+});
+
 // ---- Regression: `verified` must be real proof that a session check
 // actually succeeded for the claimed identity, never inferred from "the
 // error code happens not to be literally unauthorized." The old

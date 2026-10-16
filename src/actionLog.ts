@@ -19,9 +19,10 @@
 // is capped to small scalar values, never a nested object a secret could
 // hide inside.
 //
-// Two real bugs an independent review caught in the first version of this
-// module, both fixed here, both with their own regression tests in
-// spec/actionLog.test.ts:
+// Several real bugs an independent review caught across iterations of
+// this module, each fixed here with its own regression test in
+// spec/actionLog.test.ts — recorded in the order they were actually
+// found, because each one taught something the next fix needed:
 //
 // 1. "Success" logging was not actually rollback-safe. The first version
 //    put each logAction call inside the same db.transaction() callback as
@@ -33,17 +34,26 @@
 //    its own db.transaction() — this nesting already existed in
 //    production code, not just in a test). A nested call's own RELEASE
 //    commits its savepoint immediately; console.log has no rollback
-//    semantics at all — once called, the line is out. So if the OUTER
-//    transaction later threw (for an unrelated reason, after the inner
-//    call's own savepoint had already released), the inner action's "ok"
-//    line had already printed, even though the whole write rolled back.
-//    runLoggedTransaction/logAction below fix this by buffering every
-//    entry logged while db.inTransaction is true, and only ever flushing
-//    that buffer to stdout once the OUTERMOST transaction actually
-//    commits — discarding it unconditionally on any throw at any nesting
-//    depth, including a nested call's own already-"successful" savepoint.
+//    semantics at all — once called, the line is out.
 //
-// 2. `verified` in a rejection's log line was inferred from the error's
+// 2. A single flat buffer per db (the first fix for #1) was ITSELF wrong
+//    for a shape that specific test didn't cover: an inner transaction's
+//    own SAVEPOINT rolling back, caught by the OUTER transaction, which
+//    then recovers and commits something else entirely for real. With
+//    one flat buffer, the inner call's "ok" entry and the outer call's
+//    own later, genuinely-successful entry sat in the same array with
+//    nothing distinguishing them — the outer commit flushed both, even
+//    though the inner transaction's own row never existed once its own
+//    SAVEPOINT rolled back. The actual fix (installTransactionLogging
+//    below) is a STACK of buffers, one per currently-open transaction
+//    level: a level's own rollback discards only that level's own
+//    buffer, never the levels beneath it; a level's own commit merges
+//    its buffer into the next level down, rising with it exactly as
+//    that level's own SAVEPOINT/RELEASE just became part of the
+//    enclosing transaction's still-open unit of work; only the
+//    outermost level's own commit actually prints anything.
+//
+// 3. `verified` in a rejection's log line was inferred from the error's
 //    own code (`code !== "unauthorized"`), not from any actual proof a
 //    session check had run and passed. Nearly every rooms.ts mutation
 //    calls loadOpenRoom/loadRoomAfterSweep (which can throw
@@ -170,14 +180,39 @@ interface PatchableDatabase extends Database.Database {
   [realTransactionMethod]?: (fn: (...args: unknown[]) => unknown) => (...args: unknown[]) => unknown;
 }
 
-/** For a given database connection, the buffer of entries logged so far
- * during its OUTERMOST currently-running transaction — present only
- * while that outermost transaction is still running. A WeakMap (not a
- * plain Map) so a closed/discarded db's buffer is eligible for garbage
- * collection rather than leaking for the life of the process; this app
- * only ever opens one long-lived connection in production, but the test
- * suite opens and closes many per test run. */
-const pendingByDb = new WeakMap<Database.Database, ActionLogEntry[]>();
+/** For a given database connection, a STACK of buffers — one per
+ * currently-open transaction level, outermost first. A follow-up review
+ * found that a single flat buffer per db (the first version of this fix)
+ * was itself wrong for a shape the single-buffer test above didn't
+ * cover: an INNER transaction's own SAVEPOINT rolling back, caught by
+ * the OUTER transaction, which then recovers and goes on to commit
+ * something else entirely for real. With one flat buffer, the inner
+ * call's "ok" entry had nothing to distinguish it from the outer call's
+ * own later, genuinely-successful entry — both just sat in the same
+ * array, and the outer commit flushed both, even though the inner
+ * transaction's own row never existed in the database once its own
+ * SAVEPOINT rolled back.
+ *
+ * The fix: each transaction level gets its OWN buffer, pushed onto this
+ * stack when that level begins. A level's own rollback pops and
+ * discards only that level's own buffer — never the levels below it,
+ * which may have already logged real, independently-valid entries of
+ * their own before this inner transaction was even started. A level's
+ * own commit pops its buffer and, if there is still an enclosing level
+ * (this wasn't the outermost), merges those entries into the *next*
+ * buffer down the stack — they're now provisionally part of that
+ * enclosing transaction's own pending log, rising or falling with IT
+ * from here on, exactly mirroring how the inner transaction's own
+ * SAVEPOINT/RELEASE just became part of the outer transaction's own
+ * still-open unit of work in SQLite itself. Only when the OUTERMOST
+ * level's own buffer is popped (the stack becomes empty for this db) is
+ * anything actually printed to stdout. */
+const pendingStackByDb = new WeakMap<Database.Database, ActionLogEntry[][]>();
+
+function currentBuffer(db: Database.Database): ActionLogEntry[] | undefined {
+  const stack = pendingStackByDb.get(db);
+  return stack && stack.length > 0 ? stack[stack.length - 1] : undefined;
+}
 
 /** Installs the patch on `db.transaction` the first time this module
  * sees a given database instance — idempotent per instance (checked via
@@ -195,17 +230,42 @@ export function installTransactionLogging(db: Database.Database): void {
     const wrapped = original(fn);
     return (...args: unknown[]) => {
       const isOutermost = !db.inTransaction;
-      if (isOutermost) pendingByDb.set(db, []);
+      let stack = pendingStackByDb.get(db);
+      if (!stack) {
+        stack = [];
+        pendingStackByDb.set(db, stack);
+      }
+      const myBuffer: ActionLogEntry[] = [];
+      stack.push(myBuffer); // this level's own buffer, recorded at entry — its "buffer starting point"
       try {
         const result = wrapped(...args);
+        // This level committed (its own SAVEPOINT RELEASEd, or — if
+        // isOutermost — the real COMMIT ran). Pop this level's buffer;
+        // its entries are no longer "pending at this level," they rise
+        // to whatever level is still open beneath it.
+        stack.pop();
         if (isOutermost) {
-          const buffer = pendingByDb.get(db) ?? [];
-          pendingByDb.delete(db);
-          for (const entry of buffer) console.log(formatActionLogLine(entry));
+          // Nothing left to rise to — this is the real commit. Print
+          // every entry this transaction (and everything nested inside
+          // it that also committed) actually logged.
+          for (const entry of myBuffer) console.log(formatActionLogLine(entry));
+        } else {
+          // Merge into the enclosing level's own still-open buffer —
+          // provisionally part of ITS fate from here on, exactly as
+          // this level's own SAVEPOINT just became part of the
+          // enclosing transaction's still-open unit of work.
+          const parent = stack[stack.length - 1];
+          parent.push(...myBuffer);
         }
         return result;
       } catch (err) {
-        if (isOutermost) pendingByDb.delete(db); // discard unconditionally — nothing in here ever actually committed
+        // This level rolled back (its own ROLLBACK TO, or — if
+        // isOutermost — the real ROLLBACK). Pop and discard ONLY this
+        // level's own buffer — never touch whatever's still on the
+        // stack beneath it, which belongs to an enclosing transaction
+        // that may well recover from this exact failure (catch it) and
+        // go on to commit something else for real afterward.
+        stack.pop();
         throw err;
       }
     };
@@ -224,17 +284,19 @@ export function transact<T>(db: Database.Database, fn: () => T): T {
 }
 
 /** Logs one action for `db`. If called while `db` is inside a running
- * transaction (at any nesting depth — real nesting is tracked by
- * `installTransactionLogging`'s patch, keyed off the same `db.inTransaction`
- * better-sqlite3 itself uses), the entry is buffered and only reaches
- * stdout if that outermost transaction actually commits. Called outside
- * any transaction (e.g. a rejection logged from `app.onError`, after
+ * transaction (at any nesting depth), the entry is pushed onto the
+ * CURRENT (innermost) level's own buffer — see
+ * `installTransactionLogging`'s own doc comment for exactly how that
+ * buffer's fate then tracks its own transaction level: discarded if
+ * that level rolls back, merged upward if it commits, and only ever
+ * printed once the outermost level itself commits. Called outside any
+ * transaction (e.g. a rejection logged from `app.onError`, after
  * whatever transaction was active has already thrown and rolled back
  * synchronously — better-sqlite3's own transaction wrapper runs its
  * ROLLBACK before rethrowing, so by the time an error reaches here
  * `db.inTransaction` is already false again), this logs immediately. */
 export function logAction(db: Database.Database, entry: ActionLogEntry): void {
-  const buffer = pendingByDb.get(db);
+  const buffer = currentBuffer(db);
   if (buffer) {
     buffer.push(entry);
   } else {
