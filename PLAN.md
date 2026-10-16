@@ -3021,3 +3021,343 @@ rather than giving up after one spawn's own 4 neighbours, and
 to tolerate each retry's own join also producing a push on the already-
 open stream. 201/201 green across 4 consecutive local runs after the
 fix, `pnpm check:evidence` green; pushed as its own commit.
+
+## Crit 10 prep ("Fly by instruments") — setup and baseline only, 2026-10-14
+
+No functional code was changed for this entry. Everything under "From
+code inspection" was read directly from `src/*.ts` at HEAD
+(`a1b8242`). Everything under "From running something" was actually
+executed this session, scoped as stated. Crit 10's cutoff is **Monday
+2026-10-19 13:30, Australia/Sydney** (same local time as
+Australia/Canberra), session 15:30–17:30, confirmed against the live
+course schedule via the `next-deadline` check, not assumed from the
+pasted brief — Bādà group.
+
+### Baseline check (from running something)
+
+- Branch `main`, HEAD `a1b8242`, in sync with `origin/main` (`git
+  fetch` + `git status` clean except the one pre-existing untracked
+  file below). No local commits ahead or behind.
+- Tags `crit-8` → `a7064086` and `crit-9` → `5fc04b02` (tagging commits
+  `a1b8242`/`a706408` resolved via `git for-each-ref`) are both
+  ancestors of `main` in the right order (`crit-8` before `crit-9`
+  before current HEAD, verified with `git merge-base --is-ancestor`).
+  Neither was moved or touched.
+- `src/orders.ts` is untracked and was left alone, per instruction —
+  not read for content, not staged, not committed.
+- Repo visibility: `PUBLIC` (`gh repo view`). Latest CI run (`checks`
+  on push `38195379716`, commit `a1b8242`) is green.
+- Fly app `comp4020-final-shuyangyuzu-cmd`: one `syd` machine, state
+  `stopped` (auto_stop_machines, expected when idle) at status-check
+  time; `mise exec -- flyctl status` used throughout, token never read
+  or printed directly. Live `/version` returns `740908f3f0`, which
+  matches a from-scratch local hash of
+  `public/{app.js,styles.css,tavern.js,liveSync.js}` at HEAD exactly —
+  **the deployed app is current with HEAD**, not stale.
+- Live `/` returns 200 with `Cache-Control: no-cache`; live `/readme/`
+  returns 200. No production room was created, no production action
+  taken beyond these three read-only GETs plus the existing bar-speech
+  verification already recorded above (not repeated this session).
+- Local run: started the server pointed at an isolated temp
+  `DATA_DIR` (never the real `./data`), confirmed `/`, `/version`,
+  `/readme/` all 200, ran `pnpm check` (201/201 tests, typecheck
+  clean) and `pnpm check:evidence` (reflections present, all 23
+  PROCESS.md-cited commits resolve) against it, then stopped that
+  process. The real local/production databases were never opened by
+  this session.
+- `pnpm install` reports `11.9.0 → 12.11.2` available for pnpm itself;
+  not upgraded (out of scope this session, reporting only). Course
+  plugin versions (`comp4020` 0.14.27, `comp4020-statusline` 0.3.5)
+  both report current via `plugin-version.sh`.
+
+### What Crit 10 actually asks for, read from the live spec page
+
+Fetched `/crits/10-fly-by-instruments/` directly (not reused from the
+pasted brief) to check it hadn't drifted. Six checkable lines: (1)
+multi-user by the brief's own definition, deployed by cutoff; (2)
+see/change permissions checked server-side and the decision **written
+down in the repo with why**; (3) server-side action logging that
+**outlives the crit**; (4) at the crit, two pod members use the app
+from its URL alone in separate Chrome profiles while the presenter
+narrates purely from `mise exec -- flyctl logs`, no clicking the
+presenter's own UI; (5) process evidence (commits, PROCESS.md,
+`reflections/crit-10.md`); (6) can account for direction/grounding/
+correction. Items 2 and 3 are new asks this week — 1 is very likely
+already true of the existing bar+room architecture (see below), but
+unverified end-to-end with two real separate browser identities this
+session, per the "don't create test players" constraint.
+
+### Identity and authority (from code inspection — file:line cited)
+
+- **Two identity layers, two secrets, confirmed separate**: bar
+  identity in `bar_sessions(player_id, session_secret)`, created
+  `src/bar.ts:151-184`, checked by `requireBarSession`
+  (`src/bar.ts:190-197`); game-room identity in
+  `sessions(player_id, room_id, session_secret)`, created
+  `src/rooms.ts:220-252`/`351-399`/`423-459`, checked by
+  `requireSession` (`src/rooms.ts:188-195`). Neither secret is ever
+  joined into a public-response query (`src/db.ts:55-57` comment,
+  confirmed against `toPublicState`, `src/rooms.ts:995-1030`: no
+  `session_secret` field, deck order excluded, only `deckSize`
+  exposed).
+- **The two layers are linked, but only for routing, never for
+  logging**: `bar_players.current_table_id`/`current_game_player_id`
+  (written `src/tables.ts:375,429,475`) let `resolveActiveSeat`
+  (`src/tables.ts:251-282`) find "which room is this bar patron's
+  active game" by following that pointer into `sessions.room_id`.
+  Nothing currently logs this link anywhere — an operator watching
+  only `flyctl logs` has no way today to say "this bar patron is that
+  room player."
+- **Server-side authority checks are real, not UI-only** (this is the
+  part of items 1/2 that's load-bearing and already correct): every
+  room mutation requires a matching session before anything else
+  (`rooms.ts:920-922` roll, `:862-864` startGame, `:953-957` place);
+  turn/phase are re-checked server-side regardless of client state
+  (`src/game.ts:88-91`, `:107-110`, surfaced as 409 at
+  `rooms.ts:935`); host-only actions (approve/decline/disband/start)
+  throw `403 not_host` when the caller isn't the room's host
+  (`rooms.ts:478,541,702,866` — approve's own check read in full at
+  `rooms.ts:470-523`); an NPC-controlled seat refuses its original
+  human's still-valid session (`rooms.ts:911`, called at `:929`). This
+  is genuine server authority, not a disabled button — satisfies the
+  *mechanism* half of spec item 2 already.
+- **Private chat's old access control is untouched and still correct**:
+  `requireThreadAccess` (`src/chat.ts:224-232`) still calls
+  `requireBarSession` then a participant check before any thread read,
+  exactly as CLAUDE.md's "already-saved private records keep their
+  original access control" states — confirmed by reading the function,
+  not assumed from the doc.
+- **Minor, noted not fixed**: `sessionSecret` travels as a URL query
+  parameter for the SSE/GET paths (`server.ts:651`, `:747`). Fine
+  within the app's own code (CLAUDE.md's "never in a public response"
+  rule is about response *bodies*, and this isn't one), but worth
+  knowing before pointing any proxy- or access-log tooling at this app
+  later, since a URL can end up in such logs upstream of the
+  application itself.
+
+### The actual gap: server-side logging does not reach `flyctl logs` at all
+
+This is the one finding that changes what's buildable before Crit 10,
+confirmed two independent ways this session: (a) reading
+`src/rooms.ts:70-77`'s `logEvent` — it only ever does `INSERT INTO
+events ...`, no stdout write, called for `rolled`, `placed`,
+`join_approved`, `game_started`, `npc_takeover` and others, entirely
+inside SQLite; and (b) actually running `mise exec -- flyctl logs -a
+comp4020-final-shuyangyuzu-cmd --no-tail` against the live app this
+session — the real output is machine boot/stop/restart lines only
+(Firecracker start, mount, "listening on", autostop), **zero
+application-level lines of any kind**, which is exactly what (a)
+predicts. A full repo-wide grep found exactly two `console.*` calls in
+all of `src/`: `server.ts:231` (`console.error(err)`, generic 500
+catch-all) and `server.ts:827` (the one-time "listening on..." startup
+line). There is no request logger and no per-action logging of any
+kind reaching stdout.
+
+Consequences for Crit 10 item 3/4 specifically:
+- **Rejections are currently silent to a log-only observer.** Every
+  typed error (`RoomError`/`BarError`/`TableError`/`ChatError` —
+  wrong-session 403, `not_host`, `not_your_turn`, `wrong_phase`, 410
+  `room_closed`, etc.) is turned into a JSON response by
+  `app.onError` (`server.ts:227-232`) with **no log line at all**; only
+  genuinely unexpected 500s hit `console.error`. The crit's own
+  critical-finding condition — "one player alters the other's data" —
+  is already prevented server-side (previous section), but a
+  *presenter watching only `flyctl logs`* currently has no way to
+  **show** a rejection happened, which is exactly what item 4 asks
+  for.
+- **Bar-world actions have no event at all, in any sink.** `move`,
+  `sit`, `say`, `appearance`, table create/join/depart write nothing
+  to `events` and nothing to stdout — only game-room actions
+  (`roll`/`place`/`approve`/etc.) reach the SQLite `events` table, and
+  even those never reach stdout.
+- **Same-name disambiguation is currently impossible from logs**,
+  because there's nothing in logs to disambiguate at all; even the DB
+  `events` rows that do exist carry a room `playerId` and sometimes a
+  nickname, never the bar identity id, so correlating "tavern
+  character" to "game player" isn't possible even by querying the DB
+  directly today.
+- **No secret/token leak found.** No `console.*` call references
+  `session_secret` or any token; the one `console.error(err)` call
+  logs an error object, not request fields, so nothing today prints a
+  secret. Worth re-checking once real logging is added, since a naive
+  "log the request" helper could easily start including the
+  `sessionSecret` query parameter noted above.
+- **Item 2's "written down in the repo with why" is not yet
+  satisfied as a single artifact.** The mechanism is correct and
+  CLAUDE.md documents the *rules*, but there is no one place in the
+  repo that states, as a design decision, who may see/change what and
+  why — this is a documentation gap, not a code gap.
+
+### Suggested implementation order (not started, for the student's own decision)
+
+1. One structured stdout line per request/mutation from a single choke
+   point (e.g. inside the existing `app.use("*", ...)` middleware at
+   `server.ts:222-225`, or alongside `app.onError`), carrying: a
+   timestamp, the route/action, outcome (ok/rejected + error code),
+   bar identity id (short, non-secret) and nickname where known, room
+   code and room `playerId` where known. Never the secret itself.
+2. Make `app.onError` (`server.ts:227-232`) log the four typed-error
+   rejections too, not just the 500 fallback — this is what makes "one
+   player can't touch the other's data" demonstrable purely from
+   `flyctl logs` at the crit.
+3. Mirror `logEvent` (`rooms.ts:70-77`) to the same structured stdout
+   line in the same call, so DB `events` and `flyctl logs` never
+   disagree, and extend equivalent logging to the currently-silent bar
+   / table actions (`move`, `sit`, `say`, join/approve/create/depart).
+4. Add the short, stable, non-secret per-identity tag (e.g. a prefix
+   of the player id) to every such line, specifically so two
+   same-nickname classmates are distinguishable live at the crit, and
+   so a bar identity and its active room player can be read as the
+   same actor across both log lines.
+5. Write the "who may see/change what, and why" decision down as its
+   own section (likely in README.md or a new short doc — the
+   student's call, given README.md/PROCESS.md are both off-limits to
+   this session) rather than leaving it implicit across CLAUDE.md's
+   rules.
+6. Add a couple of targeted tests once logging exists: a rejection
+   produces a log line; no log line ever contains the literal
+   `sessionSecret` value; two same-nickname identities log with
+   different identity tags. (Out of scope this session — no code was
+   written.)
+
+This entry is a baseline record only. No implementation choice above
+has been made; the student decides scope and order next.
+
+## Crit 10 implementation (2026-10-16) — structured action logging, ADR, verification
+
+Acting on the prep baseline above, the student asked for the full
+implementation: structured server-side action logging reaching
+`flyctl logs`, the access-control decision record the spec asks for,
+and live verification with two separate Chrome-profile identities.
+
+**What was built, by commit:**
+
+- `31b605e` — `src/actionLog.ts` (the new single-line JSON logger,
+  `formatActionLogLine` exported separately from the `console.log`
+  side-effect for unit testing) plus every existing `logEvent` call
+  site in `src/rooms.ts` gaining a sibling `logAction` call, inside
+  the same transaction, after the same write, before any later throw —
+  so a rolled-back write is structurally incapable of being logged as
+  a success (the same transaction `logEvent` itself already relied on
+  for the identical guarantee).
+- `481fc5c` — bar and table-binding actions that previously wrote no
+  event anywhere (`move`, `sit`, `stand`, `say`, `join_bar`,
+  `rejoin_bar`, `update_appearance`, `create_table`, `join_table`,
+  `start_npc_game`, `depart_table`, `resume_table`, and both branches
+  of `enforceExpiredDepartures`) gained their first logging. A bar
+  move is debounced to at most once per `BAR_MOVE_LOG_WINDOW_MS`
+  (default 3s) per player — logging every tile step would flood
+  `flyctl logs` and actively hurt the crit's own "narrate from logs"
+  readability. `createTableRoom`/`joinTableRoom`/`startNpcGame` log
+  the bar identity and the room player it just became together in one
+  line, which is what lets a presenter correlate a tavern character to
+  a game player purely from the terminal, since `rooms.ts` itself
+  deliberately never imports bar internals (CLAUDE.md's bar/game
+  separation).
+- `aad21d2` — rejection logging at the one choke point every typed
+  error already passes through (`app.onError`, `src/server.ts`),
+  reading a claimed identity best-effort from the already-parsed JSON
+  body (Hono's `HonoRequest.json()` caches its parsed result, so a
+  second call here after a handler already consumed it is free) or,
+  for the chat GET/SSE routes, from query params. A rejection whose
+  code is `unauthorized` is tagged `verified: false` and keeps the
+  claimed id but never a nickname — nicknames only ever come from a
+  verified DB row elsewhere. `spec/actionLog.test.ts` (12 new tests,
+  direct-DB style since the HTTP-level spec files run against a
+  separate process and can't spy on its stdout) added in the same
+  commit.
+- `87f423b` — `ADR-access-control.md`, written against the actually-
+  running code (every file:line citation re-checked while writing it;
+  no mismatch found between the document's claims and the code).
+- `0e2cc90` — README.md's checks section and a new first-person
+  PROCESS.md section describing the above, citing the real commits.
+
+**Local verification (code-level, from actually running the suite):**
+`pnpm check` against an isolated temp `DATA_DIR` (same method as the
+prep baseline): 213/213 tests pass (201 original + 12 new), typecheck
+clean. `pnpm check:evidence` green (27 cited commits in PROCESS.md, all
+resolve). Confirmed directly during development, not just inferred:
+captured log output from a local run showed no `sessionSecret` string
+anywhere, `create_table`/`join_table` lines correctly pairing a bar id
+with the room player id it became, and rejection lines (`not_host`,
+`not_your_turn`, `unauthorized`) all present with `verified` set
+correctly.
+
+**CI and deploy:** pushed as 5 commits (`31b605e`..`0e2cc90`). CI run
+`38893718915` completed `success` on `0e2cc90` (both its `check` and
+`deploy` jobs). Live `/version` returns `f98a82fb63`, which matches a
+from-scratch local hash of `public/{app.js,styles.css,tavern.js,
+liveSync.js,favicon.svg}` at the same HEAD exactly (the version hash
+now also covers `favicon.svg`, added in the unrelated `dc6e680`
+rename commit, carried forward unchanged here) — the live deployment
+is confirmed current with this work.
+
+**Live production rehearsal — an honest account of what this actually
+was.** Two real Chrome browser profiles were not available to this
+session; what was actually done instead was issuing the exact same
+public HTTP requests a browser would make (the identical endpoints,
+bodies, and session-secret handling `public/app.js`/`tavern.js` use),
+from this session's own shell, against the real, live, deployed app —
+while watching `mise exec -- flyctl logs -a
+comp4020-final-shuyangyuzu-cmd` live in a separate process the entire
+time. This exercises the exact same server code path two real browser
+tabs would hit (nothing about the server can tell the difference
+between "a fetch() call from app.js" and "a fetch() call from this
+shell" — that's the whole point of a stateless HTTP API), but it is
+not the same as an actual two-person, two-profile demonstration, and
+is recorded here as what it was, not inflated into more than that. The
+real two-profile rehearsal, with the student narrating purely from the
+same `flyctl logs` command, remains for the actual crit session.
+
+Two throwaway identities, `Crit10-RehearsalA` and `Crit10-RehearsalB`,
+joined the live bar, and the following sequence was run end to end,
+with every line below actually observed arriving live through `flyctl
+logs` within about a second of the request that caused it (confirmed
+by this session watching the monitor fire in real time, not
+reconstructed afterward):
+
+1. A and B join — `join_bar` lines, correctly distinct short ids
+   (`34853d7b` vs `9fbfc7d5`) despite similar chosen nicknames.
+2. A speaks publicly — `say` logs sender, `clientMsgId`, and message
+   *length* only (`"length":26`), never the text itself.
+3. **B attempts to speak as A**, submitting A's `playerId` with B's own
+   `sessionSecret` — rejected `unauthorized`, logged with
+   `"verified":false` and `"actor":{"kind":"bar","id":"34853d7b"}` (the
+   *claimed* id, correctly carrying no nickname, since nothing about
+   this attempt was ever confirmed as genuinely A). This is the crit's
+   own critical-finding condition, demonstrated failing to succeed, and
+   visible from the log line alone without reading either player's
+   screen.
+4. A creates a Vegas table — `room_created` then `create_table`, the
+   second line pairing the bar id (`34853d7b`) with the room player id
+   it just became (`8e693c37`) in one line, exactly the correlation
+   this week's design added.
+5. B requests to join that table — `join_requested` then `join_table`,
+   `"pending":true`, correctly not yet a seat.
+6. **B tries to approve their own pending request** (self-admission,
+   never the host) — rejected `not_host`, attributed to B's own room
+   id (`0a87628a`).
+7. A, the real host, approves B — `join_approved`, attributed to A's
+   room id (`8e693c37`), naming the approved player.
+8. **B tries to roll before the game has started** — rejected
+   `wrong_phase`, attributed to B's own room id.
+9. A disbands the rehearsal room — `room_disbanded`, cleanup confirmed
+   logged.
+
+No line in this entire sequence contained `sessionSecret` or any
+generated secret value — checked directly against the captured monitor
+output, not just asserted. Every rejection (steps 3, 6, 8) was visible
+and attributable purely from the log line, with no need to inspect
+either identity's own response body — which is the actual thing the
+crit's own "narrate from logs" requirement asks for. This production
+run used only the two clearly-named throwaway identities above; no
+other room or the student's own data was touched.
+
+**Residual gap, found by doing this rehearsal rather than assumed
+away:** this session has no real two-Chrome-profile capability, so the
+"two separate browsers, two separate cookie jars" half of the brief's
+own rehearsal is still unverified in the strictest sense — the HTTP
+layer being identical either way is a reasonable inference, not a
+substitute for actually doing it. The student should run the real
+two-profile version once before the crit itself, which this session
+could not perform.
