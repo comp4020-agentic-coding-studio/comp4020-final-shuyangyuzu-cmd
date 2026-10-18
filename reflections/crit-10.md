@@ -1,0 +1,11 @@
+# Crit 10 reflection
+
+## What was the breakthrough that moved the work forward?
+
+The breakthrough was treating a passing test suite as the start of scrutiny, not the end of it. I asked Claude to ground server-side action logging in the identity and permission mechanism already in the code, and to write `ADR-access-control.md` from real file and line numbers, not memory. That looked complete and the tests were green. I then had my own agent review that same work for correctness, and it found two real bugs I had just accepted as done: a rolled-back outer transaction could still leave a success line in the log when one transaction nested inside another, and a rejection's `verified` field was inferred from an error code rather than real proof a session check had run. A second review found the first fix's own log buffer still couldn't tell a caught, recovered-from failure apart from a later genuine commit. Each bug was reproduced with a failing test before being fixed, and the correction is recorded in `PLAN.md` rather than folded silently into the first version's own claim of success.
+
+The same pattern held for the interface. Screenshots I took while walking the tavern showed a decorative plant overlapping a game chair and a rug stranded between two rows of tables — defects no automated check was built to catch, since a walkable tile beside another walkable tile was never a collision. Describing exactly what I saw let the agent find the actual cause.
+
+## What did this work change about who I want to be as a software developer?
+
+I want to be a developer who asks "prove it" of my own accepted work, not just of a first draft. A passing test suite is evidence, not proof; an independent, adversarial review of the same code found defects the original implementation and its own tests missed twice. I also want to keep stating gaps plainly rather than rounding them up: this session exercised two genuinely isolated browser identities against the live app and watched the log tell them apart, but that's a stronger stand-in than a real two-person demonstration, not a replacement for it — the actual rehearsal with two classmates, narrated from `flyctl logs` alone, is still mine to do.
