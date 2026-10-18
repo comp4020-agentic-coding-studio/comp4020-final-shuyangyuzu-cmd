@@ -6,12 +6,12 @@
 // from the fixed spawn point alone.
 
 import { describe, expect, it } from "vitest";
-import { BAR_SEATS, FURNITURE, GAME_CHAIRS, GAME_TABLES, GRID_COLS, GRID_ROWS, defaultSpawn, isValidStep, isWalkable } from "../src/barLayout.ts";
+import { BAR_SEATS, FURNITURE, GAME_CHAIRS, GAME_TABLES, GRID_COLS, GRID_ROWS, defaultSpawn, isValidStep, isWalkable, isWalkingFloor } from "../src/barLayout.ts";
 import { COLORS } from "../src/types.ts";
 
 describe("isWalkable", () => {
   it("is true for open floor", () => {
-    expect(isWalkable(0, 0)).toBe(true);
+    expect(isWalkable(0, 3)).toBe(true);
     expect(isWalkable(GRID_COLS - 1, GRID_ROWS - 1)).toBe(true);
   });
 
@@ -65,18 +65,34 @@ describe("the restroom (Crit 9: a walkable zone, not an obstacle)", () => {
     expect(isValidStep(restroom.x, restroom.y + restroom.h - 1, entryX, entryY)).toBe(true);
   });
 
-  it("doesn't change walkability of the tiles immediately around it (no accidental widening of the walkable area)", () => {
-    // One tile further out than the restroom's own footprint, on each
-    // side still inside the grid, should be exactly what it was before
-    // this fixture existed: open floor, not specially affected.
-    const aboveY = restroom.y - 1;
-    if (aboveY >= 0) expect(isWalkable(restroom.x, aboveY)).toBe(true);
+  it("doesn't open a passage through the back wall immediately above it", () => {
+    expect(isWalkable(restroom.x, restroom.y - 1)).toBe(false);
+    expect(isWalkingFloor(restroom.x, restroom.y + restroom.h)).toBe(true);
   });
+});
+
+it("all chairs block ordinary movement, and diagonal steps cannot cut their corners", () => {
+  for (const chair of [...BAR_SEATS, ...GAME_CHAIRS]) {
+    expect(isWalkingFloor(chair.x, chair.y)).toBe(false);
+    for (const [dx,dy] of [[0,1],[1,0],[0,-1],[-1,0]]) {
+      expect(isValidStep(chair.x+dx,chair.y+dy,chair.x,chair.y)).toBe(false);
+    }
+  }
+  const stool = BAR_SEATS[0];
+  expect(isValidStep(stool.x-1,stool.y,stool.x,stool.y+1)).toBe(false);
+});
+
+it("both painted cabinet walls have real blocking footprints", () => {
+  for (const id of ["back-wall", "back-bar"]) {
+    const wall = FURNITURE.find(f=>f.id===id)!;
+    expect(wall).toBeDefined();
+    for (let x=wall.x;x<wall.x+wall.w;x++) for(let y=wall.y;y<wall.y+wall.h;y++) expect(isWalkingFloor(x,y)).toBe(false);
+  }
 });
 
 describe("isValidStep", () => {
   it("allows a single step onto adjacent open floor, 8 directions", () => {
-    const [fx, fy] = [5, 0]; // an open-floor origin tile, away from any furniture
+    const [fx, fy] = [5, 3]; // clear floor below the back wall
     for (const [dx, dy] of [
       [1, 0],
       [-1, 0],
@@ -105,8 +121,8 @@ describe("isValidStep", () => {
   });
 
   it("refuses a step more than one tile away, even onto open floor", () => {
-    expect(isValidStep(0, 0, 2, 0)).toBe(false);
-    expect(isValidStep(0, 0, 0, 2)).toBe(false);
+    expect(isValidStep(0, 3, 2, 3)).toBe(false);
+    expect(isValidStep(0, 3, 0, 5)).toBe(false);
   });
 
   it("refuses a zero-distance 'step'", () => {
@@ -177,14 +193,14 @@ it("all physical chairs have unique, reachable tiles, including between adjacent
     const p = queue[i];
     for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
       const x = p.x + dx, y = p.y + dy, key = `${x},${y}`;
-      if (isWalkable(x, y) && !reachable.has(key)) { reachable.add(key); queue.push({ x, y }); }
+      if (isWalkingFloor(x, y) && !reachable.has(key)) { reachable.add(key); queue.push({ x, y }); }
     }
   }
   const seen = new Set<string>();
   for (const s of [...BAR_SEATS, ...GAME_CHAIRS]) {
     const key = `${s.x},${s.y}`;
     expect(seen.has(key), `two chairs at ${key}`).toBe(false);
-    expect(reachable.has(key), `inaccessible chair at ${key}`).toBe(true);
+    expect([[1,0],[-1,0],[0,1],[0,-1]].some(([dx,dy])=>reachable.has(`${s.x+dx},${s.y+dy}`)), `inaccessible chair at ${key}`).toBe(true);
     seen.add(key);
   }
 });

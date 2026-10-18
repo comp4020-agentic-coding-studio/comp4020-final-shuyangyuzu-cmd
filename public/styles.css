@@ -383,6 +383,10 @@ button.enter-world { background:#62506e; color:#fff6e6; border-radius:10px; padd
  * drawn on the canvas (public/tavern.js's drawSpeechBubble), not DOM, so
  * it can never intercept a click. */
 .speech-bar { position:absolute; bottom:80px; left:24px; right:184px; display:flex; gap:8px; pointer-events:auto; }
+.speech-bar[hidden] { display:none; }
+.speech-toggle { position:absolute; bottom:184px; right:70px; width:44px; height:40px; padding:0; margin:0; display:grid; place-items:center; border:1px solid #d9b27b80; border-radius:13px; background:#302b2aee; color:#f3e2c7; font:bold 14px/1 Arial,sans-serif; letter-spacing:2px; box-shadow:0 3px 8px #0004; }
+.speech-toggle::after { content:''; position:absolute; right:8px; bottom:-6px; width:9px; height:9px; background:#302b2a; border-right:1px solid #d9b27b80; border-bottom:1px solid #d9b27b80; transform:skewY(-35deg); }
+.speech-toggle:hover,.speech-toggle[aria-expanded=true] { background:#64503c; }
 .speech-input { flex:1; background:#272531ed; color:#f3e2c7; border:1px solid #d9b27b40; border-radius:12px; padding:11px 14px; font-size:13px; }
 .speech-input::placeholder { color:#c0af9d; }
 button.speech-send { padding:11px 18px; margin:0; }
@@ -401,7 +405,7 @@ button.speech-send { padding:11px 18px; margin:0; }
   .avatar-preview { display:flex; align-items:center; justify-content:center; height:120px; }
   .avatar-preview canvas { width:128px; height:128px; }
   .avatar-preview span { padding:0; max-width:70px; }
-  .speech-bar { left:12px; right:12px; bottom:150px; }
+  .speech-bar { left:12px; right:12px; bottom:238px; }
   button.avatar-swatch { width:32px; height:32px; }
   .world-toast { bottom:20px; font-size:10px; padding:9px 15px; }
 }

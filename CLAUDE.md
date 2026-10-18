@@ -480,12 +480,11 @@ pointer cleared, and the next game started there is a new room row.
 same pattern: seeded once from `src/barLayout.ts`'s `BAR_SEATS` (computed
 from the furniture layout, never hand-typed coordinates), never created
 or deleted at runtime — only `occupied_by` changes. Each seat's tile is
-an ordinary, already-walkable floor tile next to its furniture, so
-sitting never needs a walkability exception: the server requires a
-patron to actually be standing on that exact tile before accepting
-`sit`, the same adjacent-step movement validates getting there as
-anywhere else. A game table's own 4 chairs are deliberately **not**
-`bar_seats` rows — sitting there is already being seat-index 0-3 in that
+an occupiable seat, not ordinary walking floor. The client paths beside
+the chair; an authenticated `sit` checks adjacency and occupancy and
+moves the patron into the seat atomically. Standing chooses adjacent
+unoccupied floor before releasing the seat. Game chairs are **not**
+`bar_seats` rows — sitting there is already a seat in that
 room's own player roster, a different, pre-existing occupancy concept
 that a second one would only duplicate.
 
@@ -777,7 +776,7 @@ Draw and hit-test dining/stool seats from BAR_SEATS, and game chairs from
 GAME_CHAIRS returned by /api/bar/layout. A chair's own tile is clickable;
 no decorative chair may imply a different tile or overlap another chair.
 Hover/focus highlights belong to the chair, not a separate visible control.
-Stools are walkable seats on their own fixture tiles. Game chairs are
+Stools occupy their own fixture tiles but block ordinary walking. Game chairs are
 fixed by colour; room player.seat continues to mean join/turn order and
 must not be changed merely to reposition an avatar. Online host approval
 still applies. Never draw an active game occupant twice as both a seated
@@ -795,3 +794,14 @@ for solo rooms. Round Vegas chairs expose integer occupancy tiles and
 continuous display centres: draw chairs, hit areas, seated figures and
 speech at the same display centres, while validating movement using the
 integer tiles. Reserved game-table geometry/art stays unchanged.
+
+## Walking floor excludes chairs and cabinet walls
+
+`isWalkingFloor` is the routing/spawn/recovery contract; every dining,
+stool and game chair is excluded even when empty. `isWalkable` only
+describes furniture-free occupiable space, including seats. Cabinet walls
+are real layout fixtures, not canvas-only decorations. Client routes and
+server moves reject chair transit and diagonal corner cutting alike.
+Preserve actual seated patrons across recovery and migration. A sit is
+an explicit, adjacent interaction; never authorize a chair shortcut as a
+normal move. The speech composer starts collapsed behind its chat icon.

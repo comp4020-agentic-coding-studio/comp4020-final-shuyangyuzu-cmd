@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { BarError, getPublicBarState, joinBar, moveBar, sitAtSeat, standFromSeat } from "../src/bar.ts";
-import { BAR_SEATS, isValidStep } from "../src/barLayout.ts";
+import { BAR_SEATS, GAME_CHAIRS, FURNITURE, isValidStep, isWalkingFloor } from "../src/barLayout.ts";
 import { openDb } from "../src/db.ts";
 
 let dir: string;
@@ -34,15 +34,30 @@ function placeAt(playerId: string, x: number, y: number): void {
   db.prepare(`UPDATE bar_players SET x = ?, y = ? WHERE id = ?`).run(x, y, playerId);
 }
 
-it("sitting requires actually standing on the seat's own tile", () => {
+it("sitting requires reaching the chair, and accepts its adjacent floor", () => {
   const seat = BAR_SEATS[0];
   const patron = joinBar(db, "Walker", "red", "warm");
   expect(() => sitAtSeat(db, patron.playerId, patron.sessionSecret, seat.id)).toThrow(BarError);
 
-  placeAt(patron.playerId, seat.x, seat.y);
+  placeAt(patron.playerId, seat.x, seat.y + 1);
   expect(() => sitAtSeat(db, patron.playerId, patron.sessionSecret, seat.id)).not.toThrow();
   const state = getPublicBarState(db);
   expect(state.players.find((p) => p.id === patron.playerId)?.seatId).toBe(seat.id);
+  expect(state.players.find((p) => p.id === patron.playerId)).toMatchObject({ x: seat.x, y: seat.y });
+  standFromSeat(db, patron.playerId, patron.sessionSecret);
+  const standing = getPublicBarState(db).players.find(p=>p.id===patron.playerId)!;
+  expect(standing.seatId).toBeNull();
+  expect(isWalkingFloor(standing.x,standing.y)).toBe(true);
+});
+
+it("the actual move action rejects empty chairs and the middle cabinet", () => {
+  const patron=joinBar(db,"No clipping","blue","warm");
+  const wall=FURNITURE.find(f=>f.id==="back-bar")!;
+  for(const obstacle of [BAR_SEATS[0],GAME_CHAIRS[0],{x:wall.x,y:wall.y}]) {
+    placeAt(patron.playerId,obstacle.x-1,obstacle.y);
+    expect(()=>moveBar(db,patron.playerId,patron.sessionSecret,obstacle.x,obstacle.y)).toThrow(BarError);
+    expect(db.prepare("SELECT x,y FROM bar_players WHERE id = ?").get(patron.playerId)).toEqual({x:obstacle.x-1,y:obstacle.y});
+  }
 });
 
 it("refuses a second patron sitting in an already-occupied seat", () => {

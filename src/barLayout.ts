@@ -12,7 +12,7 @@ export const GRID_COLS = 40;
 export const GRID_ROWS = 24;
 export const TILE_SIZE = 32;
 
-export type FurnitureKind = "counter" | "stool" | "dining_table" | "game_table" | "restroom";
+export type FurnitureKind = "counter" | "stool" | "dining_table" | "game_table" | "restroom" | "cabinet_wall";
 export type GameType = "vegas" | "texas" | "dominoes" | "blackjack";
 /** "online" — a shared table other patrons can request to join, host-
  * approved (Crit 9 phase 8). "npc" — a solo kiosk: every visitor who
@@ -232,9 +232,12 @@ const CORE_FURNITURE: readonly Furniture[] = [
 
 // World coordinates remain independent of the viewport/camera. Leave room
 // around the central tavern fixtures for future rooms and extensions.
-export const FURNITURE: readonly Furniture[] = CORE_FURNITURE.map((f) => ({
+export const FURNITURE: readonly Furniture[] = [...CORE_FURNITURE.map((f) => ({
   ...f, x: f.x + 10, y: f.y + 6,
-}));
+})),
+  { id: "back-wall", kind: "cabinet_wall", x: 0, y: 0, w: 40, h: 2, label: "Back wall" },
+  { id: "back-bar", kind: "cabinet_wall", x: 8, y: 5, w: 24, h: 2, label: "Back-bar cabinets" },
+];
 
 export const GAME_TABLES: readonly Furniture[] = FURNITURE.filter((f) => f.kind === "game_table");
 
@@ -272,11 +275,9 @@ export const GAME_CHAIRS = GAME_TABLES.flatMap((f) => f.gameType === "vegas"
  * game table's own chairs (those are a rendering of that room's existing
  * 0-3 seat index, never a new occupancy concept here; PLAN.md's
  * product-direction-update entry). Each seat's (x, y) is an ordinary,
- * already-walkable floor tile next to its furniture — sitting never
- * requires a special walkability exception; a patron just has to
- * actually be standing on that exact tile (reached by the same
- * adjacent-step movement as anywhere else) before the sit action is
- * allowed (src/bar.ts). Computed from FURNITURE rather than hand-typed
+ * occupiable tile next to its furniture. A chair is not walking floor:
+ * an explicit sit action moves the patron from adjacent floor onto it.
+ * Computed from FURNITURE rather than hand-typed
  * coordinates so a layout change can't silently drift the two apart. */
 export interface Seat {
   id: string;
@@ -322,13 +323,19 @@ export function isWalkable(x: number, y: number): boolean {
   return f === undefined || f.blocksMovement === false;
 }
 
+/** Chairs support seated occupants, but are never ordinary walking floor. */
+export function isWalkingFloor(x: number, y: number): boolean {
+  return isWalkable(x, y) && ![...BAR_SEATS, ...GAME_CHAIRS].some((s) => s.x === x && s.y === y);
+}
+
 /** A move is valid if the destination is walkable and at most one tile
  * away in each axis (8-directional single step) — no teleporting, no
  * pathfinding needed since the client only ever asks for one step. */
 export function isValidStep(fromX: number, fromY: number, toX: number, toY: number): boolean {
-  if (!isWalkable(toX, toY)) return false;
+  if (!isWalkingFloor(toX, toY)) return false;
   const dx = Math.abs(toX - fromX);
   const dy = Math.abs(toY - fromY);
+  if (dx && dy && (!isWalkingFloor(fromX, toY) || !isWalkingFloor(toX, fromY))) return false;
   return dx <= 1 && dy <= 1 && (dx !== 0 || dy !== 0);
 }
 

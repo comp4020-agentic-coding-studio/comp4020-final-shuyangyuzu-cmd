@@ -3847,3 +3847,15 @@ actual browser-tab size (16px/32px).
 
 `src/orders.ts` untouched; `crit-8`/`crit-9` tags unmoved; no `crit-10`
 tag created; `/ship` not run.
+
+## 2026-10-19 — cabinet/chair collision correction and collapsible speech composer
+
+I found in my own play-test that the middle back-bar cabinets could be walked through, empty chairs were still treated as floor, and the always-visible speech input obstructed the map. I asked the agent to correct these and place one window between each adjacent pair of cabinets on the far back wall.
+
+The root causes were separate: the two painted cabinet walls existed only on canvas, and routing only excluded furniture rectangles, not BAR_SEATS/GAME_CHAIRS. The agent added matching blocking wall fixtures to the shared layout and introduced isWalkingFloor for movement, pathfinding, spawn and recovery. All chairs now block normal walking, including diagonal corner-cutting. Chairs remain occupiable through the explicit sit/table interaction, rather than becoming transit shortcuts. Clicking a dining chair or stool paths to adjacent reachable floor; the server checks adjacency and occupancy, then seats the patron atomically. Standing first reserves adjacent free floor. Recovery/migration preserves genuinely seated patrons while relocating obstructed floor patrons. Room links, game rules and reserved game-table art are unchanged.
+
+The speech composer starts hidden. A small three-dot speech bubble above the right-hand d-pad toggles it, exposes its expanded state to accessibility tools and supports Escape to close. The public head bubbles and authenticated speech endpoint are unchanged. Phone layout keeps the expanded input above both controls.
+
+Verification so far: real local browser click-to-sit on a dining chair and bar stool, Stand up, chat expand/send/collapse. The first check encountered the suite's own temporary connected probe players blocking the route; after their normal presence expiry the same real gesture succeeded. A screenshot also exposed wide-font middle dots overflowing the icon; the agent replaced them with compact bullets. Geometry and real move-action regressions cover empty-chair/cabinet rejection, corner-cutting, adjacent sitting/standing, and reachability without routing through seats. An initial full run exposed one old assertion assuming the north edge above the restroom was open floor; it is now correctly a wall. A later run caught the startup-computed version hash being stale after edits to static files: the preview was restarted before the final run, rather than weakening the cache test. Final test/deploy results are reported after these checks; none of these agent checks is my own final acceptance.
+
+Final local checks: pnpm check passed 227/227 tests across 26 files, with typecheck included, against the freshly restarted isolated DATA_DIR instance. pnpm check:evidence passed. No real production data was used in the test suite. CI and deployment follow this commit.

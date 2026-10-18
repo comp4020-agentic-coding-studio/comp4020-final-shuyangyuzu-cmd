@@ -8,7 +8,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { installTransactionLogging } from "./actionLog.ts";
 import { findFreeTile } from "./bar.ts";
-import { BAR_SEATS, GAME_TABLES, defaultSpawn, isWalkable } from "./barLayout.ts";
+import { BAR_SEATS, GAME_TABLES, defaultSpawn, isWalkingFloor } from "./barLayout.ts";
 import type { RoomState } from "./types.ts";
 
 export function openDb(path: string): Database.Database {
@@ -33,7 +33,8 @@ export function openDb(path: string): Database.Database {
   // tile), found fresh per player so an earlier relocation in this same
   // loop is already visible to a later one's own search.
   for (const p of db.prepare("SELECT id, x, y FROM bar_players").all() as Array<{ id: string; x: number; y: number }>) {
-    if (!isWalkable(p.x, p.y)) {
+    const seated = db.prepare("SELECT 1 FROM bar_seats WHERE occupied_by = ? AND x = ? AND y = ?").get(p.id, p.x, p.y);
+    if (!seated && !isWalkingFloor(p.x, p.y)) {
       const free = findFreeTile(db, defaultSpawn(), p.id);
       db.prepare("UPDATE bar_players SET x = ?, y = ? WHERE id = ?").run(free.x, free.y, p.id);
     }

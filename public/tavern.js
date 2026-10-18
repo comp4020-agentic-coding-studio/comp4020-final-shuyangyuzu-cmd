@@ -185,11 +185,12 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     let vw=window.innerWidth,vh=window.innerHeight;
     const resize=()=>{vw=window.innerWidth;vh=window.innerHeight;const dpr=Math.min(devicePixelRatio||1,2);canvas.width=vw*dpr;canvas.height=vh*dpr;canvas.style.width=vw+'px';canvas.style.height=vh+'px';ctx.setTransform(dpr,0,0,dpr,0,0);};resize();
     window.addEventListener('resize',resize);
-    // Mirrors src/barLayout.ts's isWalkable exactly, from the same
+    // Mirrors src/barLayout.ts's isWalkingFloor, from the same
     // FURNITURE list (fetched via GET /api/bar/layout) — a fixture with
     // blocksMovement:false (the restroom) is a walkable zone marker, not
     // an obstacle, same rule server-side, so the two can't disagree.
-    function walkable(x,y) {return x>=0&&x<layout.gridCols&&y>=0&&y<layout.gridRows&&!fixtures.some(f=>f.blocksMovement!==false&&x>=f.x&&x<f.x+f.w&&y>=f.y&&y<f.y+f.h);}
+    function walkable(x,y) {return x>=0&&x<layout.gridCols&&y>=0&&y<layout.gridRows&&!fixtures.some(f=>f.blocksMovement!==false&&x>=f.x&&x<f.x+f.w&&y>=f.y&&y<f.y+f.h)&&![...(layout.seats||[]),...(layout.gameChairs||[])].some(s=>s.x===x&&s.y===y);}
+    function canStep(x,y){return walkable(x,y)&&!occupiedByOther(x,y)&&(!(x!==mine.x&&y!==mine.y)||(walkable(mine.x,y)&&walkable(x,mine.y)));}
     // Product-direction-update, part 2: no two patrons may occupy the
     // same tile. `state.players` already reports each online patron's
     // *effective* position (src/position.ts — a present game-table
@@ -215,7 +216,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       }
       if(!prev.has(end))return [];const result=[];let key=end;while(key!==start){result.unshift(key.split(',').map(Number));key=prev.get(key);}return result;
     }
-    function queueStep(dx,dy){if(!mine||moving||overlay.childElementCount)return;const x=mine.x+dx,y=mine.y+dy;if(walkable(x,y)&&!occupiedByOther(x,y)){pendingSitSeat=null;approachTarget=null;path=[[x,y]];destination={x,y};}}
+    function queueStep(dx,dy){if(!mine||moving||overlay.childElementCount)return;const x=mine.x+dx,y=mine.y+dy;if(canStep(x,y)){pendingSitSeat=null;approachTarget=null;path=[[x,y]];destination={x,y};}}
     // The one free-adjacent-tile picker behind both "click an occupied
     // floor tile" (part 2) and "click a nearby player to chat" (part 3):
     // among the up to 4 cardinal neighbours of (tx,ty) that are actually
@@ -231,21 +232,24 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         .filter(c=>walkable(c.x,c.y)&&!occupiedByOther(c.x,c.y));
       if(!candidates.length)return null;
       candidates.sort((a,b)=>(Math.abs(a.x-mine.x)+Math.abs(a.y-mine.y))-(Math.abs(b.x-mine.x)+Math.abs(b.y-mine.y)));
-      return candidates[0];
+      return candidates.find(c=>(c.x===mine.x&&c.y===mine.y)||findPath(c.x,c.y).length)||null;
     }
     function manhattan(ax,ay,bx,by){return Math.abs(ax-bx)+Math.abs(ay-by);}
     // Phase 2 (product-direction-update): "click an empty chair, walk
-    // there, sit down" is one gesture — if already standing exactly on
-    // the seat's own tile, sit immediately; otherwise path there first
+    // there, sit down" is one gesture — if already beside the chair,
+    // sit immediately; otherwise path to adjacent clear floor first
     // (ordinary, server-validated step by step) and let step() below
     // finish the gesture once it confirms arrival.
     function beginSit(seat){
       if(!mine||overlay.childElementCount)return;
-      if(mine.x===seat.x&&mine.y===seat.y){
+      if(manhattan(mine.x,mine.y,seat.x,seat.y)<=1){
+        path=[];destination=null;pendingSitSeat=null;
         post(`/seats/${seat.id}/sit`,session).then(resp=>{applyIncoming(resp);toast.textContent='Seated — use Stand up to leave the chair.';}).catch(e=>{toast.textContent=e.message||'Could not sit down';});
         return;
       }
-      pendingSitSeat=seat;path=findPath(seat.x,seat.y);destination=path.length?{x:seat.x,y:seat.y}:null;
+      const approach=findApproachTile(seat.x,seat.y);
+      if(!approach){toast.textContent='No clear space beside this chair.';return;}
+      pendingSitSeat=seat;path=findPath(approach.x,approach.y);destination=path.length?approach:null;
       if(!path.length)pendingSitSeat=null;
     }
     // Product-direction-update, part 2: clicking a player walks up to a
@@ -464,6 +468,16 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     const speechInput=el('input',{class:'speech-input',placeholder:'Say something…',maxlength:'500','aria-label':'Say something to the tavern'});
     const speechSend=el('button',{class:'hud-button speech-send'},'Send');
     const speechBar=el('div',{class:'speech-bar'},[speechInput,speechSend]);
+    speechBar.id='tavern-speech-input';speechBar.hidden=true;
+    const speechToggle=el('button',{class:'speech-toggle','aria-label':'Open chat','aria-expanded':'false','aria-controls':speechBar.id,title:'Chat'},[el('span',{'aria-hidden':'true'},'•••')]);
+    function toggleSpeech(open){
+      speechBar.hidden=!open;speechToggle.setAttribute('aria-expanded',String(open));
+      speechToggle.setAttribute('aria-label',open?'Close chat':'Open chat');
+      keys.clear();heldDirection=null;path=[];
+      if(open)speechInput.focus();else canvas.focus();
+    }
+    speechToggle.onclick=()=>toggleSpeech(speechBar.hidden);
+    speechInput.addEventListener('keydown',e=>{if(e.key==='Escape'){e.preventDefault();toggleSpeech(false);}});
     async function doSay(){
       if(!mine)return;
       const text=speechInput.value.trim();
@@ -477,7 +491,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     }
     speechSend.onclick=doSay;
     speechInput.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();doSay();}});
-    scene.appendChild(speechBar);
+    scene.append(speechBar,speechToggle);
     function chooseCharacter(){
       let color=mine?.color||'green',skin=mine?.skin||'warm';
       const preview=el('canvas',{width:'180',height:'180','aria-label':'Character preview'});
@@ -585,7 +599,8 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         pendingMoveTarget=null;if(active)applyIncoming(next);
         // Arrived at the tile a click-to-sit gesture was walking toward —
         // finish it with the real, separately-validated sit call (beginSit).
-        if(pendingSitSeat&&pendingSitSeat.x===x&&pendingSitSeat.y===y){
+        if(pendingSitSeat&&manhattan(pendingSitSeat.x,pendingSitSeat.y,x,y)===1){
+          path=[];destination=null;
           const seat=pendingSitSeat;pendingSitSeat=null;
           try{applyIncoming(await post(`/seats/${seat.id}/sit`,session));toast.textContent='Seated — use Stand up to leave the chair.';}
           catch(err){toast.textContent=err.message||'Could not sit down';}
@@ -630,6 +645,13 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       let i=0;
       for(const bottomY of [50,72,92])for(let bx=x+14;bx<x+118;bx+=20)cabinetBottle(fc,bx,bottomY,i++);
     }
+    // One window in each gap between the far-back cabinet units.
+    for(const x of [256,768,1536].map((x,i)=>(x+130+[768,1536,2112][i])/2-42)){
+      box(fc,x,18,84,78,'#302c32');box(fc,x+5,23,74,68,'#b98b60');
+      box(fc,x+10,28,64,58,'#405d70');box(fc,x+14,32,24,50,'#7393a0');
+      box(fc,x+40,28,4,58,'#bc9165');box(fc,x+10,54,64,4,'#bc9165');
+      box(fc,x-5,91,94,7,'#d0a171');
+    }
     const rug=(x,y,w,h)=>{box(fc,x,y,w,h,'#8d4545');box(fc,x+6,y+6,w-12,h-12,'#ad7054');box(fc,x+12,y+12,w-24,h-24,'#864347');for(let a=x+24;a<x+w-12;a+=24)box(fc,a,y+20,8,8,'#c39968');};
     rug(17*tile,18*tile,6*tile,3*tile);rug(5*tile,6*tile,3*tile,5*tile);
     function plant(x,y){box(fc,x-13,y-19,26,22,'#b67b58');box(fc,x-15,y-23,30,8,'#d29a6e');for(const [dx,dy] of [[-12,-42],[2,-49],[-4,-61],[14,-38]]){box(fc,x+dx-7,y+dy,14,25,'#527c5a');box(fc,x+dx-3,y+dy,4,19,'#7ca472');}}
@@ -655,7 +677,9 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     }
     for(const px of [9,31]){plant(px*tile,10*tile);plant(px*tile,17*tile);}
     for(const f of fixtures){const x=f.x*tile,y=f.y*tile,w=f.w*tile,h=f.h*tile;
-      if(f.kind==='counter'){
+      if(f.kind==='cabinet_wall'){
+        // Painted above; this shared fixture supplies its collision footprint.
+      }else if(f.kind==='counter'){
         box(fc,x-3,y+9,w+6,h,'#37282b');box(fc,x,y+5,w,h-10,'#b58153');box(fc,x,y+13,w,5,'#dfb979');box(fc,x,y+h-8,w,8,'#6b4635');
         for(let i=12;i<w;i+=64){box(fc,x+i,y+29,46,25,'#815636');box(fc,x+i+2,y+30,42,2,'#cf9c5e');}
         for(let i=32;i<w;i+=80){box(fc,x+i,y-24,9,22,'#729f80');box(fc,x+i+2,y-29,5,6,'#d8b873');box(fc,x+i+14,y-15,7,13,'#ddc6a0');}
@@ -775,7 +799,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         let dx=0,dy=0;if(keys.has('w')||keys.has('arrowup'))dy=-1;else if(keys.has('s')||keys.has('arrowdown'))dy=1;
         if(keys.has('a')||keys.has('arrowleft'))dx=-1;else if(keys.has('d')||keys.has('arrowright'))dx=1;
         if(heldDirection){dx=heldDirection.dx;dy=heldDirection.dy;}
-        if(dx||dy){path=[];pendingSitSeat=null;approachTarget=null;if(walkable(mine.x+dx,mine.y+dy)&&!occupiedByOther(mine.x+dx,mine.y+dy)){lastTime=now;step(mine.x+dx,mine.y+dy);}}
+        if(dx||dy){path=[];pendingSitSeat=null;approachTarget=null;if(canStep(mine.x+dx,mine.y+dy)){lastTime=now;step(mine.x+dx,mine.y+dy);}}
         else if(path.length){
           // A seat this patron is walking toward can be taken by someone
           // else mid-journey — stop the attempt and say so rather than

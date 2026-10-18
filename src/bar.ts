@@ -8,7 +8,7 @@
 import type Database from "better-sqlite3";
 import { randomBytes, randomUUID } from "node:crypto";
 import { logAction, markIdentityVerified, transact } from "./actionLog.ts";
-import { BAR_SEATS, defaultSpawn, FURNITURE, GRID_COLS, GRID_ROWS, isValidStep, isWalkable } from "./barLayout.ts";
+import { BAR_SEATS, defaultSpawn, FURNITURE, GRID_COLS, GRID_ROWS, isValidStep, isWalkingFloor } from "./barLayout.ts";
 import { isConnected } from "./presence.ts";
 import { effectivePosition } from "./position.ts";
 
@@ -104,7 +104,7 @@ export function findFreeTile(
   excludePlayerId: string,
   now = new Date(),
 ): { x: number; y: number } {
-  const free = (x: number, y: number) => isWalkable(x, y) && !isTileOccupiedByOther(db, x, y, excludePlayerId, now);
+  const free = (x: number, y: number) => isWalkingFloor(x, y) && !isTileOccupiedByOther(db, x, y, excludePlayerId, now);
   if (free(near.x, near.y)) return near;
   const maxRadius = GRID_COLS + GRID_ROWS;
   for (let radius = 1; radius <= maxRadius; radius++) {
@@ -224,7 +224,8 @@ export function rejoinBar(db: Database.Database, playerId: string, sessionSecret
       | undefined;
     if (row) {
       const now = new Date();
-      if (!isWalkable(row.x, row.y) || isTileOccupiedByOther(db, row.x, row.y, playerId, now)) {
+      const seated = db.prepare(`SELECT 1 FROM bar_seats WHERE occupied_by = ? AND x = ? AND y = ?`).get(playerId, row.x, row.y);
+      if ((!seated && !isWalkingFloor(row.x, row.y)) || isTileOccupiedByOther(db, row.x, row.y, playerId, now)) {
         const free = findFreeTile(db, row, playerId, now);
         db.prepare(`UPDATE bar_players SET x = ?, y = ? WHERE id = ?`).run(free.x, free.y, playerId);
       }
@@ -337,9 +338,9 @@ export function getSeatLayout(): PublicSeat[] {
   return BAR_SEATS.map((s) => ({ id: s.id, furnitureId: s.furnitureId, x: s.x, y: s.y }));
 }
 
-/** Sitting requires actually standing on the seat's own tile — ordinary
- * movement gets you there, so there's no separate walkability exception
- * to maintain (src/barLayout.ts's BAR_SEATS doc comment). One real seat
+/** Sitting moves a patron from adjacent floor into the chair atomically.
+ * Chairs are not walking shortcuts. Existing seated coordinates remain
+ * accepted for idempotent re-clicks and legacy positions. One real seat
  * at a time per patron; sitting back down in the same seat you're
  * already in is a harmless no-op, not an error (re-clicking your own
  * chair shouldn't surface a confusing refusal). */
@@ -353,8 +354,8 @@ export function sitAtSeat(db: Database.Database, playerId: string, sessionSecret
       | { x: number; y: number; nickname: string; current_table_id: string | null }
       | undefined;
     if (!player) throw new BarError("no such bar identity", "player_not_found", 404);
-    if (player.x !== seat.x || player.y !== seat.y) {
-      throw new BarError("walk to the seat before sitting down", "not_at_seat", 409);
+    if (Math.abs(player.x - seat.x) + Math.abs(player.y - seat.y) > 1) {
+      throw new BarError("walk beside the seat before sitting down", "not_at_seat", 409);
     }
 
     const mine = db.prepare(`SELECT id FROM bar_seats WHERE occupied_by = ?`).get(playerId) as
@@ -370,7 +371,9 @@ export function sitAtSeat(db: Database.Database, playerId: string, sessionSecret
       | undefined;
     if (!row) throw new BarError("no such seat", "seat_not_found", 404);
     if (row.occupied_by) throw new BarError("someone is already sitting there", "seat_taken", 409);
+    if (isTileOccupiedByOther(db, seat.x, seat.y, playerId)) throw new BarError("someone is already there", "seat_taken", 409);
 
+    db.prepare(`UPDATE bar_players SET x = ?, y = ? WHERE id = ?`).run(seat.x, seat.y, playerId);
     db.prepare(`UPDATE bar_seats SET occupied_by = ? WHERE id = ?`).run(playerId, seatId);
 
     // Sitting at a real seat while bound to a game table means stepping
@@ -402,6 +405,13 @@ export function sitAtSeat(db: Database.Database, playerId: string, sessionSecret
 export function standFromSeat(db: Database.Database, playerId: string, sessionSecret: string): void {
   requireBarSession(db, playerId, sessionSecret);
   transact(db, () => {
+    const seat = db.prepare(`SELECT x, y FROM bar_seats WHERE occupied_by = ?`).get(playerId) as { x: number; y: number } | undefined;
+    if (seat) {
+      const exit = [[0, 1], [-1, 0], [1, 0], [0, -1]].map(([dx, dy]) => ({ x: seat.x + dx, y: seat.y + dy }))
+        .find((p) => isWalkingFloor(p.x, p.y) && !isTileOccupiedByOther(db, p.x, p.y, playerId));
+      if (!exit) throw new BarError("the space beside this chair is occupied", "seat_exit_blocked", 409);
+      db.prepare(`UPDATE bar_players SET x = ?, y = ? WHERE id = ?`).run(exit.x, exit.y, playerId);
+    }
     const row = db.prepare(`SELECT nickname FROM bar_players WHERE id = ?`).get(playerId) as
       | { nickname: string }
       | undefined;
