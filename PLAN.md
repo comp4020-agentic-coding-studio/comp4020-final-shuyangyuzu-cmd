@@ -3773,3 +3773,77 @@ the repo. The classic online lobby was also opened through its actual
 UI: it uses the wood theme, shows /5 and retains Copy. Active online and
 solo play share the same board component. These are agent checks, not
 student acceptance. CI and production verification follow publication.
+
+# Back-bar art, table spacing, English renaming, favicon (2026-10-19)
+
+Four small presentation fixes, requested by the student after seeing the
+round-table layout live: two of the four (the back wall and the table
+aisle) were real play-testing findings, not cosmetic nitpicks.
+
+**Back-bar cabinet instead of windows.** Both decorative wall strips
+behind the serving counter — the outer brick wall at the map's far north
+edge, and a second, closer "room" wall directly above the counter's own
+row — had four windows each. A window directly behind a bar counter made
+no architectural sense; the student's own screenshot flagged it
+specifically (`public/tavern.js`'s two separate wall-painting blocks, one
+near the top of `createTavern`'s floor-rendering code, one further down
+in "the original room is dressed as a room"). Both are replaced with a
+back-bar liquor-cabinet motif: a dark wood frame, interior shelves, and
+rows of small bottles in the same colour palette the counter's own
+bottle silhouettes already use — reusing an existing visual language
+rather than inventing a new one, still original code-drawn `box()`
+primitives, no copied asset.
+
+**A real walkway between online Vegas tables.** The online row's five
+columns (`src/barLayout.ts`) were spaced at the same gap (2 tiles between
+table rectangles) the row used before the 5th chair existed. Once each
+table grew a 5-chair ring extending ~1.5 tiles past its own rectangle,
+that gap put adjacent tables' outermost chairs on directly-adjacent
+tiles — a patron walking the row would step through an occupied chair
+rather than around it. This was found by the student's own play-testing,
+not by any existing test: a walkable tile next to another walkable tile
+isn't a collision, it's just an uncomfortably tight aisle, and nothing in
+`spec/barLayout.test.ts` was checking aisle width specifically. Re-spaced
+to the same 3/4/3 gap pattern the NPC row already used for the same
+reason (confirmed via direct coordinate computation across every
+round/square table-shape pairing before changing anything), which runs
+past the dining row's own right edge — a deliberate width increase, not
+a layout bug. `spec/barLayout.test.ts`'s old boundary test, which
+asserted both rows end on the dining row's exact right edge, is split
+into two: a left-edge check (still true for both rows) and a new,
+explicit per-pair walkway check for the online row (`GAME_CHAIRS`-based,
+asserting at least 1 clear tile between every adjacent table's chairs).
+
+**English branding throughout.** Every user-visible "拉斯维加斯" —
+`public/index.html`'s `<title>`, `src/markdown.ts`'s `/readme/` page
+title, `public/app.js`'s nine in-game `<h1>`s, `public/tavern.js`'s HUD
+brand mark, the character-creation dialog's eyebrow text, and the
+canvas-drawn sign above the bar counter — is now "Las Vegas". The
+favicon's own internal `<title>` (not user-visible, but kept consistent)
+and README.md's own H1 are updated the same way. No rule, route, or test
+depended on the Chinese text appearing literally (confirmed by grep
+before changing it) — this is a pure branding pass.
+
+**A clinking-glasses favicon.** `public/favicon.svg`'s old dice motif is
+replaced with two tilted cocktail/martini glasses (a simple triangular
+V-cup silhouette, chosen specifically because it stays legible at an
+actual 16-32px favicon size — a first attempt with a more detailed
+tapered-flute shape was checked by rendering the SVG in a real browser at
+both 128px and 16/32px and found to blur into an unreadable smudge at
+tab size, which is why the simpler silhouette was kept). Original
+SVG, drawn in code, not copied from any external icon set.
+
+Verification: `pnpm check` (224/224 tests — 222 prior plus the two
+replacing the old boundary assertion) and `pnpm check:evidence`, both
+green, run once after all four changes, against an isolated local
+`DATA_DIR`. Manual browser verification (Playwright against the locally
+running server, restarted after each code change to avoid checking a
+stale build) confirmed: no window art remains anywhere behind the
+counter at either wall strip; a visible walkway now separates every pair
+of adjacent online tables; "Las Vegas" renders correctly in the HUD
+brand mark, the join dialog, and the in-game header; and the favicon
+renders as two recognisable clinking glasses at both preview size and
+actual browser-tab size (16px/32px).
+
+`src/orders.ts` untouched; `crit-8`/`crit-9` tags unmoved; no `crit-10`
+tag created; `/ship` not run.

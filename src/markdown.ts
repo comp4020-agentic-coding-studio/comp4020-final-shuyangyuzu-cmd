@@ -14,7 +14,7 @@ export function renderReadme(readmePath = "README.md"): string {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>拉斯维加斯 · About</title>
+    <title>Las Vegas · About</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=${BUILD_VERSION}" />
     <link rel="stylesheet" href="/styles.css?v=${BUILD_VERSION}" />
   </head>

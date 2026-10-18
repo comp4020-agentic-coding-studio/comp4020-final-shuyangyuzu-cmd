@@ -89,6 +89,18 @@ const CORE_FURNITURE: readonly Furniture[] = [
   // ids that are still in GAME_TABLES, it doesn't remove ones that
   // aren't), so any room that was ever bound to it keeps existing,
   // reachable by its own code, exactly as a disbanded room already is.
+  // The online row's columns were originally packed at gap=2 (the same
+  // spacing the pre-5-chair layout used), which left zero clear floor
+  // tiles between one table's own outermost chair and its neighbour's —
+  // a patron walking the row would step through an occupied chair rather
+  // than around it (found by the student's own play-testing, not caught
+  // by spec/barLayout.test.ts's collision/reachability checks, since a
+  // *walkable* tile immediately next to another *walkable* tile isn't a
+  // collision — it's just an uncomfortably tight aisle). Re-spaced to the
+  // same 3/4/3 gap pattern the NPC row below already uses for the same
+  // reason, which leaves at least 1 clear tile beside every chair ring
+  // for every table-shape pairing (round or square), verified by direct
+  // coordinate computation before changing this.
   {
     id: "vegas-1",
     kind: "game_table",
@@ -104,7 +116,7 @@ const CORE_FURNITURE: readonly Furniture[] = [
   {
     id: "vegas-2",
     kind: "game_table",
-    x: 5,
+    x: 6,
     y: 9,
     w: 2,
     h: 2,
@@ -116,7 +128,7 @@ const CORE_FURNITURE: readonly Furniture[] = [
   {
     id: "texas-1",
     kind: "game_table",
-    x: 9,
+    x: 12,
     y: 9,
     w: 2,
     h: 2,
@@ -128,7 +140,7 @@ const CORE_FURNITURE: readonly Furniture[] = [
   {
     id: "dominoes-1",
     kind: "game_table",
-    x: 13,
+    x: 17,
     y: 9,
     w: 2,
     h: 2,
@@ -140,7 +152,7 @@ const CORE_FURNITURE: readonly Furniture[] = [
   {
     id: "blackjack-1",
     kind: "game_table",
-    x: 17,
+    x: 22,
     y: 9,
     w: 2,
     h: 2,

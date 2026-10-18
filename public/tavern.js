@@ -127,7 +127,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     }},'Stand up');
     standBtn.style.display='none';
     const hud=el('header',{class:'world-hud'},[
-      el('div',{class:'world-brand'},[el('span',{class:'brand-mark'},'◆'),el('div',{},[el('strong',{},'拉斯维加斯'),el('small',{},'A little place to be together')])]),
+      el('div',{class:'world-brand'},[el('span',{class:'brand-mark'},'◆'),el('div',{},[el('strong',{},'Las Vegas'),el('small',{},'A little place to be together')])]),
       el('div',{class:'hud-actions'},[online,standBtn,el('button',{class:'hud-button',onclick:()=>{path=[];chooseCharacter();}},'Your character'),el('button',{class:'hud-button',onclick:()=>openGames()},'Join by code')]),
     ]);
     const directions=el('div',{class:'world-dpad','aria-label':'Movement controls'});
@@ -491,7 +491,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         try{const appearance={nickname:input.value.trim(),color,skin};let resp;if(session){resp=await post('/appearance',{...session,...appearance});applyIncoming(resp);session={...session,...appearance};}else{resp=await post('/join',appearance);session={...resp,...appearance};}activeSeat=resp.activeSeat??null;try{localStorage.setItem(sessionKey,JSON.stringify(session));}catch{}overlay.replaceChildren();applyIncoming(await read('/state'));begin();}
         catch(err){error.textContent=err.message||'Could not enter';enter.disabled=false;}
       }},[
-        el('p',{class:'eyebrow'},'拉斯维加斯 · OPEN ALL EVENING'),el('h1',{},'Come as you are.'),el('p',{class:'dialog-subtitle'},'Make yourself a little character. Your friends are inside.'),
+        el('p',{class:'eyebrow'},'Las Vegas · OPEN ALL EVENING'),el('h1',{},'Come as you are.'),el('p',{class:'dialog-subtitle'},'Make yourself a little character. Your friends are inside.'),
         el('div',{class:'avatar-editor'},[el('div',{class:'avatar-preview'},[preview,el('span',{},'YOUR LITTLE SELF')]),el('div',{class:'avatar-options'},[
           el('label',{for:'patron-nickname'},'What should we call you?'),input,
           el('span',{class:'option-label'},'Clothes'),makeChoices(colors,'Clothes',v=>color=v),
@@ -611,13 +611,24 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       box(fc,px+((y%2)*21),py,2,tile,'#573c30');
       box(fc,px+12,py+13,23,1,'#ffffff09');box(fc,px+31,py+47,20,1,'#38281b20');
     }
-    // Brick back wall, beams, windows and bottles.
+    // Brick back wall, beams, and a back-bar liquor cabinet.
     box(fc,0,0,worldW,128,'#473943');
     for(let y=0;y<4;y++)for(let x=0;x<40;x++){box(fc,x*64+(y%2)*32,y*24,60,21,['#67504a','#5e4848','#71564a'][(x+y)%3]);}
     box(fc,0,96,worldW,32,'#332a31');box(fc,0,98,worldW,5,'#a07a4d');
+    // Behind the serving counter is a back-bar cabinet/kitchen, not a
+    // window to the outside — a window there made no architectural sense
+    // (the counter already fills this wall). Dark wood frame around two
+    // interior shelves lined with bottles, matching the counter's own
+    // bottle silhouettes just below it.
+    const cabinetBottle=(c,x,bottomY,i)=>{
+      const body=['#729f80','#9c6848','#b78a59','#5e7d9e','#8a594c'][i%5];
+      box(c,x,bottomY-16,9,16,body);box(c,x+2,bottomY-22,5,7,'#d8b873');box(c,x+1,bottomY-24,7,3,'#3b2f29');
+    };
     for(const x of [256,768,1536,2112]){
-      box(fc,x,24,130,74,'#cda35f');box(fc,x+7,30,116,62,'#29394c');box(fc,x+63,30,7,62,'#cda35f');box(fc,x+7,59,116,5,'#cda35f');
-      box(fc,x+12,34,42,4,'#6b8593');
+      box(fc,x,24,130,74,'#6b4635');box(fc,x+6,30,118,62,'#2e211d');
+      box(fc,x+6,50,118,3,'#8a5f3f');box(fc,x+6,72,118,3,'#8a5f3f');
+      let i=0;
+      for(const bottomY of [50,72,92])for(let bx=x+14;bx<x+118;bx+=20)cabinetBottle(fc,bx,bottomY,i++);
     }
     const rug=(x,y,w,h)=>{box(fc,x,y,w,h,'#8d4545');box(fc,x+6,y+6,w-12,h-12,'#ad7054');box(fc,x+12,y+12,w-24,h-24,'#864347');for(let a=x+24;a<x+w-12;a+=24)box(fc,a,y+20,8,8,'#c39968');};
     rug(17*tile,18*tile,6*tile,3*tile);rug(5*tile,6*tile,3*tile,5*tile);
@@ -629,14 +640,26 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     box(fc,wallX,wallY,wallW,88,'#4b363d');
     for(let row=0;row<3;row++)for(let col=0;col<24;col++)box(fc,wallX+col*tile+(row%2)*24,wallY+row*24,60,20,['#705147','#634844','#78584a'][(row+col)%3]);
     box(fc,wallX,wallY+72,wallW,16,'#322b32');box(fc,wallX,wallY+73,wallW,4,'#ba8a57');
-    for(const wx of [11,17,24,29]){box(fc,wx*tile,wallY+10,90,53,'#b88b55');box(fc,wx*tile+6,wallY+16,78,40,'#303d51');box(fc,wx*tile+42,wallY+16,6,40,'#b88b55');box(fc,wx*tile+6,wallY+35,78,4,'#b88b55');}
+    // This inner wall strip sits directly above the serving counter —
+    // originally four more windows, which made no architectural sense
+    // right behind a bar counter (the student's own screenshot flagged
+    // this). Replaced with small hanging shelf/cabinet units, matching
+    // the back-bar cabinet motif used on the outer brick wall above.
+    for(const wx of [11,17,24,29]){
+      box(fc,wx*tile,wallY+10,90,53,'#6b4635');box(fc,wx*tile+6,wallY+16,78,40,'#2e211d');
+      box(fc,wx*tile+6,wallY+30,78,3,'#8a5f3f');
+      for(let i=0,bx=wx*tile+14;bx<wx*tile+84;bx+=20,i++){
+        const body=['#729f80','#9c6848','#b78a59','#5e7d9e'][i%4];
+        box(fc,bx,wallY+40,8,13,body);box(fc,bx+1,wallY+34,5,6,'#d8b873');
+      }
+    }
     for(const px of [9,31]){plant(px*tile,10*tile);plant(px*tile,17*tile);}
     for(const f of fixtures){const x=f.x*tile,y=f.y*tile,w=f.w*tile,h=f.h*tile;
       if(f.kind==='counter'){
         box(fc,x-3,y+9,w+6,h,'#37282b');box(fc,x,y+5,w,h-10,'#b58153');box(fc,x,y+13,w,5,'#dfb979');box(fc,x,y+h-8,w,8,'#6b4635');
         for(let i=12;i<w;i+=64){box(fc,x+i,y+29,46,25,'#815636');box(fc,x+i+2,y+30,42,2,'#cf9c5e');}
         for(let i=32;i<w;i+=80){box(fc,x+i,y-24,9,22,'#729f80');box(fc,x+i+2,y-29,5,6,'#d8b873');box(fc,x+i+14,y-15,7,13,'#ddc6a0');}
-        fc.font='bold 17px monospace';fc.textAlign='center';fc.fillStyle='#e4bf7e';fc.fillText('拉斯维加斯',x+w/2,y-43);
+        fc.font='bold 17px monospace';fc.textAlign='center';fc.fillStyle='#e4bf7e';fc.fillText('Las Vegas',x+w/2,y-43);
       }else if(f.kind==='stool'){
         // Drawn below from the same seat tile the player can click.
       }else if(f.kind==='restroom'){

@@ -209,12 +209,40 @@ it("every game table has exactly COLORS.length chairs, one per color, mutually e
   }
 });
 
-it("both game-table rows span exactly the dining-table boundaries", () => {
+it("both game-table rows start at the dining-table row's own left edge", () => {
+  // Both rows still line up with the dining row on the left. The NPC
+  // row still ends exactly on that same right edge too — the online
+  // row no longer does, see the next test for why.
   const dining = FURNITURE.filter((f) => f.kind === "dining_table");
+  const diningLeft = Math.min(...dining.map((f) => f.x));
   for (const mode of ["online", "npc"]) {
     const row = GAME_TABLES.filter((f) => f.tableMode === mode);
-    expect(Math.min(...row.map((f) => f.x))).toBe(Math.min(...dining.map((f) => f.x)));
-    expect(Math.max(...row.map((f) => f.x + f.w))).toBe(Math.max(...dining.map((f) => f.x + f.w)));
+    expect(Math.min(...row.map((f) => f.x))).toBe(diningLeft);
+  }
+  const npcRow = GAME_TABLES.filter((f) => f.tableMode === "npc");
+  expect(Math.max(...npcRow.map((f) => f.x + f.w))).toBe(Math.max(...dining.map((f) => f.x + f.w)));
+});
+
+it("the online row's own columns leave a real walkway beside every chair ring, round or square", () => {
+  // The online row was originally packed at the same tight gap as the
+  // dining row (gap=2 between table rectangles), which left zero clear
+  // floor tiles beside a chair ring on either a round (5-chair) or
+  // square (4-chair) table — found by the student's own play-testing,
+  // not by this file's existing collision/reachability checks (a
+  // walkable tile right next to another walkable tile isn't a
+  // collision, it's just an uncomfortably tight aisle no automated
+  // check here was built to catch). Re-spaced to the same 3/4/3 gap
+  // pattern the NPC row already used for the same reason, which runs
+  // past the dining row's own right edge — a real, deliberate width
+  // increase, not a bug, which is why the previous test no longer
+  // checks the online row's right edge against dining's.
+  const online = GAME_TABLES.filter((f) => f.tableMode === "online").sort((a, b) => a.x - b.x);
+  for (let i = 0; i < online.length - 1; i++) {
+    const a = online[i], b = online[i + 1];
+    const chairsOf = (t: typeof a) => GAME_CHAIRS.filter((c) => c.tableId === t.id);
+    const aMaxX = Math.max(...chairsOf(a).map((c) => c.x));
+    const bMinX = Math.min(...chairsOf(b).map((c) => c.x));
+    expect(bMinX - aMaxX - 1, `${a.id} and ${b.id} have no walkway between their chairs`).toBeGreaterThanOrEqual(1);
   }
 });
 
