@@ -3926,3 +3926,98 @@ with any chair; dining-chair sit/stand-up, the speech composer's
 collapse/expand toggle, and a game-table chair click (opening the
 join/choose-colour flow) were all re-exercised after the fix and
 confirmed still working, with no console errors.
+
+## Crit 10 closeout rehearsal (2026-10-19) — two genuinely isolated browser identities, against the real live deployment
+
+The prior Crit 10 rehearsal entry (above, 2026-10-16) was explicit that
+"two real Chrome browser profiles were not available to this session,"
+and substituted plain HTTP requests from one shell instead — an honest
+limitation, not a substitute for the real thing. This entry supersedes
+that gap, not by claiming a human two-profile demonstration happened
+(it did not — that is still the student's own job at the actual crit),
+but by using a mechanism this session genuinely does have: two separate
+Playwright `BrowserContext`s. Each context has its own cookie jar and
+its own `localStorage` partition — exactly the isolation property "a
+new Chrome profile" provides, confirmed directly against this app's own
+code (`public/app.js`'s `saveSession`/`localStorage.getItem` is the
+entire identity mechanism; nothing about it distinguishes "a different
+Chrome profile" from "a different Playwright context" at the browser-API
+level). This is a real improvement on the prior entry's pure-HTTP
+substitute — a genuine browser renders the page, runs the client's own
+JS, and stores the session the same way a human's browser would — but
+it is still not two human presenters each driving their own physical
+machine/window, and this record says so plainly rather than overstating
+it. The actual two-person rehearsal the crit itself requires remains the
+student's own job at the session.
+
+Run against the real, live, deployed app
+(`https://comp4020-final-shuyangyuzu-cmd.fly.dev`, build `c9ed8de8a9`,
+confirmed matching the pushed commit's own content hash before this
+rehearsal started), with `mise exec -- flyctl logs` tailed live in a
+separate monitor the entire time. Two clearly-named throwaway identities,
+`Crit10RehearsalAapp` and `Crit10RehearsalBapp` (earlier attempts in the
+same session used similarly-named throwaway identities — `Crit10RehearsalA9`,
+`...B9`, etc. — each abandoned room from a failed script attempt expired
+and closed on its own via the existing lazy lobby-grace sweep, confirmed
+by `player_timed_out`/`room_closed` lines actually appearing in the log
+for those abandoned attempts, which is itself a second piece of evidence
+the sweep works under real conditions, not just in tests). A real
+patron, nickname `fsy`, was also active in the live bar throughout this
+session's work today — their own moves/sits are visible in the same log
+stream and were left completely untouched; nothing in this rehearsal
+created, joined, or disbanded anything of theirs.
+
+The actual sequence, every line below confirmed arriving live in the
+tailed log, not reconstructed afterward:
+
+1. A and B join the bar — distinct `join_bar` lines, correctly
+   distinguishable short ids (`a7127904` vs `ff908184`) despite similarly
+   patterned nicknames.
+2. A walks to Vegas Online #1 and starts a game (becomes host) —
+   `room_created` then `create_table`, the second line pairing A's bar
+   id with the room player id it just became, the exact correlation
+   `ADR-access-control.md` describes.
+3. B walks to the same table and requests to join as blue (the bar
+   world's own table-join flow, not a direct room-URL navigation, which
+   is a different, legacy direct-join path) — `join_requested` then
+   `join_table`, `"pending":true`, correctly not yet a seat.
+4. **B attempts to approve their own pending request** (self-admission,
+   never the host) — rejected `not_host`, attributed to B's own room id
+   (`4d39a594`), the exact critical-finding condition the crit's brief
+   asks to be demonstrated failing.
+5. **B attempts to roll before the game has even started** (wrong
+   phase) — rejected `wrong_phase`, attributed to B's own room id,
+   visible from an earlier run in the same session (`70971515`).
+6. **B attempts to impersonate A**, submitting A's own `playerId` with
+   B's own `sessionSecret` — rejected `unauthorized` with `"verified":false`,
+   attributed to the *claimed* id (A's), carrying no nickname since
+   nothing about the attempt was ever confirmed as genuinely A — visible
+   from the same earlier run.
+7. A, the real host, approves B — `join_approved`, attributed to A's own
+   room id, naming the approved player and colour.
+8. A disbands the rehearsal room — `room_disbanded`, cleanup confirmed
+   logged, same tick.
+
+No line in this entire sequence contained `sessionSecret` or any
+generated secret value. Every rejection (steps 4-6) was attributable
+purely from the log line, with no need to inspect either identity's own
+response body or screen — the actual thing the crit's "narrate from
+logs" requirement asks for. The `say` action (exercised in an earlier
+run this session, `Crit10RehearsalA2` speaking in the bar) logged only
+message `length`, never its text — re-confirmed, not newly found.
+
+**What this rehearsal does and doesn't establish, stated plainly:** it
+proves the server-side logic and logging are correct under genuinely
+separate browser storage/identity, driven by real client-side JS in a
+real rendered page — a stronger check than the prior entry's bare HTTP
+requests. It does not prove a human presenter can narrate this smoothly
+live, under the actual crit's time pressure, watching two real
+classmates on two real machines — that is a presentation skill this
+automated rehearsal cannot exercise or substitute for, and remains the
+student's own job. The shortest real pre-crit check, if time allows: two
+people (or one person with a second device/an incognito window) open
+the live URL, one creates a table, the other requests to join, the first
+approves, both ready up and start — while a third terminal tails
+`mise exec -- flyctl logs -a comp4020-final-shuyangyuzu-cmd` and the
+presenter practises reading the actor/action/outcome fields aloud
+without looking at either screen.
