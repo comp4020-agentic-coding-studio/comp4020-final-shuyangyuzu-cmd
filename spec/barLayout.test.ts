@@ -115,6 +115,28 @@ describe("isValidStep", () => {
 });
 
 describe("BAR_SEATS (Phase 2: real dining/stool seating)", () => {
+  it("Vegas chairs are evenly distributed around each round table with distinct hit areas", () => {
+    for (const table of GAME_TABLES.filter((t) => t.gameType === "vegas")) {
+      const chairs = GAME_CHAIRS.filter((s) => s.tableId === table.id);
+      expect(chairs).toHaveLength(5);
+      for (let i = 0; i < chairs.length; i++) {
+        const chair = chairs[i] as typeof chairs[number] & { displayX: number; displayY: number };
+        const angle = (-90 + i * 72) * Math.PI / 180;
+        expect(chair.displayX).toBeCloseTo(table.x + table.w / 2 + 1.55 * Math.cos(angle));
+        expect(chair.displayY).toBeCloseTo(table.y + table.h / 2 + 1.55 * Math.sin(angle));
+        expect(chair.x).toBe(Math.floor(chair.displayX));
+        expect(chair.y).toBe(Math.floor(chair.displayY));
+      }
+    }
+    const centres = GAME_CHAIRS.map((s) => ({
+      x: "displayX" in s ? s.displayX as number : s.x + .5,
+      y: "displayY" in s ? s.displayY as number : s.y + .5,
+    }));
+    for (let i = 0; i < centres.length; i++) for (let j = i + 1; j < centres.length; j++) {
+      expect(Math.abs(centres[i].x - centres[j].x) < 1 && Math.abs(centres[i].y - centres[j].y) < 1,
+        `chair hit areas ${i} and ${j} overlap`).toBe(false);
+    }
+  });
   it("each painted stool is its actual clickable, walkable seat tile", () => {
     for (const f of FURNITURE.filter((f) => f.kind === "stool")) {
       expect(BAR_SEATS.find((s) => s.furnitureId === f.id)).toMatchObject({ x: f.x, y: f.y });

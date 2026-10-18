@@ -117,6 +117,8 @@ export interface PublicCasino {
 }
 
 export interface PublicState {
+  /** Solo NPC rooms have no invitation controls. Derived from creation history. */
+  solo?: boolean;
   code: string;
   hostPlayerId: string;
   /** Set once the room has closed (host disbanded it, or its last player

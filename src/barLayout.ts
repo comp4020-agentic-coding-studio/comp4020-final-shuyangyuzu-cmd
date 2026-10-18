@@ -241,7 +241,14 @@ export const GAME_TABLES: readonly Furniture[] = FURNITURE.filter((f) => f.kind 
 // furniture rectangle covers it. Checked against every real table
 // (vegas-1/2, vegas-npc-1, and all 6 reserved slots, for layout
 // consistency) by direct coordinate computation before adding this.
-export const GAME_CHAIRS = GAME_TABLES.flatMap((f) => [
+export const GAME_CHAIRS = GAME_TABLES.flatMap((f) => f.gameType === "vegas"
+  ? ["red", "blue", "green", "yellow", "purple"].map((color, i) => {
+    const angle = (-90 + i * 72) * Math.PI / 180;
+    const displayX = f.x + f.w / 2 + 1.55 * Math.cos(angle);
+    const displayY = f.y + f.h / 2 + 1.55 * Math.sin(angle);
+    return { tableId: f.id, color, x: Math.floor(displayX), y: Math.floor(displayY), displayX, displayY };
+  })
+  : [
   { tableId: f.id, color: "red", x: f.x - 1, y: f.y },
   { tableId: f.id, color: "blue", x: f.x + f.w, y: f.y },
   { tableId: f.id, color: "green", x: f.x - 1, y: f.y + 1 },

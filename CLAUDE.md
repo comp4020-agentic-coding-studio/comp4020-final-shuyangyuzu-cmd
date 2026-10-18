@@ -784,3 +784,14 @@ still applies. Never draw an active game occupant twice as both a seated
 figure and a standing bar patron. Layout migrations preserve room links,
 move occupied chairs with their patrons, and relocate obstructed floor
 positions without deleting identities or game progress.
+
+## Vegas tabletop presentation
+
+Online and solo games share the physical six-casino ring presentation.
+Use real server bills/dice; keep all action and server-authority rules.
+Solo room status comes from its creation history, not a guess based on
+nicknames or how many NPCs are currently present. Hide invitations only
+for solo rooms. Round Vegas chairs expose integer occupancy tiles and
+continuous display centres: draw chairs, hit areas, seated figures and
+speech at the same display centres, while validating movement using the
+integer tiles. Reserved game-table geometry/art stays unchanged.

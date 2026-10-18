@@ -650,6 +650,14 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         box(fc,doorX,y+h-6,28,10,'#43302d');box(fc,doorX+4,y+h-4,20,6,'#1c1620');
         box(fc,x+w/2-34,y-18,68,16,'#37282b');box(fc,x+w/2-30,y-15,60,10,'#e4bf7e');
         fc.font='bold 10px monospace';fc.textAlign='center';fc.fillStyle='#352b2d';fc.fillText('RESTROOM',x+w/2,y-7);
+      }else if(f.kind==='game_table'&&f.gameType==='vegas'){
+        const cx=x+w/2,cy=y+h/2,r=w/2;
+        fc.beginPath();fc.ellipse(cx,cy+10,r+5,r*.86,0,0,Math.PI*2);fc.fillStyle='#392822';fc.fill();
+        fc.beginPath();fc.arc(cx,cy,r,0,Math.PI*2);fc.fillStyle='#b78a59';fc.fill();
+        fc.beginPath();fc.arc(cx,cy,r-9,0,Math.PI*2);fc.fillStyle='#396c58';fc.fill();
+        fc.beginPath();fc.arc(cx,cy,r-14,0,Math.PI*2);fc.strokeStyle='#bcad7770';fc.lineWidth=2;fc.stroke();
+        fc.fillStyle='#eadcc5';for(let i=0;i<3;i++){box(fc,cx-28+i*21,cy-21,15,21,'#eadcc5');box(fc,cx-23+i*21,cy-14,5,5,'#8a594c');}
+        fc.font='bold 10px monospace';fc.textAlign='center';fc.fillStyle='#f7e6c6';fc.fillText(f.label,cx,cy+28);
       }else{
         box(fc,x-5,y+12,w+10,h,'#382a2d');box(fc,x-6,y,w+12,h,'#b78a59');box(fc,x,y+6,w,h-12,f.kind==='game_table'?(f.available?'#487c69':'#665969'):'#9c6848');
         box(fc,x+6,y+12,w-12,3,'#ffffff19');
@@ -667,7 +675,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       box(c,x+14,y+29,36,3,'#e1b985');
     }
     for(const s of layout.seats||[])chair(fc,s.x*tile,s.y*tile);
-    for(const s of layout.gameChairs||[])chair(fc,s.x*tile,s.y*tile,colors[s.color]);
+    for(const s of layout.gameChairs||[])chair(fc,((s.displayX??s.x+.5)-.5)*tile,((s.displayY??s.y+.5)-.5)*tile,colors[s.color]);
     // ---- Public speech bubbles (product-direction-update, part 3's
     // replacement for private chat) ----
     //
@@ -788,7 +796,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       if(!cameraInitialized){camera={x:desiredX,y:desiredY};cameraInitialized=true;}else{camera.x+=(desiredX-camera.x)*.12;camera.y+=(desiredY-camera.y)*.12;}
       ctx.clearRect(0,0,vw,vh);ctx.imageSmoothingEnabled=false;ctx.drawImage(floor,-Math.round(camera.x),-Math.round(camera.y));
       for(const s of seatTargets){
-        const x=s.x*tile-camera.x,y=s.y*tile-camera.y;
+        const x=((s.displayX??s.x+.5)-.5)*tile-camera.x,y=((s.displayY??s.y+.5)-.5)*tile-camera.y;
         s.button.style.display=mine&&x+tile>0&&y+tile>0&&x<vw&&y<vh?'block':'none';
         s.button.style.transform=`translate(${Math.round(x)}px,${Math.round(y)}px)`;
       }
@@ -797,7 +805,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         const t=state.tables.find(t=>t.id===s.tableId);
         const occupant=t?.seats?.find(p=>p?.color===s.color);
         if(!occupant)continue;
-        const x=(s.x+.5)*tile-camera.x,y=(s.y+.65)*tile-camera.y;
+        const x=(s.displayX??s.x+.5)*tile-camera.x,y=((s.displayY??s.y+.5)+.15)*tile-camera.y;
         if(occupant.present){
           sprite(ctx,x,y,colors[occupant.color],skins[occupant.skin]||skins.warm,1,0,true);
           if(occupant.barPlayerId)seatedPatrons.add(occupant.barPlayerId);

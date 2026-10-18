@@ -33,3 +33,10 @@ For Crit 10, every player and tavern action a person can take — joining, movin
 ## Limits and next steps
 
 Ordering remains unfinished and is not connected to the app. Texas hold'em, dominoes and blackjack remain reserved, and an online host cannot yet add or remove NPC seats before starting. The NPC engine advances while its room has a live subscriber; an unwatched game pauses. There is no real-money play. I prefer a usable gathering place with one reliable game over several unfinished games.
+
+The current online and solo Vegas board presents six connected casino
+sectors around a hexagonal dice tray on a wooden tabletop, with actual
+bills outside each casino and coloured dice/counts inside. Vegas tables
+in the tavern are round with five evenly spaced chairs. Solo NPC rooms
+omit invitations; online rooms retain them. These are presentation
+changes; the single-round rule adaptation described above remains.

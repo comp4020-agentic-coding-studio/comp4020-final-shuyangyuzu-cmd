@@ -1196,6 +1196,7 @@ function toPublicState(db: Database.Database, row: RoomRow, state: RoomState): P
   const seen = lastSeenTimes(db, row.id);
   return {
     code: row.code,
+    solo: !!db.prepare("SELECT 1 FROM events WHERE room_id = ? AND type = 'solo_npc_room_created' LIMIT 1").get(row.id),
     hostPlayerId: row.host_player_id,
     closed: row.closed_at !== null,
     closedAt: row.closed_at,

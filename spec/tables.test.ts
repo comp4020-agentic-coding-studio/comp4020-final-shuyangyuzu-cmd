@@ -470,6 +470,7 @@ it("starting a solo Vegas-NPC game with no playerCount defaults to 5 — 1 human
 
   const state = await getJson(`/api/rooms/${started.body.code}/state`);
   expect(state.body.phase).not.toBe("lobby"); // already started
+  expect(state.body.solo).toBe(true); // client hides invitations, including for legacy solo rooms
   expect(state.body.players).toHaveLength(5);
   const human = state.body.players.find((p: { id: string }) => p.id === started.body.playerId);
   expect(human.controller).toBe("human");

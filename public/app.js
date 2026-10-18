@@ -118,6 +118,7 @@ function el(tag, attrs = {}, children = []) {
 }
 
 function render(node) {
+  document.body.classList.toggle("table-mode", node.classList.contains("table"));
   root.replaceChildren(node);
 }
 
@@ -716,8 +717,8 @@ function renderTable(code, session, state) {
 
   const header = el("header", {}, [
     el("h1", {}, "拉斯维加斯"),
-    el("p", {}, ["Room ", el("strong", {}, code)]),
-    copyInviteLinkControl(shareLink),
+    el("p", {class:"table-subtitle"}, state.solo ? `SOLO TABLE · ${state.players.length - 1} NPCs` : ["Room ", el("strong", {}, code)]),
+    ...(state.solo ? [] : [copyInviteLinkControl(shareLink)]),
   ]);
 
   const playerList = el(
@@ -793,7 +794,7 @@ function renderTable(code, session, state) {
   if (state.phase === "lobby") {
     body = lobbyControls(code, session, state, isHost, me);
   } else if (state.phase === "round_end") {
-    body = el("div", {}, [
+    body = el("div", {}, [hexBoard(code, session, state, false),
       el("h2", {}, "Round over"),
       el("p", {}, "Final money totals are shown above. Thanks for playing!"),
     ]);
@@ -876,7 +877,7 @@ function lobbyControls(code, session, state, isHost, me) {
   );
 
   const children = [
-    el("p", {}, `Waiting for players (${state.players.length}/4). Need at least 2, and everyone ready, to start.`),
+    el("p", {}, `Waiting for players (${state.players.length}/5). Need at least 2, and everyone ready, to start.`),
     notReady.length > 0
       ? el("p", { class: "turn-note" }, `Waiting on: ${notReady.map((p) => p.nickname).join(", ")}`)
       : null,
@@ -956,114 +957,80 @@ function lobbyControls(code, session, state, isHost, me) {
 // the six-casinos-around-a-bowl spatial arrangement is reused, per the
 // student's own explicit instruction. This remains the single-round base
 // game already documented in PLAN.md/README.md.
-function hexBoard(code, session, state, isMyTurn) {
-  // Casino `value` 1-6 placed clockwise from the top: 1 at -90°, each
-  // next value another 60° clockwise (matching the reference photos'
-  // 1-top/2-upper-right/3-lower-right/4-bottom/5-lower-left/6-upper-left
-  // arrangement exactly).
-  const angleFor = (value) => (-90 + (value - 1) * 60) * (Math.PI / 180);
-  const radiusPct = 38;
-
-  const casinos = state.casinos.map((c) => {
-    const angle = angleFor(c.value);
-    const left = 50 + radiusPct * Math.cos(angle);
-    const top = 50 + radiusPct * Math.sin(angle);
-    const placements = Object.entries(c.placements)
-      .filter(([, count]) => count > 0)
-      .map(([playerId, count]) => {
-        const p = state.players.find((pl) => pl.id === playerId);
-        return el("li", { class: "hex-dice-chip" }, [
-          el("span", { class: `swatch ${p?.color ?? ""}` }),
-          `×${count}`,
-        ]);
-      });
-    return el(
-      "div",
-      { class: "hex-casino", style: `left:${left}%;top:${top}%` },
-      [
-        el("h3", {}, `${c.value}`),
-        el(
-          "p",
-          { class: "hex-casino-bills" },
-          c.bills.length ? `$${c.bills.map((b) => b.toLocaleString()).join(", $")}` : "—",
-        ),
-        el("ul", { class: "hex-casino-dice" }, placements),
-      ],
-    );
-  });
-
-  const current = state.players.find((p) => p.id === state.currentPlayerId);
-  let bowlBody;
-  if (!isMyTurn) {
-    bowlBody = [el("p", { class: "turn-note" }, `Waiting on ${current?.nickname ?? "…"}.`)];
-  } else if (state.phase === "awaiting_roll") {
-    bowlBody = [
-      el(
-        "button",
-        {
-          onclick: async () => {
-            try {
-              applyIncoming(await api(`/rooms/${code}/roll`, session));
-            } catch (err) {
-              alert(err.message);
-            }
-          },
-        },
-        "Roll",
-      ),
-    ];
-  } else if (state.phase === "awaiting_placement" && state.lastRoll) {
-    const counts = new Map();
-    for (const v of state.lastRoll.values) counts.set(v, (counts.get(v) ?? 0) + 1);
-    bowlBody = [
-      el("p", { class: "bowl-roll" }, `You rolled: ${state.lastRoll.values.join(", ")}`),
-      el(
-        "div",
-        { class: "value-buttons" },
-        [...counts.entries()].map(([value, count]) =>
-          el(
-            "button",
-            {
-              onclick: async () => {
-                try {
-                  applyIncoming(await api(`/rooms/${code}/place`, { ...session, value }));
-                } catch (err) {
-                  alert(err.message);
-                }
-              },
-            },
-            `Place all ${count}×${value}`,
-          ),
-        ),
-      ),
-    ];
-  } else {
-    bowlBody = [el("p", {}, "…")];
+function boardDie(value, color = 'ivory') {
+  const pips = {1:[4],2:[0,8],3:[0,4,8],4:[0,2,6,8],5:[0,2,4,6,8],6:[0,2,3,5,6,8]};
+  return el('span', {class:`board-die die-${color}`,role:'img','aria-label':`${color} die showing ${value}`},
+    Array.from({length:9},(_,i)=>el('i',{class:pips[value].includes(i)?'pip':'pip empty','aria-hidden':'true'})));
+}
+function casinoRing() {
+  const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');
+  svg.setAttribute('viewBox','0 0 800 800');svg.setAttribute('class','casino-ring');svg.setAttribute('aria-hidden','true');
+  const point=(r,a)=>`${400+r*Math.cos(a)},${400+r*Math.sin(a)}`;
+  for(let i=0;i<6;i++){
+    const a=(-120+i*60)*Math.PI/180,b=a+Math.PI/3;
+    const path=document.createElementNS(ns,'polygon');
+    path.setAttribute('points',[point(287,a),point(287,b),point(151,b),point(151,a)].join(' '));
+    path.setAttribute('fill',i%2?'#343b35':'#29372f');path.setAttribute('stroke','#ba965f');path.setAttribute('stroke-width','3');
+    svg.appendChild(path);
   }
-
-  const bowl = el("div", { class: "dice-bowl" }, bowlBody);
-
-  const playerStrip = el(
-    "ul",
-    { class: "hex-players" },
-    state.players.map((p) => {
-      // No separate "NPC" tag here — a handed-off/NPC seat's own nickname
-      // already says "(NPC)" (src/rooms.ts's createSoloNpcGame), same as
-      // the original .players list (header, lobby/round_end) never added
-      // one either; adding a second one here would just duplicate it.
-      const tags = [];
-      if (p.id === state.hostPlayerId) tags.push("host");
-      if (!p.connected && p.controller !== "npc") tags.push("disconnected");
-      return el("li", { class: p.id === state.currentPlayerId ? "current-turn" : "" }, [
-        el("span", { class: `swatch ${p.color}` }),
-        `${p.nickname}${tags.length ? ` (${tags.join(", ")})` : ""} — ${p.diceInHand} dice — $${p.moneyTotal.toLocaleString()}`,
-      ]);
-    }),
-  );
-
-  return el("div", { class: "hex-board-wrap" }, [
-    el("div", { class: "hex-board" }, [bowl, ...casinos]),
-    playerStrip,
+  const tray=document.createElementNS(ns,'polygon');
+  tray.setAttribute('points',Array.from({length:6},(_,i)=>point(146,(-120+i*60)*Math.PI/180)).join(' '));
+  tray.setAttribute('fill','#174a3a');tray.setAttribute('stroke','#bb8d53');tray.setAttribute('stroke-width','15');svg.appendChild(tray);
+  return svg;
+}
+function hexBoard(code, session, state, isMyTurn) {
+  const angleFor=value=>(-90+(value-1)*60)*Math.PI/180;
+  const position=(value,r)=>{const a=angleFor(value);return `left:${50+r*Math.cos(a)}%;top:${50+r*Math.sin(a)}%`;};
+  const casinoNames=['SUNSET','THE PALMS','STARLIGHT','GOLDEN HOUR','THE GRAND','MOONRISE'];
+  const pieces=state.casinos.flatMap(c=>{
+    const placements=Object.entries(c.placements).filter(([,n])=>n>0).map(([id,n])=>{
+      const p=state.players.find(p=>p.id===id);
+      return el('li',{class:'placed-dice',title:`${p?.nickname??'Player'}: ${n} dice`},[boardDie(c.value,p?.color||'ivory'),el('b',{},`×${n}`)]);
+    });
+    const skyline=el('span',{class:'casino-skyline','aria-hidden':'true'},[18,30,23,38,16].map((h,i)=>el('i',{style:`height:${h}px;--tower:${i}`})));
+    const card=el('section',{class:`hex-casino casino-${c.value}`,style:position(c.value,24),'aria-label':`Casino ${c.value}`},[
+      el('h3',{},[el('span',{class:'casino-number'},String(c.value)),el('span',{},casinoNames[c.value-1])]),
+      skyline,el('ul',{class:'hex-casino-dice'},placements),
+    ]);
+    const bills=el('div',{class:`banknotes notes-${c.value}`,style:position(c.value,43.5),'aria-label':`Casino ${c.value} prizes`},c.bills.map(amount=>
+      el('span',{class:`banknote note-${Math.floor(amount/10000)%3}`},[el('small',{},'LAS VEGAS'),el('strong',{},`$${amount.toLocaleString()}`),el('small',{},'CASINO BANK')])));
+    return [card,bills];
+  });
+  const current=state.players.find(p=>p.id===state.currentPlayerId);
+  const finished=state.phase==='round_end';
+  const rolled=state.lastRoll?.values||[];
+  const tray=el('div',{class:'dice-bowl'},[
+    el('span',{class:'tray-label'},'LAS VEGAS'),
+    el('div',{class:'rolled-dice'},rolled.map(v=>boardDie(v,state.players.find(p=>p.id===state.lastRoll.playerId)?.color||'ivory'))),
+    el('span',{class:'tray-caption'},finished?'ROUND COMPLETE':rolled.length?'CHOOSE A FACE BELOW':'THE DICE TRAY'),
+  ]);
+  const actionChildren=[el('div',{class:'turn-heading'},[
+    el('span',{class:'eyebrow'},finished?'SETTLEMENT':isMyTurn?'YOUR TURN':'AT THE TABLE'),
+    el('strong',{},finished?'Round complete':isMyTurn?(state.phase==='awaiting_roll'?'Roll your remaining dice':'Choose one face to place'):`Waiting on ${current?.nickname??'…'}`),
+    el('span',{class:'turn-help'},finished?'Equal counts cancel. Remaining dice win the highest available bills.':isMyTurn?'All dice showing the chosen face go to its matching casino.':'The table updates automatically.'),
+  ])];
+  if(isMyTurn&&state.phase==='awaiting_roll')actionChildren.push(el('button',{class:'roll-action',onclick:async()=>{
+    try{applyIncoming(await api(`/rooms/${code}/roll`,session));}catch(e){alert(e.message);}
+  }},'Roll'));
+  if(isMyTurn&&state.phase==='awaiting_placement'&&state.lastRoll){
+    const counts=new Map();for(const v of rolled)counts.set(v,(counts.get(v)||0)+1);
+    actionChildren.push(el('div',{class:'value-buttons'},[...counts.entries()].sort(([a],[b])=>a-b).map(([value,count])=>el('button',{
+      class:'place-action','aria-label':`Place all ${count}×${value}`,onclick:async()=>{
+        try{applyIncoming(await api(`/rooms/${code}/place`,{...session,value}));}catch(e){alert(e.message);}
+      },
+    },[boardDie(value,current?.color||'ivory'),el('span',{},`${count} dice → ${value}`)]))));
+  }
+  const players=el('ul',{class:'hex-players'},state.players.map(p=>el('li',{
+    class:`player-seat${p.id===state.currentPlayerId?' current-turn':''}`,style:`--player-color:var(--dice-${p.color})`,
+  },[
+    el('span',{class:'player-token','aria-hidden':'true'},'♟'),
+    el('div',{class:'player-identity'},[el('strong',{},p.controller==='npc'?p.nickname.replace(/\s*\(NPC\)$/,''):p.nickname),el('small',{},p.controller==='npc'?'NPC':p.id===session.playerId?'YOU':p.connected?'ONLINE':'AWAY')]),
+    el('div',{class:'player-totals'},[el('span',{},`${p.diceInHand} dice`),el('strong',{},`$${p.moneyTotal.toLocaleString()}`)]),
+  ])));
+  return el('div',{class:'hex-board-wrap'},[
+    el('div',{class:'board-caption'},[el('span',{},'VEGAS DICE'),el('span',{},'ONE ROUND · 2–5 PLAYERS')]),
+    el('div',{class:'hex-board'},[casinoRing(),...pieces,tray]),
+    el('section',{class:'table-controls','aria-label':'Turn controls'},actionChildren),players,
   ]);
 }
 

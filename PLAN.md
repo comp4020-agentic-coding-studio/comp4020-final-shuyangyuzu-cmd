@@ -3733,3 +3733,43 @@ committed to the repo (verification artifacts, not source).
 `src/orders.ts` untouched; `crit-8`/`crit-9` tags unmoved; no
 `crit-10` tag created; `/ship` not run. CI and deploy confirmation
 recorded immediately below.
+
+## Tabletop visual correction and round Vegas tables — 2026-10-19
+
+The user rejected the earlier blue card layout and asked for a wooden
+background and the physical reference's connected casino ring. They
+also requested no invitation links in solo NPC games, the same visual
+update for online games, and round Vegas furniture with evenly spaced
+chairs, leaving other game tables unchanged.
+
+The shared online/solo board now uses an original SVG six-sector ring,
+a central hexagonal green dice tray, paper-style notes outside their
+casinos, pip-rendered coloured dice/counts inside, and a separate turn
+control strip. Values always come from server state. The background and
+player panels use the tavern's wood/green/gold palette. This is still the
+explicitly documented single-round base-game adaptation: no Royale big
+die, skills, chips or payout-rule changes. The existing lobby capacity
+text incorrectly still said /4 after the five-player change; corrected
+to /5. Settlement now keeps the board visible alongside final results.
+
+Solo status is derived server-side from the existing
+solo_npc_room_created event, including old rooms, and exposed as a public
+boolean. Only solo headers omit the invitation controls; online rooms
+retain them. All three Vegas fixtures are painted round. Their five
+chairs have 72-degree spacing and continuous display centres; integer
+occupancy tiles remain server-authoritative. Art, seat hit targets and
+seated figures use the same display centres. Reserved tables retain
+both their original art and chair arrangement.
+
+Verification: the isolated-server full suite passed 222 tests before
+adding a geometry regression. The subsequent focused layout/table suite
+passed 49 tests, including the new equal-angle/non-overlapping hit-area
+check and the solo-room flag assertion. Browser checks exercised entry,
+clicking the round NPC table's chair, a five-player solo start without
+Copy/invite controls, real roll/place, all four NPCs playing and yielding
+back to the human, and another roll. A 390px mobile check showed no
+horizontal overflow; desktop and phone screenshots were saved outside
+the repo. The classic online lobby was also opened through its actual
+UI: it uses the wood theme, shows /5 and retains Copy. Active online and
+solo play share the same board component. These are agent checks, not
+student acceptance. CI and production verification follow publication.
