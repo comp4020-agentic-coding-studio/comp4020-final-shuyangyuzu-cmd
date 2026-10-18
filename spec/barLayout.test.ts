@@ -90,6 +90,28 @@ it("both painted cabinet walls have real blocking footprints", () => {
   }
 });
 
+it("every decorative plant fixture has a real blocking footprint, and none sits near a chair or seat", () => {
+  // A plant drawn purely in canvas (the shape this replaces) had no
+  // shared collision at all, and visually overlapped a game chair in a
+  // real play-test screenshot even though nothing here would have
+  // caught it — a walkable tile next to another walkable tile isn't a
+  // collision. Guards both halves of the fix: the fixture really blocks
+  // movement, and it's far enough from every seat/chair (Chebyshev
+  // distance, matching how a chair's own drawn canopy/art extends past
+  // its single tile) that a small future layout nudge can't silently
+  // reintroduce the same overlap.
+  const plants = FURNITURE.filter((f) => f.kind === "plant");
+  expect(plants.length).toBeGreaterThan(0);
+  const occupied = [...BAR_SEATS, ...GAME_CHAIRS];
+  for (const p of plants) {
+    expect(isWalkingFloor(p.x, p.y), `${p.id} should block movement`).toBe(false);
+    for (const o of occupied) {
+      const dist = Math.max(Math.abs(o.x - p.x), Math.abs(o.y - p.y));
+      expect(dist, `${p.id} is too close to ${"id" in o ? o.id : `${o.tableId}:${o.color}`}`).toBeGreaterThanOrEqual(3);
+    }
+  }
+});
+
 describe("isValidStep", () => {
   it("allows a single step onto adjacent open floor, 8 directions", () => {
     const [fx, fy] = [5, 3]; // clear floor below the back wall

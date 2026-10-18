@@ -3859,3 +3859,70 @@ The speech composer starts hidden. A small three-dot speech bubble above the rig
 Verification so far: real local browser click-to-sit on a dining chair and bar stool, Stand up, chat expand/send/collapse. The first check encountered the suite's own temporary connected probe players blocking the route; after their normal presence expiry the same real gesture succeeded. A screenshot also exposed wide-font middle dots overflowing the icon; the agent replaced them with compact bullets. Geometry and real move-action regressions cover empty-chair/cabinet rejection, corner-cutting, adjacent sitting/standing, and reachability without routing through seats. An initial full run exposed one old assertion assuming the north edge above the restroom was open floor; it is now correctly a wall. A later run caught the startup-computed version hash being stale after edits to static files: the preview was restarted before the final run, rather than weakening the cache test. Final test/deploy results are reported after these checks; none of these agent checks is my own final acceptance.
 
 Final local checks: pnpm check passed 227/227 tests across 26 files, with typecheck included, against the freshly restarted isolated DATA_DIR instance. pnpm check:evidence passed. No real production data was used in the test suite. CI and deployment follow this commit.
+
+## 2026-10-19 — plant/chair overlap and a unified dining rug, the final visual correction before Crit 10
+
+The student flagged two remaining visual issues from a real play-test
+screenshot (blackjack-1's left-hand chair visibly overlapped by a
+decorative plant's canopy, annotated with a red box; a red rug stranded
+between two game-table rows, annotated with a blue box).
+
+**The plant overlap had the same root cause the prior round's cabinet-
+wall fix already diagnosed and fixed for walls, just not yet applied to
+plants:** a plant was pure canvas art (`public/tavern.js`'s `plant()`
+helper) with *zero* shared collision footprint anywhere, client or
+server. Four of the six plants (the two "row" sets, at tile `(31,17)`
+specifically — one Chebyshev tile from `blackjack-1`'s own green chair)
+sat close enough that their drawn canopy, which extends well past the
+plant's own centre tile in pixel space, visually read as overlapping a
+chair even though nothing in the shared layout model would have caught
+it: a walkable tile beside another walkable tile has never been a
+collision. Following the exact `cabinet_wall` precedent from the prior
+round (a real `FurnitureKind`, not a second parallel collision concept),
+`src/barLayout.ts` gained a `"plant"` kind and four real `FURNITURE`
+entries (`plant-nw/ne/sw/se`), each placed on open floor checked by
+direct coordinate computation to sit at least 3 tiles (Chebyshev) from
+every chair and dining seat — picked up for free by the existing
+`isWalkable`/`isWalkingFloor`/reachability machinery with no new code
+path. The two original "corner" plants (far from any furniture, never
+implicated in the bug) stay pure decoration. `public/tavern.js` now
+draws the four relocated plants from the shared `fixtures` list (via the
+same loop `cabinet_wall` already uses) instead of four hand-typed pixel
+literals, so the drawn position can never again drift from the real
+collision tile.
+
+**The rug was hand-typed guesswork, not computed from the room it was
+meant to dress:** two separate `rug(...)` calls with literal pixel
+coordinates — one landed between the two game-table rows (the stray one
+the student's screenshot flagged), the other only partly covered one
+dining table rather than the group. Replaced with one rug, computed at
+render time from the four dining tables' own real bounding box
+(`fixtures.filter(f=>f.kind==='dining_table')` plus their `BAR_SEATS`),
+centred with an even 0.6-tile margin on every side, drawn in the same
+pre-fixtures static floor layer as before (a rug has never been checked
+by `isWalkable` — it's pure decoration, confirmed unchanged by this fix).
+
+A new test (`spec/barLayout.test.ts`, "every decorative plant fixture
+has a real blocking footprint, and none sits near a chair or seat")
+guards both halves: each plant fixture actually blocks `isWalkingFloor`,
+and every plant stays at least 3 tiles from every `BAR_SEATS`/
+`GAME_CHAIRS` entry — the exact distance check that would have caught
+the original bug.
+
+CLAUDE.md gained one paragraph extending the already-stated cabinet-wall
+collision rule explicitly to plants, so a future plant addition follows
+the same pattern rather than reintroducing canvas-only decoration with
+no shared collision.
+
+**Verification:** `pnpm check` (228/228 — the prior 227 plus the one new
+plant-collision test) and `pnpm check:evidence`, both green, against an
+isolated local `DATA_DIR`. Manual browser verification (Playwright
+against the locally running server): desktop and mobile (390px)
+screenshots confirm the unified rug sits correctly centred under all
+four dining tables with even margins and no longer appears between game
+tables; a screenshot walking to the relocated north-east plant confirms
+it sits clearly separated from the blackjack row with no visual overlap
+with any chair; dining-chair sit/stand-up, the speech composer's
+collapse/expand toggle, and a game-table chair click (opening the
+join/choose-colour flow) were all re-exercised after the fix and
+confirmed still working, with no console errors.

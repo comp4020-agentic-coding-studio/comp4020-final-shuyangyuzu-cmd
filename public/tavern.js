@@ -653,9 +653,26 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       box(fc,x-5,91,94,7,'#d0a171');
     }
     const rug=(x,y,w,h)=>{box(fc,x,y,w,h,'#8d4545');box(fc,x+6,y+6,w-12,h-12,'#ad7054');box(fc,x+12,y+12,w-24,h-24,'#864347');for(let a=x+24;a<x+w-12;a+=24)box(fc,a,y+20,8,8,'#c39968');};
-    rug(17*tile,18*tile,6*tile,3*tile);rug(5*tile,6*tile,3*tile,5*tile);
+    // One dining-room rug, sized and centred from the four dining tables'
+    // own real bounding box (tables + their seats) rather than hand-typed
+    // literals — the two rugs this replaces were positioned by guesswork
+    // (one sat stranded between the game-table rows, the other only
+    // partly under one dining table) and the student's own screenshot
+    // flagged the stray one directly. A fixed margin on every side keeps
+    // it clear of the tables' own seat-approach tiles. Drawn in this
+    // static floor layer, under every fixture, so it never affects
+    // movement (a rug has never been checked by isWalkable).
+    {
+      const diningFixtures=fixtures.filter(f=>f.kind==='dining_table');
+      const diningSeats=(layout.seats||[]).filter(s=>diningFixtures.some(f=>f.id===s.furnitureId));
+      const minX=Math.min(...diningFixtures.map(f=>f.x),...diningSeats.map(s=>s.x));
+      const maxX=Math.max(...diningFixtures.map(f=>f.x+f.w),...diningSeats.map(s=>s.x+1));
+      const minY=Math.min(...diningFixtures.map(f=>f.y),...diningSeats.map(s=>s.y));
+      const maxY=Math.max(...diningFixtures.map(f=>f.y+f.h),...diningSeats.map(s=>s.y+1));
+      const margin=0.6*tile;
+      rug(minX*tile-margin,minY*tile-margin,(maxX-minX)*tile+margin*2,(maxY-minY)*tile+margin*2);
+    }
     function plant(x,y){box(fc,x-13,y-19,26,22,'#b67b58');box(fc,x-15,y-23,30,8,'#d29a6e');for(const [dx,dy] of [[-12,-42],[2,-49],[-4,-61],[14,-38]]){box(fc,x+dx-7,y+dy,14,25,'#527c5a');box(fc,x+dx-3,y+dy,4,19,'#7ca472');}}
-    for(const [x,y] of [[100,170],[worldW-100,170],[120,worldH-110],[worldW-120,worldH-110]])plant(x,y);
     // The original room is dressed as a room, rather than bare shapes on
     // endless floor. Empty surrounding world space can host later extensions.
     const wallX=8*tile,wallY=5*tile,wallW=24*tile;
@@ -675,10 +692,18 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         box(fc,bx,wallY+40,8,13,body);box(fc,bx+1,wallY+34,5,6,'#d8b873');
       }
     }
-    for(const px of [9,31]){plant(px*tile,10*tile);plant(px*tile,17*tile);}
+    // Corner plants are pure decoration, far from any furniture — left as
+    // hand-placed art, never implicated in the chair-overlap bug. The
+    // four plants near the game-table rows are now real FURNITURE
+    // fixtures (src/barLayout.ts's "plant" kind) drawn from the fixtures
+    // loop below instead of hand-typed pixel literals here, so their
+    // drawn position always matches their actual shared collision tile.
+    for(const [x,y] of [[100,170],[worldW-100,170],[120,worldH-110],[worldW-120,worldH-110]])plant(x,y);
     for(const f of fixtures){const x=f.x*tile,y=f.y*tile,w=f.w*tile,h=f.h*tile;
       if(f.kind==='cabinet_wall'){
         // Painted above; this shared fixture supplies its collision footprint.
+      }else if(f.kind==='plant'){
+        plant(x+tile/2,y+tile*0.82);
       }else if(f.kind==='counter'){
         box(fc,x-3,y+9,w+6,h,'#37282b');box(fc,x,y+5,w,h-10,'#b58153');box(fc,x,y+13,w,5,'#dfb979');box(fc,x,y+h-8,w,8,'#6b4635');
         for(let i=12;i<w;i+=64){box(fc,x+i,y+29,46,25,'#815636');box(fc,x+i+2,y+30,42,2,'#cf9c5e');}

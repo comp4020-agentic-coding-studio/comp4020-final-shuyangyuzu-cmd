@@ -805,3 +805,13 @@ server moves reject chair transit and diagonal corner cutting alike.
 Preserve actual seated patrons across recovery and migration. A sit is
 an explicit, adjacent interaction; never authorize a chair shortcut as a
 normal move. The speech composer starts collapsed behind its chat icon.
+
+Decorative plants follow the identical rule: a plant that blocks the
+floor is a real `FurnitureKind: "plant"` entry in `src/barLayout.ts`'s
+shared `FURNITURE`, never canvas-only art with no collision footprint —
+the same reasoning cabinet walls already established. Any such plant
+must sit well clear (several tiles) of every chair and dining seat, not
+merely not-literally-on-top-of-one, since a chair's own drawn canopy/art
+extends past its single tile and a near miss still reads as broken.
+A purely decorative plant with no collision role (placed far from any
+furniture, like the map's four corner plants) does not need this.

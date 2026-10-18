@@ -12,7 +12,7 @@ export const GRID_COLS = 40;
 export const GRID_ROWS = 24;
 export const TILE_SIZE = 32;
 
-export type FurnitureKind = "counter" | "stool" | "dining_table" | "game_table" | "restroom" | "cabinet_wall";
+export type FurnitureKind = "counter" | "stool" | "dining_table" | "game_table" | "restroom" | "cabinet_wall" | "plant";
 export type GameType = "vegas" | "texas" | "dominoes" | "blackjack";
 /** "online" — a shared table other patrons can request to join, host-
  * approved (Crit 9 phase 8). "npc" — a solo kiosk: every visitor who
@@ -237,6 +237,29 @@ export const FURNITURE: readonly Furniture[] = [...CORE_FURNITURE.map((f) => ({
 })),
   { id: "back-wall", kind: "cabinet_wall", x: 0, y: 0, w: 40, h: 2, label: "Back wall" },
   { id: "back-bar", kind: "cabinet_wall", x: 8, y: 5, w: 24, h: 2, label: "Back-bar cabinets" },
+  // Decorative plants, a real blocking fixture — not canvas-only art.
+  // The previous four "row" plants (drawn purely in public/tavern.js,
+  // no shared collision entry at all) sat only 1-3 tiles from a game
+  // chair or dining seat; their drawn canopy (which extends well past
+  // their own centre tile in pixel space) visually overlapped the
+  // blackjack-1 table's green chair in a real play-test screenshot —
+  // found by the student, not by any existing test, since "walkable
+  // tile near another walkable tile" isn't a collision this file's own
+  // checks were built to catch. Following the exact cabinet_wall
+  // precedent above (a real FURNITURE entry picked up for free by the
+  // existing isWalkable/isWalkingFloor/fixtures-loop machinery, rather
+  // than a second, parallel "plant collision" concept), these four are
+  // placed on open floor along the room's own side edges, each checked
+  // by direct coordinate computation to sit at least 4 tiles (Chebyshev)
+  // from every chair, dining seat, and other fixture before being added
+  // — far enough that no future small layout drift could plausibly
+  // reintroduce the same overlap. The two original "corner" plants
+  // (drawn separately in public/tavern.js, near the map's far corners,
+  // never implicated in the reported bug) are left as pure decoration.
+  { id: "plant-nw", kind: "plant", x: 2, y: 8, w: 1, h: 1, label: "Potted plant" },
+  { id: "plant-ne", kind: "plant", x: 38, y: 8, w: 1, h: 1, label: "Potted plant" },
+  { id: "plant-sw", kind: "plant", x: 2, y: 19, w: 1, h: 1, label: "Potted plant" },
+  { id: "plant-se", kind: "plant", x: 38, y: 19, w: 1, h: 1, label: "Potted plant" },
 ];
 
 export const GAME_TABLES: readonly Furniture[] = FURNITURE.filter((f) => f.kind === "game_table");
