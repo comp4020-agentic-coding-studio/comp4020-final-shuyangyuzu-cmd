@@ -816,12 +816,9 @@ function renderTable(code, session, state) {
     ),
   ]);
 
-  // During active play, the hex board's own playerStrip (around the
-  // board's outside, per the reference layout) already shows this same
-  // information — showing the plain .players list too would just repeat
-  // it above the board. Lobby and round_end still show it here, same as
-  // before.
-  const showPlayerListHere = state.phase === "lobby" || state.phase === "round_end";
+  // The board also stays visible at settlement and already includes the
+  // player totals. Only the lobby needs the separate roster.
+  const showPlayerListHere = state.phase === "lobby";
   render(
     el(
       "div",
