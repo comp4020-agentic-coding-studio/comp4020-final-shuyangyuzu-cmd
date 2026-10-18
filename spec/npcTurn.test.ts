@@ -21,6 +21,7 @@ import { afterEach, beforeEach, expect, it } from "vitest";
 import { openDb } from "../src/db.ts";
 import {
   createRoom,
+  createSoloNpcGame,
   getPublicState,
   handoffToNpc,
   joinRoom,
@@ -32,6 +33,7 @@ import {
   setReady,
   startGame,
 } from "../src/rooms.ts";
+import type { PublicCasino } from "../src/types.ts";
 
 let dir: string;
 let db: Database.Database;
@@ -182,4 +184,82 @@ it("npcRoll/npcPlace survive a process restart (a fresh connection to the same d
   expect(state.players.find((p) => p.id === host.playerId)?.controller).toBe("npc");
 
   liveDb.close();
+});
+
+// A full 5-player NPC round (1 human + 4 NPCs, the new full-table default
+// — src/rooms.ts's MAX_PLAYERS comment has the rulebook citation) actually
+// settles correctly, exercising the real engine end to end rather than
+// just the turn-taking mechanics the tests above already cover. Settles
+// via alternating roll()/place() for the human seat and npcRoll()/
+// npcPlace() for the 4 NPC seats, driven directly against the DB (the
+// same reasoning this whole file already uses: the scheduler is a timer,
+// the engine it calls isn't).
+it("a full 5-player NPC round (1 human + 4 NPCs) settles correctly — every casino's payout matches the official rule", () => {
+  const created = createSoloNpcGame(db, "SoloFive", "red", 4);
+  let state = getPublicState(db, created.code);
+  expect(state.players).toHaveLength(5);
+  expect(state.players.filter((p) => p.controller === "npc")).toHaveLength(4);
+
+  const dealtBillsByCasino = state.casinos.map((c) => c.bills);
+
+  let guard = 0;
+  while (state.phase !== "round_end") {
+    if (++guard > 500) throw new Error("full 5-player NPC round: too many turns, something's stuck");
+    const current = state.players.find((p) => p.id === state.currentPlayerId)!;
+    if (current.controller === "npc") {
+      if (state.phase === "awaiting_roll") expect(npcRoll(db, created.code)).toBe(true);
+      else expect(npcPlace(db, created.code)).toBe(true);
+    } else {
+      if (state.phase === "awaiting_roll") {
+        roll(db, created.code, current.id, created.sessionSecret);
+      } else {
+        const fresh = getPublicState(db, created.code);
+        place(db, created.code, current.id, created.sessionSecret, fresh.lastRoll!.values[0]);
+      }
+    }
+    state = getPublicState(db, created.code);
+  }
+
+  expect(state.phase).toBe("round_end");
+  const inHand = state.players.reduce((sum, p) => sum + p.diceInHand, 0);
+  const placed = state.casinos.reduce(
+    (sum, c) => sum + Object.values(c.placements).reduce((s, n) => s + n, 0),
+    0,
+  );
+  expect(inHand).toBe(0);
+  expect(placed).toBe(state.players.length * 8); // every one of the 5 seats' 8 dice accounted for
+
+  // Same settlement contract spec/settlement.test.ts's own
+  // checkCasinoContract checks over HTTP — reimplemented minimally here
+  // rather than imported, since that function isn't exported and this
+  // file's own direct-DB style is deliberately different from that
+  // file's HTTP-level one.
+  function expectedRanking(placements: Record<string, number>): string[] {
+    const byCount = new Map<number, string[]>();
+    for (const [playerId, count] of Object.entries(placements)) {
+      if (count <= 0) continue;
+      const group = byCount.get(count) ?? [];
+      group.push(playerId);
+      byCount.set(count, group);
+    }
+    return [...byCount.entries()]
+      .sort((a, b) => b[0] - a[0])
+      .flatMap(([, group]) => (group.length === 1 ? group : []));
+  }
+  state.casinos.forEach((casino: PublicCasino, index) => {
+    const dealtBills = dealtBillsByCasino[index];
+    const ranked = expectedRanking(casino.placements);
+    const sortedBills = [...dealtBills].sort((a, b) => b - a);
+    const payout = casino.payout ?? {};
+    for (let i = 0; i < ranked.length; i++) {
+      if (i < sortedBills.length) {
+        expect(payout[ranked[i]], `rank ${i} at casino ${casino.value} should win ${sortedBills[i]}`).toBe(
+          sortedBills[i],
+        );
+      } else {
+        expect(payout[ranked[i]]).toBeUndefined();
+      }
+    }
+    expect(Object.keys(payout).length).toBeLessThanOrEqual(ranked.length);
+  });
 });

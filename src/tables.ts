@@ -32,10 +32,11 @@ export class TableError extends Error {
 
 export type TableLiveStatus = "reserved" | "empty" | "waiting" | "in_progress" | "finished";
 
-/** One of a game table's (up to 4) chairs, for real seated rendering —
- * null for an empty chair, ordered by COLORS to match GAME_CHAIRS. This
- * is a view of the bound room's own player roster, the source of truth for "who's at
- * this table" (PLAN.md's product-direction-update entry). */
+/** One of a game table's (up to COLORS.length) chairs, for real seated
+ * rendering — null for an empty chair, ordered by COLORS to match
+ * GAME_CHAIRS. This is a view of the bound room's own player roster, the
+ * source of truth for "who's at this table" (PLAN.md's
+ * product-direction-update entry). */
 export interface TableSeatView {
   color: string;
   nickname: string;
@@ -63,9 +64,10 @@ export interface TableStatusView {
   roomCode: string | null;
   playerCount: number;
   takenColors: string[];
-  /** Always length 4 (MAX_PLAYERS in src/rooms.ts), null where empty —
-   * kept separate from takenColors (which the table-dialog's own color
-   * picker already depends on) rather than replacing it. */
+  /** Always length COLORS.length (== MAX_PLAYERS in src/rooms.ts), null
+   * where empty — kept separate from takenColors (which the table-
+   * dialog's own color picker already depends on) rather than replacing
+   * it. */
   seats: Array<TableSeatView | null>;
   /** How many join requests are awaiting the host's approval right now
    * (Crit 9 phase 8) — a lightweight count for the bar's own table
@@ -113,7 +115,7 @@ function lookupOpenRoom(db: Database.Database, roomId: string | null): OpenRoom 
 }
 
 function emptySeats(): Array<TableSeatView | null> {
-  return [null, null, null, null];
+  return COLORS.map(() => null);
 }
 
 export function getTablesStatus(db: Database.Database): TableStatusView[] {
@@ -467,26 +469,34 @@ export function joinTableRoom(
 
 /** Starts (or resumes) this visitor's own private game at a solo Vegas-
  * NPC table — never a shared room another patron could join, and never
- * gated on anyone else (no waiting, no approval). Re-clicking the same
- * NPC table while already in an active private game there hands back
- * that same game (checkExistingSeat, unchanged) rather than starting a
- * second one and orphaning the first; re-clicking it after that game has
- * ended (round_end or disbanded... though an NPC game is never
- * disbanded, only ever finishes) starts a genuinely new one. Never
- * touches `tables.current_room_id` at all — there is no single "the"
- * room for this fixture (PLAN.md's product-direction-update: one table,
- * many concurrent private games, one per visitor). */
+ * gated on anyone else (no waiting, no approval). `playerCount` (2 to
+ * COLORS.length, total including the human) controls how many NPC seats
+ * `rooms.createSoloNpcGame` fills — validated there, not re-validated
+ * here, so there's one place that owns "what counts as a legal count."
+ * Re-clicking the same NPC table while already in an active private game
+ * there hands back that same game (checkExistingSeat, unchanged) rather
+ * than starting a second one and orphaning the first — `playerCount` is
+ * simply ignored on that path, same as `color` already is. Re-clicking it
+ * after that game has ended (round_end or disbanded... though an NPC game
+ * is never disbanded, only ever finishes) starts a genuinely new one.
+ * Never touches `tables.current_room_id` at all — there is no single
+ * "the" room for this fixture (PLAN.md's product-direction-update: one
+ * table, many concurrent private games, one per visitor). */
 export function startNpcGame(
   db: Database.Database,
   tableId: string,
   barPlayerId: string,
   barSessionSecret: string,
   color: Color,
+  playerCount: number,
 ): TableRoomResult {
   requireBarSession(db, barPlayerId, barSessionSecret);
   const furniture = GAME_TABLES.find((t) => t.id === tableId);
   if (!furniture?.available || furniture.tableMode !== "npc") {
     throw new TableError("not a solo NPC table", "table_not_found", 404);
+  }
+  if (!Number.isInteger(playerCount) || playerCount < 2 || playerCount > COLORS.length) {
+    throw new TableError(`playerCount must be between 2 and ${COLORS.length}`, "bad_player_count", 400);
   }
 
   return transact(db, () => {
@@ -496,7 +506,7 @@ export function startNpcGame(
     const nickname = getBarNickname(db, barPlayerId);
     let created: rooms.CreatedRoom;
     try {
-      created = rooms.createSoloNpcGame(db, nickname, color); // nested under this call's own transact(db, ...) — see createTableRoom's comment above
+      created = rooms.createSoloNpcGame(db, nickname, color, playerCount - 1); // nested under this call's own transact(db, ...) — see createTableRoom's comment above
     } catch (err) {
       if (err instanceof RoomError) throw new TableError(err.message, err.code, err.status);
       throw err;

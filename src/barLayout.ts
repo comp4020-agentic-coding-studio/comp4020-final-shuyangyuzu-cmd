@@ -228,11 +228,25 @@ export const GAME_TABLES: readonly Furniture[] = FURNITURE.filter((f) => f.kind 
 
 // The chair's whole tile is its drawing and hit target. Fixed colours
 // choose physical chairs independently of join-order/turn-order seats.
+//
+// A 5th chair (purple, src/types.ts's COLORS) sits on the tile directly
+// north of the table's own first column — the official rulebook's own
+// "GAME COMPONENTS" line ships 5 player colours' worth of dice (see
+// src/rooms.ts's MAX_PLAYERS comment), so 5 seats is the real base-game
+// max, not an extension past it. North was chosen because the other four
+// chairs already occupy both the west and east sides of both table rows,
+// and every table's own north tile is verified clear: dining tables sit a
+// full row further north (y - 1 here is still one clear row below the
+// nearest dining table's own south-side seat), and no other chair or
+// furniture rectangle covers it. Checked against every real table
+// (vegas-1/2, vegas-npc-1, and all 6 reserved slots, for layout
+// consistency) by direct coordinate computation before adding this.
 export const GAME_CHAIRS = GAME_TABLES.flatMap((f) => [
   { tableId: f.id, color: "red", x: f.x - 1, y: f.y },
   { tableId: f.id, color: "blue", x: f.x + f.w, y: f.y },
   { tableId: f.id, color: "green", x: f.x - 1, y: f.y + 1 },
   { tableId: f.id, color: "yellow", x: f.x + f.w, y: f.y + 1 },
+  { tableId: f.id, color: "purple", x: f.x, y: f.y - 1 },
 ]);
 
 /** A real, sittable seat belonging to a dining table or stool — NOT a

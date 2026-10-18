@@ -19,9 +19,9 @@ const baseUrl = inject("baseUrl");
  * dealt amounts are legitimately public: CLAUDE.md only hides the
  * *undrawn* deck, not a bill already sitting face-up on a casino. */
 async function playOneRandomRound(
-  playerCount: 2 | 3 | 4,
+  playerCount: 2 | 3 | 4 | 5,
 ): Promise<{ final: PublicState; dealtBillsByCasino: number[][] }> {
-  const colors = ["red", "blue", "green", "yellow"] as const;
+  const colors = ["red", "blue", "green", "yellow", "purple"] as const;
   const host = await createRoom(baseUrl, "P0", colors[0]);
   const sessions: Record<string, Session> = { [host.playerId]: host };
   for (let i = 1; i < playerCount; i++) {
@@ -120,7 +120,10 @@ function checkCasinoContract(casino: PublicCasino, dealtBills: readonly number[]
 it(
   "pays out every casino per the official tie-cancellation and descending-bill rule",
   async () => {
-    const playerCounts = Array.from({ length: 24 }, (_, i) => ((i % 3) + 2) as 2 | 3 | 4);
+    // Cycles through 2-5 (not just 2-4) so every legal player count,
+    // including the newly-added 5th seat, gets covered by this same
+    // settlement-contract check across these 24 rounds.
+    const playerCounts = Array.from({ length: 24 }, (_, i) => ((i % 4) + 2) as 2 | 3 | 4 | 5);
     const rounds = await Promise.all(playerCounts.map((playerCount) => playOneRandomRound(playerCount)));
 
     let sawAnyTie = false;

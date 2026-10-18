@@ -56,6 +56,44 @@ it("migrates closed legacy rooms too, allowing stale bindings to clear normally"
   expect(getActiveSeat(db, patron.playerId)).toBeNull();
 });
 
+it("a room filled under the old 4-color cap (no purple ever used) still reads correctly now that COLORS has 5 — no migration needed", () => {
+  // Nothing about this needs a schema migration (Color is a plain TEXT
+  // column via JSON serialization, not an enum constraint — confirmed by
+  // reading src/db.ts) — this test just confirms getTablesStatus's
+  // COLORS.length-sized emptySeats() and COLORS.indexOf()-based seat
+  // assignment correctly handle data that simply never mentions the 5th
+  // color, rather than assuming it.
+  const { room, row, state } = legacyRoom();
+  const oldColors = ["red", "blue", "green", "yellow"] as const;
+  state.players = {};
+  oldColors.forEach((color, seat) => {
+    const id = seat === 0 ? room.playerId : `legacy-${color}`;
+    state.players[id] = {
+      id,
+      nickname: `Legacy${color}`,
+      color,
+      seat,
+      diceInHand: 8,
+      wonBills: [],
+      ready: true,
+      joinedAt: new Date().toISOString(),
+      controller: "human",
+    };
+  });
+  db.prepare("UPDATE rooms SET state_json = ? WHERE id = ?").run(JSON.stringify(state), row.id);
+  db.close();
+  db = openDb(path);
+
+  const publicState = getPublicState(db, room.code);
+  expect(publicState.players).toHaveLength(4);
+  expect(publicState.players.map((p) => p.color).sort()).toEqual([...oldColors].sort());
+
+  const status = getTablesStatus(db).find((t) => t.id === "vegas-1")!;
+  expect(status.seats).toHaveLength(5); // COLORS.length today, not the 4 this room was created under
+  expect(status.seats.filter((s) => s !== null)).toHaveLength(4);
+  expect(status.seats.find((s) => s?.color === "purple")).toBeUndefined();
+});
+
 it("preserves started-game progress and is idempotent without overwriting existing NPC controllers or requests", () => {
   const { room, row, state } = legacyRoom();
   state.phase = "awaiting_placement";

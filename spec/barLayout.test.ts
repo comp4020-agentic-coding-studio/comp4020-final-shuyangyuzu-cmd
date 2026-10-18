@@ -7,6 +7,7 @@
 
 import { describe, expect, it } from "vitest";
 import { BAR_SEATS, FURNITURE, GAME_CHAIRS, GAME_TABLES, GRID_COLS, GRID_ROWS, defaultSpawn, isValidStep, isWalkable } from "../src/barLayout.ts";
+import { COLORS } from "../src/types.ts";
 
 describe("isWalkable", () => {
   it("is true for open floor", () => {
@@ -163,6 +164,26 @@ it("all physical chairs have unique, reachable tiles, including between adjacent
     expect(seen.has(key), `two chairs at ${key}`).toBe(false);
     expect(reachable.has(key), `inaccessible chair at ${key}`).toBe(true);
     seen.add(key);
+  }
+});
+
+it("every game table has exactly COLORS.length chairs, one per color, mutually exclusive and walkable", () => {
+  // 5, not 4 — the official rulebook ships 5 player colours' worth of
+  // dice (src/rooms.ts's MAX_PLAYERS comment has the citation); this test
+  // guards GAME_CHAIRS staying in sync with COLORS, whatever its length
+  // is, rather than re-hardcoding "5" as a second number to drift from
+  // the first.
+  for (const t of GAME_TABLES) {
+    const chairs = GAME_CHAIRS.filter((c) => c.tableId === t.id);
+    expect(chairs, `${t.id} chair count`).toHaveLength(COLORS.length);
+    expect(chairs.map((c) => c.color).sort()).toEqual([...COLORS].sort());
+    const seen = new Set<string>();
+    for (const c of chairs) {
+      const key = `${c.x},${c.y}`;
+      expect(seen.has(key), `${t.id} has two chairs at ${key}`).toBe(false);
+      seen.add(key);
+      expect(isWalkable(c.x, c.y), `${t.id}'s ${c.color} chair at ${key} is not walkable`).toBe(true);
+    }
   }
 });
 

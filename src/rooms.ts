@@ -24,7 +24,14 @@ import { COLORS, type Color, type PublicState, type RoomState } from "./types.ts
 // aloud when a room code is being passed around a table.
 const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const CODE_LENGTH = 6;
-export const MAX_PLAYERS = 4;
+// 5, not 4 — the official rulebook's own "GAME COMPONENTS" line ships "40
+// dice (8 in each player colour)", i.e. five colours' worth. Its "Variant
+// (2 to 4 players)" section hands out extra neutral white dice to
+// compensate for an "imaginary" missing player when playing with FEWER
+// than 5 — it is not a way to exceed a 4-player base game. 5 is the real
+// base-game maximum; the white-dice variant itself remains out of scope
+// (CLAUDE.md's scope discipline).
+export const MAX_PLAYERS = 5;
 
 export class RoomError extends Error {
   readonly code: string;
@@ -296,25 +303,32 @@ export function createRoom(db: Database.Database, nickname: string, color: Color
   return { code, playerId, sessionSecret };
 }
 
-/** A solo Vegas-NPC table (Crit 9 phase 8): one human plus the 3
- * remaining colors as NPC-controlled seats, started immediately — no
- * waiting, no approval, no other human needed. One transaction, like
- * every other state-changing action here (CLAUDE.md): the room is
- * created *and* started in the same write, since there's nothing to wait
- * for (every seat is already `ready`). Reuses `startGameLogic` directly
- * rather than a separate create-then-start round trip the way the
- * table-click flow for an online table has to (there, a second human
- * still needs to show up and ready first).
+/** A solo Vegas-NPC table (Crit 9 phase 8): one human plus `npcCount`
+ * NPC-controlled seats (1 to COLORS.length - 1, chosen deterministically
+ * in `COLORS` order, skipping the human's own color — never a random
+ * subset, so "2 total players" reliably means human + the first
+ * remaining color, not whichever color happens to iterate first),
+ * started immediately — no waiting, no approval, no other human needed.
+ * One transaction, like every other state-changing action here
+ * (CLAUDE.md): the room is created *and* started in the same write,
+ * since there's nothing to wait for (every seat is already `ready`).
+ * Reuses `startGameLogic` directly rather than a separate create-then-
+ * start round trip the way the table-click flow for an online table has
+ * to (there, a second human still needs to show up and ready first).
  *
  * An NPC's own `isConnected` check (startGameLogic's `connectedPlayerIds`
  * requirement) is satisfied the same way a brand-new human player's
  * already is: nobody has a presence row yet, so `isConnected` falls back
  * to `joinedAt`, which is "now" for every seat here — no special-casing
  * needed for an NPC never having a heartbeat at all. */
-export function createSoloNpcGame(db: Database.Database, nickname: string, color: Color): CreatedRoom {
+export function createSoloNpcGame(db: Database.Database, nickname: string, color: Color, npcCount: number): CreatedRoom {
   const trimmed = nickname.trim();
   if (!trimmed) throw new RoomError("nickname is required", "nickname_required", 400);
   if (!COLORS.includes(color)) throw new RoomError("not a valid color", "bad_color", 400);
+  const maxNpcs = COLORS.length - 1;
+  if (!Number.isInteger(npcCount) || npcCount < 1 || npcCount > maxNpcs) {
+    throw new RoomError(`npcCount must be between 1 and ${maxNpcs}`, "bad_player_count", 400);
+  }
 
   const roomId = randomUUID();
   const humanId = randomUUID();
@@ -334,20 +348,22 @@ export function createSoloNpcGame(db: Database.Database, nickname: string, color
     joinedAt: now,
     controller: "human",
   };
-  COLORS.filter((c) => c !== color).forEach((npcColor, i) => {
-    const npcId = randomUUID();
-    state.players[npcId] = {
-      id: npcId,
-      nickname: `${npcColor[0].toUpperCase()}${npcColor.slice(1)} (NPC)`,
-      color: npcColor,
-      seat: i + 1,
-      diceInHand: 0,
-      wonBills: [],
-      ready: true,
-      joinedAt: now,
-      controller: "npc",
-    };
-  });
+  COLORS.filter((c) => c !== color)
+    .slice(0, npcCount)
+    .forEach((npcColor, i) => {
+      const npcId = randomUUID();
+      state.players[npcId] = {
+        id: npcId,
+        nickname: `${npcColor[0].toUpperCase()}${npcColor.slice(1)} (NPC)`,
+        color: npcColor,
+        seat: i + 1,
+        diceInHand: 0,
+        wonBills: [],
+        ready: true,
+        joinedAt: now,
+        controller: "npc",
+      };
+    });
 
   transact(db, () => {
     db.prepare(
@@ -421,7 +437,7 @@ export function joinRoom(db: Database.Database, code: string, nickname: string, 
     }
     const existing = Object.values(state.players);
     if (existing.length >= MAX_PLAYERS) {
-      throw new RoomError("this room already has its 4 players", "room_full", 409);
+      throw new RoomError(`this room already has its ${MAX_PLAYERS} players`, "room_full", 409);
     }
     if (existing.some((p) => p.color === color)) {
       throw new RoomError("that color is already taken in this room", "color_taken", 409);
@@ -500,7 +516,7 @@ export function requestJoin(db: Database.Database, code: string, nickname: strin
     }
     const existing = Object.values(state.players);
     if (existing.length >= MAX_PLAYERS) {
-      throw new RoomError("this room already has its 4 players", "room_full", 409);
+      throw new RoomError(`this room already has its ${MAX_PLAYERS} players`, "room_full", 409);
     }
     if (existing.some((p) => p.color === color)) {
       throw new RoomError("that color is already taken in this room", "color_taken", 409);
@@ -566,7 +582,7 @@ export function approveJoin(
 
     const existing = Object.values(state.players);
     if (existing.length >= MAX_PLAYERS) {
-      throw new RoomError("this room already has its 4 players", "room_full", 409);
+      throw new RoomError(`this room already has its ${MAX_PLAYERS} players`, "room_full", 409);
     }
     if (existing.some((p) => p.color === req.color)) {
       throw new RoomError("that color is already taken in this room", "color_taken", 409);

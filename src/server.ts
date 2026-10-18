@@ -689,8 +689,13 @@ app.post("/api/bar/tables/:tableId/join", async (c) => {
 // bar to see.
 app.post("/api/bar/tables/:tableId/start-npc", async (c) => {
   const tableId = c.req.param("tableId");
-  const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody & { color?: unknown };
-  const result = tables.startNpcGame(db, tableId, barPlayerId(body), barSessionSecret(body), body.color as Color);
+  const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody & { color?: unknown; playerCount?: unknown };
+  // Defaults to 5 (the full table) when the client sends nothing — the
+  // product default ("默认五人"), not a fallback for a missing feature;
+  // tables.startNpcGame validates the real 2-COLORS.length range
+  // regardless of what a client sends.
+  const playerCount = typeof body.playerCount === "number" ? body.playerCount : 5;
+  const result = tables.startNpcGame(db, tableId, barPlayerId(body), barSessionSecret(body), body.color as Color, playerCount);
   publishRoomState(result.code, rooms.getPublicState(db, result.code));
   return c.json(result, 201);
 });

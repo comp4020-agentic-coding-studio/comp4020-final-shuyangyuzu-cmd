@@ -390,12 +390,15 @@ it("approval re-validates color at commit time — two pending requests for the 
   await postJson(`/api/rooms/${created.body.code}/disband`, { ...created.body, confirm: true });
 });
 
-it("approval re-validates capacity at commit time — never more than 4 seated players, and a full room refuses new requests outright", async () => {
+it("approval re-validates capacity at commit time — never more than 5 seated players, and a full room refuses new requests outright", async () => {
   const tableId = await anEmptyVegasTable();
   const host = await joinBar("CapHost", "red");
   const created = await postJson(`/api/bar/tables/${tableId}/create`, { ...host, color: "red" });
 
-  const colorsToFill = ["blue", "green", "yellow"];
+  // 5, not 4 — the official rulebook ships 5 player colours' worth of
+  // dice (src/rooms.ts's MAX_PLAYERS comment has the citation); this is
+  // the one test in this file that encodes the literal capacity number.
+  const colorsToFill = ["blue", "green", "yellow", "purple"];
   const requests = [];
   for (const color of colorsToFill) {
     const bar = await joinBar(`Cap-${color}`, "teal");
@@ -406,7 +409,7 @@ it("approval re-validates capacity at commit time — never more than 4 seated p
     expect(res.status).toBe(200);
   }
   const state = await getJson(`/api/rooms/${created.body.code}/state`);
-  expect(state.body.players).toHaveLength(4);
+  expect(state.body.players).toHaveLength(5);
 
   const lateBar = await joinBar("TooLate", "pink");
   const lateRequest = await postJson(`/api/bar/tables/${tableId}/join`, { ...lateBar, color: "red" });
@@ -459,7 +462,7 @@ it("refuses an action with a wrong bar session secret", async () => {
 
 // ---- Phase 5 (product-direction-update): the solo Vegas NPC table ----
 
-it("starting a solo Vegas-NPC game seats 1 human + 3 NPCs and starts immediately, no waiting", async () => {
+it("starting a solo Vegas-NPC game with no playerCount defaults to 5 — 1 human + 4 NPCs — and starts immediately, no waiting", async () => {
   const patron = await joinBar("SoloPlayer", "red");
   const started = await postJson("/api/bar/tables/vegas-npc-1/start-npc", { ...patron, color: "red" });
   expect(started.status).toBe(201);
@@ -467,14 +470,51 @@ it("starting a solo Vegas-NPC game seats 1 human + 3 NPCs and starts immediately
 
   const state = await getJson(`/api/rooms/${started.body.code}/state`);
   expect(state.body.phase).not.toBe("lobby"); // already started
-  expect(state.body.players).toHaveLength(4);
+  expect(state.body.players).toHaveLength(5);
   const human = state.body.players.find((p: { id: string }) => p.id === started.body.playerId);
   expect(human.controller).toBe("human");
-  expect(state.body.players.filter((p: { controller: string }) => p.controller === "npc")).toHaveLength(3);
-  // The 3 NPCs took exactly the 3 colors the human didn't.
+  expect(state.body.players.filter((p: { controller: string }) => p.controller === "npc")).toHaveLength(4);
+  // The 4 NPCs took exactly the 4 colors the human didn't.
   expect(state.body.players.map((p: { color: string }) => p.color).sort()).toEqual(
-    ["red", "blue", "green", "yellow"].sort(),
+    ["red", "blue", "green", "yellow", "purple"].sort(),
   );
+});
+
+it("playerCount controls how many NPCs are seated — 2 means 1 NPC, 5 means 4 NPCs, out-of-range is refused", async () => {
+  const two = await joinBar("SoloTwo", "red");
+  const twoStarted = await postJson("/api/bar/tables/vegas-npc-1/start-npc", { ...two, color: "red", playerCount: 2 });
+  expect(twoStarted.status).toBe(201);
+  const twoState = await getJson(`/api/rooms/${twoStarted.body.code}/state`);
+  expect(twoState.body.players).toHaveLength(2);
+  expect(twoState.body.players.filter((p: { controller: string }) => p.controller === "npc")).toHaveLength(1);
+
+  const five = await joinBar("SoloFive", "blue");
+  const fiveStarted = await postJson("/api/bar/tables/vegas-npc-1/start-npc", {
+    ...five,
+    color: "blue",
+    playerCount: 5,
+  });
+  expect(fiveStarted.status).toBe(201);
+  const fiveState = await getJson(`/api/rooms/${fiveStarted.body.code}/state`);
+  expect(fiveState.body.players).toHaveLength(5);
+
+  const tooFew = await joinBar("SoloTooFew", "green");
+  const tooFewRes = await postJson("/api/bar/tables/vegas-npc-1/start-npc", {
+    ...tooFew,
+    color: "green",
+    playerCount: 1,
+  });
+  expect(tooFewRes.status).toBe(400);
+  expect(tooFewRes.body.error).toBe("bad_player_count");
+
+  const tooMany = await joinBar("SoloTooMany", "yellow");
+  const tooManyRes = await postJson("/api/bar/tables/vegas-npc-1/start-npc", {
+    ...tooMany,
+    color: "yellow",
+    playerCount: 6,
+  });
+  expect(tooManyRes.status).toBe(400);
+  expect(tooManyRes.body.error).toBe("bad_player_count");
 });
 
 it("re-clicking the NPC table while already mid-game there hands back that same game, not a second one", async () => {

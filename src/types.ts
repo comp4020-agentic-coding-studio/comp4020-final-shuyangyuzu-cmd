@@ -1,9 +1,9 @@
 // Shared shapes for the room/game state. See PLAN.md for the rules these
 // encode, and CLAUDE.md for the constraints on how they're read and written.
 
-export type Color = "red" | "blue" | "green" | "yellow";
+export type Color = "red" | "blue" | "green" | "yellow" | "purple";
 
-export const COLORS: readonly Color[] = ["red", "blue", "green", "yellow"];
+export const COLORS: readonly Color[] = ["red", "blue", "green", "yellow", "purple"];
 
 export type Phase = "lobby" | "awaiting_roll" | "awaiting_placement" | "round_end";
 
