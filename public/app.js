@@ -18,7 +18,7 @@ const { createTavern } = await import(`./tavern.js?v=${assetVersion}`);
 // its own hand-written copy — see public/liveSync.js's own doc comment
 // for why (Crit 9 phase 7's independent review).
 const { shouldApplyLiveUpdate } = await import(`./liveSync.js?v=${assetVersion}`);
-const COLORS = ["red", "blue", "green", "yellow"];
+const COLORS = ["red", "blue", "green", "yellow", "purple"];
 const HEARTBEAT_MS = 5000; // comfortably under the server's default PRESENCE_STALE_MS (15s)
 // Cheap insurance only, not the primary path (Crit 9: live updates come
 // from GET /api/rooms/:code/events over SSE, below) — in case a stream
@@ -798,7 +798,7 @@ function renderTable(code, session, state) {
       el("p", {}, "Final money totals are shown above. Thanks for playing!"),
     ]);
   } else {
-    body = el("div", {}, [casinoTable(state), turnControls(code, session, state, isMyTurn)]);
+    body = hexBoard(code, session, state, isMyTurn);
   }
 
   const notes = el("details", { class: "notes" }, [
@@ -815,8 +815,20 @@ function renderTable(code, session, state) {
     ),
   ]);
 
+  // During active play, the hex board's own playerStrip (around the
+  // board's outside, per the reference layout) already shows this same
+  // information — showing the plain .players list too would just repeat
+  // it above the board. Lobby and round_end still show it here, same as
+  // before.
+  const showPlayerListHere = state.phase === "lobby" || state.phase === "round_end";
   render(
-    el("div", { class: "table" }, [header, playerList, pendingSection, body, notes, backToHomeButton()].filter(Boolean)),
+    el(
+      "div",
+      { class: "table" },
+      [header, showPlayerListHere ? playerList : null, pendingSection, body, notes, backToHomeButton()].filter(
+        Boolean,
+      ),
+    ),
   );
 }
 
@@ -924,56 +936,87 @@ function lobbyControls(code, session, state, isHost, me) {
   return el("div", {}, children.filter(Boolean));
 }
 
-function casinoTable(state) {
-  return el(
-    "div",
-    { class: "casinos" },
-    state.casinos.map((c) =>
-      el("div", { class: "casino" }, [
-        el("h3", {}, `Casino ${c.value}`),
-        el("p", { class: "bills" }, c.bills.length ? `$${c.bills.map((b) => b.toLocaleString()).join(", $")}` : "—"),
-        el(
-          "ul",
-          {},
-          Object.entries(c.placements)
-            .filter(([, count]) => count > 0)
-            .map(([playerId, count]) => {
-              const p = state.players.find((pl) => pl.id === playerId);
-              return el("li", {}, `${p?.nickname ?? "?"}: ${count}`);
-            }),
-        ),
-      ]),
-    ),
-  );
-}
+// The hexagonal board: six casinos arranged clockwise around a central
+// dice-rolling area, matching the physical game's own real-table layout
+// (the student's two reference photos) — casino 1 at the top, 2/3/4/5/6
+// continuing clockwise, each casino's own bills shown toward the board's
+// outer edge and its own placed dice (by colour and count) shown toward
+// the centre, a plain readable restyle of the same six `.casino` cards
+// the previous grid layout already rendered, not a new game mode. This
+// replaces both the old casinoTable() grid and turnControls()'s separate
+// call site: the roll/place controls now live inside the central dice
+// bowl instead of below the grid, since that's where the reference photos
+// put the physical dice tray — same api() calls, same accessible button
+// text ("Roll" / "Place all N×V"), nothing about the actual game logic
+// changes, only where its existing markup is positioned on screen.
+//
+// Deliberately NOT borrowed from the reference photos: any of Vegas
+// Royale's own rule differences (a large weighted die, poker chips,
+// bonus-sorted payouts, character abilities, a three-round match) — only
+// the six-casinos-around-a-bowl spatial arrangement is reused, per the
+// student's own explicit instruction. This remains the single-round base
+// game already documented in PLAN.md/README.md.
+function hexBoard(code, session, state, isMyTurn) {
+  // Casino `value` 1-6 placed clockwise from the top: 1 at -90°, each
+  // next value another 60° clockwise (matching the reference photos'
+  // 1-top/2-upper-right/3-lower-right/4-bottom/5-lower-left/6-upper-left
+  // arrangement exactly).
+  const angleFor = (value) => (-90 + (value - 1) * 60) * (Math.PI / 180);
+  const radiusPct = 38;
 
-function turnControls(code, session, state, isMyTurn) {
-  if (!isMyTurn) {
-    const current = state.players.find((p) => p.id === state.currentPlayerId);
-    return el("p", { class: "turn-note" }, `Waiting on ${current?.nickname ?? "…"}.`);
-  }
-
-  if (state.phase === "awaiting_roll") {
+  const casinos = state.casinos.map((c) => {
+    const angle = angleFor(c.value);
+    const left = 50 + radiusPct * Math.cos(angle);
+    const top = 50 + radiusPct * Math.sin(angle);
+    const placements = Object.entries(c.placements)
+      .filter(([, count]) => count > 0)
+      .map(([playerId, count]) => {
+        const p = state.players.find((pl) => pl.id === playerId);
+        return el("li", { class: "hex-dice-chip" }, [
+          el("span", { class: `swatch ${p?.color ?? ""}` }),
+          `×${count}`,
+        ]);
+      });
     return el(
-      "button",
-      {
-        onclick: async () => {
-          try {
-            applyIncoming(await api(`/rooms/${code}/roll`, session));
-          } catch (err) {
-            alert(err.message);
-          }
-        },
-      },
-      "Roll",
+      "div",
+      { class: "hex-casino", style: `left:${left}%;top:${top}%` },
+      [
+        el("h3", {}, `${c.value}`),
+        el(
+          "p",
+          { class: "hex-casino-bills" },
+          c.bills.length ? `$${c.bills.map((b) => b.toLocaleString()).join(", $")}` : "—",
+        ),
+        el("ul", { class: "hex-casino-dice" }, placements),
+      ],
     );
-  }
+  });
 
-  if (state.phase === "awaiting_placement" && state.lastRoll) {
+  const current = state.players.find((p) => p.id === state.currentPlayerId);
+  let bowlBody;
+  if (!isMyTurn) {
+    bowlBody = [el("p", { class: "turn-note" }, `Waiting on ${current?.nickname ?? "…"}.`)];
+  } else if (state.phase === "awaiting_roll") {
+    bowlBody = [
+      el(
+        "button",
+        {
+          onclick: async () => {
+            try {
+              applyIncoming(await api(`/rooms/${code}/roll`, session));
+            } catch (err) {
+              alert(err.message);
+            }
+          },
+        },
+        "Roll",
+      ),
+    ];
+  } else if (state.phase === "awaiting_placement" && state.lastRoll) {
     const counts = new Map();
     for (const v of state.lastRoll.values) counts.set(v, (counts.get(v) ?? 0) + 1);
-    return el("div", { class: "placement" }, [
-      el("p", {}, `You rolled: ${state.lastRoll.values.join(", ")}`),
+    bowlBody = [
+      el("p", { class: "bowl-roll" }, `You rolled: ${state.lastRoll.values.join(", ")}`),
       el(
         "div",
         { class: "value-buttons" },
@@ -993,10 +1036,35 @@ function turnControls(code, session, state, isMyTurn) {
           ),
         ),
       ),
-    ]);
+    ];
+  } else {
+    bowlBody = [el("p", {}, "…")];
   }
 
-  return el("p", {}, "…");
+  const bowl = el("div", { class: "dice-bowl" }, bowlBody);
+
+  const playerStrip = el(
+    "ul",
+    { class: "hex-players" },
+    state.players.map((p) => {
+      // No separate "NPC" tag here — a handed-off/NPC seat's own nickname
+      // already says "(NPC)" (src/rooms.ts's createSoloNpcGame), same as
+      // the original .players list (header, lobby/round_end) never added
+      // one either; adding a second one here would just duplicate it.
+      const tags = [];
+      if (p.id === state.hostPlayerId) tags.push("host");
+      if (!p.connected && p.controller !== "npc") tags.push("disconnected");
+      return el("li", { class: p.id === state.currentPlayerId ? "current-turn" : "" }, [
+        el("span", { class: `swatch ${p.color}` }),
+        `${p.nickname}${tags.length ? ` (${tags.join(", ")})` : ""} — ${p.diceInHand} dice — $${p.moneyTotal.toLocaleString()}`,
+      ]);
+    }),
+  );
+
+  return el("div", { class: "hex-board-wrap" }, [
+    el("div", { class: "hex-board" }, [bowl, ...casinos]),
+    playerStrip,
+  ]);
 }
 
 // ---- Boot -------------------------------------------------------------

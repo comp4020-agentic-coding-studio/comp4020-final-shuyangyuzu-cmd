@@ -311,7 +311,13 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     // colour — a different, smaller palette from the bar's own — is
     // chosen here, and taken colours at a waiting table are disabled
     // rather than left to fail server-side.
-    const GAME_COLORS=['red','blue','green','yellow'];
+    // 5, not 4 — the official rulebook ships 5 player colours' worth of
+    // dice (see src/rooms.ts's MAX_PLAYERS comment); this mirrors that
+    // server-side constant, with no shared module linking the two (a
+    // pre-existing risk, not new — spec/tables.test.ts exercises the
+    // real server-side limit regardless of what this list says).
+    const GAME_COLORS=['red','blue','green','yellow','purple'];
+    const MAX_SEATS=GAME_COLORS.length;
     async function openTableDialog(f,preferredColor){
       path=[];
       let tableList;
@@ -325,7 +331,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       const error=el('p',{class:'error',role:'alert'});
       const isEmpty=t.status==='empty';
       const isWaiting=t.status==='waiting';
-      const roomFull=t.playerCount>=4;
+      const roomFull=t.playerCount>=MAX_SEATS;
       // Phase 3 (product-direction-update): the first person to open an
       // empty table is seated immediately as host; everyone after that
       // submits a request the host approves or declines — never an
@@ -341,13 +347,13 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         },'')));
 
       const statusLine=isEmpty?`${f.label} is empty.`
-        :`${f.label} — ${t.playerCount}/4 ${isWaiting?'waiting to start':t.status==='in_progress'?'mid-game':'round over'}.`;
+        :`${f.label} — ${t.playerCount}/${MAX_SEATS} ${isWaiting?'waiting to start':t.status==='in_progress'?'mid-game':'round over'}.`;
       const pendingNote=t.pendingCount>0?` (${t.pendingCount} waiting for the host's approval)`:'';
       const subtitle=isEmpty
         ? `Starting as ${mine?.nickname??'you'} — just pick a table colour, and you're the host.`
         : isWaiting
           ? (roomFull
-              ? `This table already has its 4 players.${pendingNote}`
+              ? `This table already has its ${MAX_SEATS} players.${pendingNote}`
               : `Pick a colour to request a seat — the host approves or declines it.${pendingNote}`)
           : t.status==='in_progress'
             ? "This table is already playing — ask to be invited, or wait for it to finish."
@@ -384,28 +390,58 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     // colour, start immediately against 3 computer-controlled opponents.
     async function openNpcTableDialog(f,preferredColor){
       path=[];
+      // Total players including the human (2-MAX_SEATS), defaulting to
+      // the full table ("默认五人" — the product default, not a cap this
+      // dialog invents: src/tables.ts's startNpcGame validates the real
+      // range regardless of what this sends). Choosing a count narrows
+      // the colour swatches below to the first `count` of them, so the
+      // human's own colour choice and "how many NPCs" can never produce a
+      // contradiction (e.g. picking a colour that a lower count would
+      // have had to assign to an NPC seat instead).
+      let count=MAX_SEATS;
       let selected=preferredColor||GAME_COLORS[0];
       const error=el('p',{class:'error',role:'alert'});
-      const swatches=el('div',{class:'avatar-swatches','aria-label':'Table colour (seat preview)'},GAME_COLORS.map(c=>
-        el('button',{type:'button',class:'avatar-swatch','aria-label':`Colour ${c}`,
-          'aria-pressed':c===selected?'true':'false',style:`--swatch:${colors[c]}`,
-          onclick:e=>{selected=c;for(const b of e.currentTarget.parentElement.children)b.setAttribute('aria-pressed','false');e.currentTarget.setAttribute('aria-pressed','true');},
-        },'')));
+      const countRow=el('div',{class:'avatar-swatches','aria-label':'Total players, including you'});
+      const swatchRow=el('div',{class:'avatar-swatches','aria-label':'Table colour (seat preview)'});
+      const startBtn=el('button',{class:'enter-world',onclick:async e=>{
+        const btn=e.currentTarget;btn.disabled=true;error.textContent='';
+        try{
+          const result=await post(`/tables/${f.id}/start-npc`,{...session,color:selected,playerCount:count});
+          try{saveSession(result.code,{playerId:result.playerId,sessionSecret:result.sessionSecret});}catch{}
+          post('/resume',session).catch(()=>{});
+          overlay.replaceChildren();
+          navigate(`/?room=${result.code}`);
+        }catch(err){error.textContent=err.message||'Could not start that table';btn.disabled=false;}
+      }},'');
+      function renderCountRow(){
+        countRow.replaceChildren(...Array.from({length:MAX_SEATS-1},(_,i)=>i+2).map(n=>
+          el('button',{type:'button',class:'avatar-swatch count-swatch','aria-label':`${n} players`,
+            'aria-pressed':n===count?'true':'false',
+            onclick:()=>{
+              count=n;
+              if(!GAME_COLORS.slice(0,count).includes(selected))selected=GAME_COLORS[0];
+              renderCountRow();renderSwatches();renderStart();
+            },
+          },String(n))));
+      }
+      function renderSwatches(){
+        swatchRow.replaceChildren(...GAME_COLORS.slice(0,count).map(c=>
+          el('button',{type:'button',class:'avatar-swatch','aria-label':`Colour ${c}`,
+            'aria-pressed':c===selected?'true':'false',style:`--swatch:${colors[c]}`,
+            onclick:e=>{selected=c;for(const b of e.currentTarget.parentElement.children)b.setAttribute('aria-pressed','false');e.currentTarget.setAttribute('aria-pressed','true');},
+          },'')));
+      }
+      function renderStart(){
+        const npcCount=count-1;
+        startBtn.textContent=`Play vs. ${npcCount} NPC${npcCount===1?'':'s'}`;
+      }
+      renderCountRow();renderSwatches();renderStart();
       const body=[
         el('button',{class:'dialog-close','aria-label':'Close',onclick:()=>overlay.replaceChildren()},'×'),
         el('p',{class:'eyebrow'},'VEGAS DICE · SOLO'),el('h1',{},f.label),
-        el('p',{class:'dialog-subtitle'},"Just you against three computer-controlled opponents — starts right away, nobody else can join."),
-        swatches,error,
-        el('button',{class:'enter-world',onclick:async e=>{
-          const btn=e.currentTarget;btn.disabled=true;error.textContent='';
-          try{
-            const result=await post(`/tables/${f.id}/start-npc`,{...session,color:selected});
-            try{saveSession(result.code,{playerId:result.playerId,sessionSecret:result.sessionSecret});}catch{}
-            post('/resume',session).catch(()=>{});
-            overlay.replaceChildren();
-            navigate(`/?room=${result.code}`);
-          }catch(err){error.textContent=err.message||'Could not start that table';btn.disabled=false;}
-        }},'Play vs. 3 NPCs'),
+        el('p',{class:'dialog-subtitle'},"Just you against computer-controlled opponents — starts right away, nobody else can join."),
+        el('p',{class:'option-label'},'Players (including you)'),countRow,
+        swatchRow,error,startBtn,
       ];
       overlay.replaceChildren(el('section',{class:'world-dialog game-dialog',role:'dialog','aria-label':f.label},body));
     }
