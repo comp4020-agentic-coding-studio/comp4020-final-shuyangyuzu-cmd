@@ -10,9 +10,9 @@ I want friends to recognise a table's status and join without confusing an appli
 
 The first person to create a room at an empty online table becomes host. Later patrons submit requests with a chosen colour. A request is not a seat, does not increase the seated count, and does not enter turn order. Only the host can approve or decline it while the room is in its lobby.
 
-Approval re-checks capacity and colour availability inside the SQLite transaction that writes the player and event. If two approvals contend for the last seat, the first successful transaction obtains it; the other is rejected. A pending request never guarantees admission. The four-player limit and unique colours remain server rules. Starting requires the seated players to be ready; pending applicants cannot force a start. SSE distributes the resulting state to open sessions without a reload.
+Approval re-checks capacity and colour availability inside the SQLite transaction that writes the player and event. If two approvals contend for the last seat, the first successful transaction obtains it; the other is rejected. A pending request never guarantees admission. The five-player limit (the official rulebook's own base-game maximum — see PLAN.md's dated entry on this) and unique colours remain server rules. Starting requires the seated players to be ready; pending applicants cannot force a start. SSE distributes the resulting state to open sessions without a reload.
 
-Solo NPC tables are a different mode: each visitor starts a private game against three NPCs, with no admission requests. Their private games are not displayed as shared online rooms.
+Solo NPC tables are a different mode: each visitor chooses a total player count from two to five (default five) before starting a private game against that many NPCs, with no admission requests. Their private games are not displayed as shared online rooms.
 
 ## Alternatives and costs
 

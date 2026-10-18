@@ -3569,3 +3569,167 @@ recorded immediately below, for each review round separately.
 No game rule changed; `src/orders.ts` untouched; `crit-8`/`crit-9` tags
 unmoved; no `crit-10` tag created; no visual/UI change made (the second
 review round's own explicit instruction).
+
+# 2–5 players, a fifth chair, and a hexagonal board (2026-10-18)
+
+A separate feature request, after Crit 10's logging work above was
+already done, committed, and deploy-confirmed: expand the Vegas dice
+game from a 4-player cap to 2–5 players (both host-approved online
+tables and solo NPC tables), give each game table a real fifth chair,
+redesign the in-room board into the hexagonal six-casinos-around-a-
+central-dice-bowl layout from two reference photos of Vegas Royale's
+physical components, and let an NPC game's starter choose a 2–5 total
+player count before it starts. The student's own follow-up message
+fixed the rules themselves to the official base Las Vegas rulebook,
+not Royale's — the two photos are a layout reference only.
+
+## A real rules discrepancy, found and reported before building anything
+
+Fetched and extracted (`pdftotext`) the actual rulebook PDF
+(`ravensburger.org/.../26938_Vegas_EN.pdf` — the same source already
+cited in this file and in README.md). Its own "GAME COMPONENTS" line
+reads **"40 dice (8 in each player colour)"** — five colours' worth
+ship in the box. Its "Variant (2 to 4 players)" section is explicitly
+for playing with *fewer* than 5: it hands out extra *neutral white*
+dice to compensate for an "imaginary" missing player, not a way to
+exceed a 4-player base game. **5 is the real base-game maximum.** This
+app's existing "2–4 players" decision (recorded earlier in this file
+without re-checking this specific rulebook detail) was itself the
+divergence from the official rules, not a deliberate simplification —
+this entry corrects it rather than layering a new house rule on top.
+The neutral white-dice variant remains explicitly out of scope
+(CLAUDE.md's scope-discipline section already excluded it, unchanged by
+this correction), and no round/scoring/chip/skill rule from Royale was
+introduced — only Royale's physical *layout* (six casinos ringed around
+a dice bowl) was borrowed, purely as a way to arrange the same data this
+app already computed.
+
+## What changed, server-side
+
+`src/types.ts`'s `Color`/`COLORS` gained a fifth colour, purple,
+appended after the original four — existing identities, saved rooms,
+and turn orders that only ever used the first four are untouched, since
+`Color` was always a plain string column (`src/db.ts`), never an enum
+constraint. `src/rooms.ts`'s `MAX_PLAYERS` is now 5, with the three
+`room_full` error messages interpolating the constant instead of a
+hardcoded "4" so the text and the limit can never drift apart again.
+`createSoloNpcGame` now takes an explicit `npcCount` (1–4) instead of
+always filling every remaining colour, picking NPC colours
+deterministically in `COLORS` order after skipping the human's own
+colour. `src/tables.ts`'s `emptySeats()` derives its length from
+`COLORS.length` rather than a second hardcoded 4-entry array, and
+`startNpcGame` gained a validated `playerCount` (2–5) parameter,
+`src/server.ts`'s `start-npc` route defaulting it to 5 — one human plus
+four NPCs — per the student's own "默认五人" instruction. The minimum
+of 2 (`src/game.ts`'s existing `startGame` check) was already correct
+and needed no change.
+
+## The fifth chair's geometry
+
+`src/barLayout.ts`'s `GAME_CHAIRS` gained one new literal entry per
+table: `{ color: "purple", x: f.x, y: f.y - 1 }` — the tile directly
+north of each table's own first column. Verified collision-free by
+direct coordinate computation across all nine tables (three playable,
+six reserved): clear of every dining-table fixture (a full row further
+north), clear of the other four chairs (which only ever occupy the
+table's own row and the row below), and already `isWalkable`. This
+follows the exact same "fixed per-table offset" shape the original four
+chairs already used, just on a side (north) none of them occupied —
+zero client-side geometry code needed, since chair rendering,
+hit-testing, click-priority, `effectivePosition`, and speech-bubble
+positioning in `public/tavern.js` already iterate `GAME_CHAIRS`
+generically. The client picks the new chair up automatically through
+the existing `GET /api/bar/layout` fetch. A new test
+(`spec/barLayout.test.ts`) iterates every table confirming exactly
+`COLORS.length` chairs, one per colour, mutually exclusive tiles, all
+walkable.
+
+## Client-side color lists and the NPC count selector
+
+Three independent hardcoded colour arrays — `public/app.js`'s `COLORS`,
+`public/tavern.js`'s `GAME_COLORS`, plus two literal `/4` capacity
+strings in `tavern.js` — all needed the same fifth entry in lockstep
+(no shared module links them; this was pre-existing drift risk, not
+something this round introduced). `tavern.js` gained a `MAX_SEATS`
+constant derived once from `GAME_COLORS.length` rather than restating
+5 a third time. `openNpcTableDialog` gained a player-count selector
+(buttons for 2/3/4/5, default 5) that narrows the colour swatches shown
+below it to the first `count` entries — so a 2-player game only offers
+the colours that could actually be the human's own seat — and updates
+the start button's own label live (`Play vs. N NPCs`) before sending
+`playerCount` in the request body.
+
+## The hexagonal board — Royale's layout, this app's own rules and data
+
+`public/app.js`'s `casinoTable()`/`turnControls()` were replaced by one
+`hexBoard()` function: a central `.dice-bowl` showing the current
+roll and, only on your own turn, the existing roll/place controls
+(same `api()` calls, same accessible button text — "Roll", "Place all
+N×V" — per the student's own explicit instruction not to rename them),
+surrounded by six `.hex-casino` cards positioned by simple trigonometry
+(`-90° + (value-1)*60°`, clockwise: 1 top, 2 upper-right, 3 lower-right,
+4 bottom, 5 lower-left, 6 upper-left, matching the two reference
+photos). Each casino shows its own real `bills` and `placements` from
+`PublicState` — never a fixed "two bills" count invented to match a
+photo's own appearance. Player info (nickname, colour, dice remaining,
+winnings, NPC/online tag, current-turn highlight) wraps around the
+board as a flex row below it, reusing the same per-player data the
+original list already rendered, just repositioned. No big weighted
+die, no chips, no bonus-sorted payout tiers, no expansion skills, no
+multi-round scoring were introduced — only the component photos'
+spatial arrangement, confirmed against the actual reference images
+before writing any CSS. Visual language reuses the tavern's own
+existing tokens (dark wood, green felt, warm gold, the same
+`--panel`/`--border`/`--accent` palette) rather than inventing a new
+design language; no canvas, no SVG library, no animation library, no
+new dependency.
+
+## Two real visual bugs found during manual browser verification, fixed before reporting done
+
+Per this round's own instruction to actually check the result in a
+real browser rather than relying on the passing suite alone
+(Playwright, driven against the locally running isolated server, not
+added to the repo's own dependencies):
+
+1. **Duplicate "(NPC)" tag.** `hexBoard`'s player strip added its own
+   `"NPC"` tag for `controller === "npc"` players, but the server
+   already bakes `" (NPC)"` into the generated nickname itself
+   (`createSoloNpcGame`), producing a visible "Blue (NPC) (NPC)".
+   Fixed by removing the redundant client-side tag, matching how the
+   original player list never added a second one either.
+2. **Dice-bowl overflow.** The circular `.dice-bowl` had no overflow
+   handling; a roll yielding several distinct values produced more
+   "Place all N×V" buttons than the circle could show, spilling past
+   its own rim into the neighbouring casino card. Fixed with
+   `overflow-y: auto` and a `max-height` on the bowl itself, plus
+   capping `.value-buttons`' own width to the circle's inscribed square
+   (≈71% of the diameter, `1/√2`) so a button's own rounded corners
+   stay clear of the circle's curve even while scrolled. Verified at
+   the actual worst case — a roll producing all 6 distinct values, the
+   maximum this dice game allows in one roll — via a retry loop that
+   re-rolled fresh rooms until that exact case appeared, confirmed by
+   screenshot rather than assumed fixed from reading the CSS alone.
+
+## Verification
+
+`pnpm check` (222/222 tests — the prior 218 plus 4 new: all-5-chairs
+geometry, 5-seat capacity plus 6th-seat refusal, `playerCount`
+validation for solo NPC games, and a full 5-player NPC round settling
+with the existing settlement contract intact) and `pnpm check:evidence`,
+both green, run once after every change including the two visual
+fixes above, against an isolated local `DATA_DIR`, same method as every
+prior entry in this file. Manual browser verification (Playwright
+against the locally running server) covered: the classic join form's
+5 colour swatches; filling all 5 seats of an online table end to end
+through ready/start; the hex board at a desktop width and at a 375px
+mobile width, confirming every casino number/bill/dice count stayed
+legible and the bowl's controls stayed reachable; the NPC dialog's
+count selector narrowing colour choices and updating its own button
+text live across 2/3/4/5; a started 5-player NPC game landing in the
+same hex board with four correctly-labelled NPC opponents. Desktop and
+mobile screenshots were captured and shown to the student directly, not
+committed to the repo (verification artifacts, not source).
+
+`src/orders.ts` untouched; `crit-8`/`crit-9` tags unmoved; no
+`crit-10` tag created; `/ship` not run. CI and deploy confirmation
+recorded immediately below.
