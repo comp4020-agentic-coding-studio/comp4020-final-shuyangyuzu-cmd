@@ -462,3 +462,9 @@ body.table-mode { --bg:#50372a; --panel:#49372f; --fg:#f5e7ca; --muted:#d0b997; 
 
 .hex-casino { display:flex; flex-direction:column; align-items:center; justify-content:center; }
 .table-mode button.secondary { background:#392c26; color:#f4dfb7; border:1px solid #bc985a80; }
+.rules-button { padding:7px 10px; margin:0; font-size:22px; line-height:1; }
+.rules-dialog { width:min(560px,calc(100vw - 36px)); max-height:80vh; overflow-y:auto; box-sizing:border-box; color:#f5e7ca; background:#48352b; border:2px solid #b9925e; border-radius:12px; padding:22px; box-shadow:0 20px 80px #0008; }
+.rules-dialog::backdrop { background:#1c1518b8; }
+.rules-dialog h2,.rules-dialog h3 { color:#e4bb79; }
+.rules-dialog li { margin-bottom:10px; }
+.rules-dialog a { color:#e4bb79; display:block; margin:14px 0; }

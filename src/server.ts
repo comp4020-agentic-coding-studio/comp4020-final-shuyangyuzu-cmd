@@ -148,10 +148,10 @@ function tickBarPresence(): void {
 // the production default for real in an automated check.
 const LIVE_PRESENCE_TICK_MS = Number(process.env.LIVE_PRESENCE_TICK_MS ?? 1000);
 
-// The 2-minute away-from-table clock (CLAUDE.md's leave/exit states).
+// The 3-minute away-from-table clock (CLAUDE.md's leave/exit states).
 // Env-overridable for the same reason every other threshold in this file
 // is — a dedicated short-interval instance can verify this for real.
-const AWAY_FROM_TABLE_MS = Number(process.env.AWAY_FROM_TABLE_MS ?? 120000);
+const AWAY_FROM_TABLE_MS = Number(process.env.AWAY_FROM_TABLE_MS ?? tables.DEFAULT_AWAY_FROM_TABLE_MS);
 
 // A short, human-readable pause between an NPC's roll and its placement
 // (and between one NPC's turn and whoever's next) — "a brief display
@@ -226,6 +226,9 @@ const app = new Hono();
 // succeeded before whatever got rejected — src/actionLog.ts's own header
 // explains why guessing that from the rejection's error code was wrong.
 app.use("*", async (c, next) => {
+  // Expire before request-specific identity tracking: a timer's verified
+  // stored session must never count as proof of this HTTP caller's identity.
+  sweepTableDepartures();
   await runWithVerificationTracking(() => next());
 });
 
@@ -453,6 +456,24 @@ app.post("/api/rooms/:code/leave", async (c) => {
   return c.json({ ok: true });
 });
 
+app.post("/api/rooms/:code/exit", async (c) => {
+  const code = c.req.param("code");
+  const body = (await c.req.json().catch(() => ({}))) as AuthedBody;
+  rooms.exitGame(db, code, playerId(body), sessionSecret(body));
+  publishRoomState(code, rooms.getPublicState(db, code));
+  publishBarSnapshot();
+  return c.json({ ok: true });
+});
+
+app.post('/api/rooms/:code/depart',async(c)=>{
+  const body=(await c.req.json()) as AuthedBody;
+  rooms.departGame(db,c.req.param('code'),playerId(body),sessionSecret(body));return c.json({ok:true});
+});
+app.post('/api/rooms/:code/resume',async(c)=>{
+  const body=(await c.req.json()) as AuthedBody;
+  rooms.resumeGame(db,c.req.param('code'),playerId(body),sessionSecret(body));return c.json(currentRoomState(c.req.param('code')));
+});
+
 app.post("/api/rooms/:code/disband", async (c) => {
   const code = c.req.param("code");
   const body = (await c.req.json().catch(() => ({}))) as AuthedBody & { confirm?: unknown };
@@ -586,7 +607,7 @@ app.post("/api/bar/heartbeat", async (c) => {
   // moment a stale patron can become visible again, so recheck and push
   // immediately rather than waiting for the ticker's next pass.
   tickBarPresence();
-  return c.json({ ok: true });
+  return c.json({ ok: true, activeSeat: tables.getActiveSeat(db, barPlayerId(body)) });
 });
 
 app.post("/api/bar/move", async (c) => {
@@ -654,7 +675,7 @@ app.post("/api/bar/depart", async (c) => {
 app.post("/api/bar/resume", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody;
   tables.resumeActiveTable(db, barPlayerId(body), barSessionSecret(body));
-  return c.json({ ok: true });
+  return c.json({ ok: true, activeSeat: tables.getActiveSeat(db, barPlayerId(body)) });
 });
 
 // ---- Phase 2: each Vegas table bound to its own independent room ----
@@ -859,11 +880,17 @@ app.get("/api/bar/chat/events", (c) => {
 // what keeps it compatible with Fly's auto_stop_machines: an asleep
 // machine has no open SSE connections, so every iteration of this loop is
 // a no-op until something wakes it up the normal way (a real request).
+function sweepTableDepartures(): void {
+  const affectedCodes = [...new Set([...tables.enforceExpiredDepartures(db, AWAY_FROM_TABLE_MS),...rooms.expireGameDepartures(db,AWAY_FROM_TABLE_MS)])];
+  for (const code of affectedCodes) publishRoomState(code, rooms.getPublicState(db, code));
+  if (affectedCodes.length > 0) publishBarSnapshot();
+}
+
 setInterval(() => {
   if (live.hasBarSubscribers()) tickBarPresence();
   for (const code of live.subscribedRoomCodes()) tickRoomPresence(code);
 
-  // The 2-minute away-from-table clock (CLAUDE.md's leave/exit states):
+  // The 3-minute away-from-table clock (CLAUDE.md's leave/exit states):
   // same "only while something's actually watching" gate as presence
   // above, since there's no point enforcing a clock nobody can see the
   // result of and the machine would otherwise be asleep anyway. Unlike
@@ -873,9 +900,7 @@ setInterval(() => {
   // mutations with their own version bump already, not a presence-only
   // recompute, so there's nothing to diff against.
   if (live.hasBarSubscribers() || live.subscribedRoomCodes().length > 0) {
-    const affectedCodes = tables.enforceExpiredDepartures(db, AWAY_FROM_TABLE_MS);
-    for (const code of affectedCodes) publishRoomState(code, rooms.getPublicState(db, code));
-    if (affectedCodes.length > 0) publishBarSnapshot();
+    sweepTableDepartures();
   }
 
   // Minimal viable NPC turn-taking (Crit 9 phase 8's production-risk

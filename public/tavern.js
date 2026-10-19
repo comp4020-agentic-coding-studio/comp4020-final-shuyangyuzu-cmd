@@ -68,6 +68,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     // single global vegas:lastRoom key did (PLAN.md's
     // product-direction-update entry — the actual reported bug).
     let activeSeat=null;
+    let returnGameButton=null;
     let keys=new Set(), lastTime=0, destination=null, cameraInitialized=false, movementEpoch=0, heldDirection=null;
     // Crit 9: live updates arrive over SSE, not a fixed poll interval —
     // see CLAUDE.md. `liveCursor` is this channel's staleness-gate
@@ -379,7 +380,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
             // clears any pending away-from-table departure (see
             // src/tables.ts's resumeActiveTable for why only an explicit
             // action like this one, never a passive heartbeat, may do so).
-            post('/resume',session).catch(()=>{});
+            await post('/resume',session);
             overlay.replaceChildren();
             navigate(`/?room=${result.code}`);
           }catch(err){error.textContent=err.message||'Could not join that table';btn.disabled=false;}
@@ -412,7 +413,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         try{
           const result=await post(`/tables/${f.id}/start-npc`,{...session,color:selected,playerCount:count});
           try{saveSession(result.code,{playerId:result.playerId,sessionSecret:result.sessionSecret});}catch{}
-          post('/resume',session).catch(()=>{});
+          await post('/resume',session);
           overlay.replaceChildren();
           navigate(`/?room=${result.code}`);
         }catch(err){error.textContent=err.message||'Could not start that table';btn.disabled=false;}
@@ -442,7 +443,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       renderCountRow();renderSwatches();renderStart();
       const body=[
         el('button',{class:'dialog-close','aria-label':'Close',onclick:()=>overlay.replaceChildren()},'×'),
-        el('p',{class:'eyebrow'},'VEGAS DICE · SOLO'),el('h1',{},f.label),
+        el('p',{class:'eyebrow'},'VEGAS DICE · OFFLINE MODE'),el('h1',{},f.label),
         el('p',{class:'dialog-subtitle'},"Just you against computer-controlled opponents — starts right away, nobody else can join."),
         el('p',{class:'option-label'},'Players (including you)'),countRow,
         swatchRow,error,startBtn,
@@ -523,7 +524,10 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       // stalls without EventSource noticing; gated through the same
       // seq check above, so it's a no-op whenever the stream is doing
       // its job.
-      timers.push(setInterval(()=>post('/heartbeat',session).catch(()=>{}),5000),setInterval(fetchAndApply,10000));
+      timers.push(setInterval(()=>post('/heartbeat',session).then(resp=>{
+        activeSeat=resp.activeSeat??null;
+        if(!activeSeat&&returnGameButton){returnGameButton.remove();returnGameButton=null;}
+      }).catch(()=>{}),5000),setInterval(fetchAndApply,10000));
       visibilityHandler=()=>{
         if(document.visibilityState!=='visible')return;
         // A backgrounded tab can have its EventSource suspended by the
@@ -537,14 +541,17 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       // Driven by the server's own re-validated activeSeat, never a
       // locally-cached room code — a closed, left, or expired room, or a
       // different character's game entirely, is never offered here.
-      if(activeSeat){hud.querySelector('.hud-actions').appendChild(el('button',{class:'hud-button',onclick:()=>{
+      if(activeSeat){returnGameButton=el('button',{class:'hud-button',onclick:async()=>{
         // Clicking this is exactly "I'm deliberately going back to my
         // table" — clears any pending away-from-table departure (see
         // src/tables.ts's resumeActiveTable: only an explicit action like
         // this one may do so, never a passive heartbeat).
-        post('/resume',session).catch(()=>{});
-        navigate(`/?room=${activeSeat.roomCode}`);
-      }},'Return to your game'));}
+        try{
+          const response=await post('/resume',session);activeSeat=response.activeSeat??null;
+          if(!activeSeat){returnGameButton?.remove();returnGameButton=null;toast.textContent='Your previous game has ended.';return;}
+          navigate(`/?room=${activeSeat.roomCode}`);
+        }catch(error){toast.textContent=error.message||'Could not return to the game';}
+      }},'Return to your game');hud.querySelector('.hud-actions').appendChild(returnGameButton);}
       toast.textContent='Welcome in. WASD / arrows to walk · click a destination';canvas.focus();
     }
     const keyDown=e=>{if(['INPUT','TEXTAREA'].includes(e.target.tagName)||overlay.childElementCount)return;const key=e.key.toLowerCase();if(['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright'].includes(key)){e.preventDefault();keys.add(key);path=[];pendingSitSeat=null;approachTarget=null;}if(e.key==='Escape'){path=[];destination=null;pendingSitSeat=null;approachTarget=null;}};

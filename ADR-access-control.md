@@ -220,3 +220,7 @@ What this document cannot establish on its own: that a person watching
 only `flyctl logs` at a real crit can, in practice, follow along without
 confusion — that is what the live rehearsal is for, and its outcome is
 recorded separately rather than assumed from the tests passing.
+
+### Follow-up: leaving a game
+
+POST /api/rooms/:code/exit, /depart and /resume require the caller's room session. A player can release only their own seat. Offline closure follows from no human remaining; an Online departure cannot terminate a game other humans still occupy. Expiry uses persisted timestamps and the same exit operation, resolved by player session even for personal Offline rooms. Automatic expiry runs before the fresh request verification context so its authenticated stored session cannot contaminate a rejected caller's verified field. Offline is a UI mode name for computer opposition, not a claim of disconnected/browser-local execution.

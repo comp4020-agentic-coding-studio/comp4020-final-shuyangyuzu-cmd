@@ -40,3 +40,9 @@ bills outside each casino and coloured dice/counts inside. Vegas tables
 in the tavern are round with five evenly spaced chairs. Solo NPC rooms
 omit invitations; online rooms retain them. These are presentation
 changes; the single-round rule adaptation described above remains.
+
+## Exit and return
+
+Both Online and Offline games offer Exit game during play and after settlement. Offline means a personal game against computer opponents; this website still needs internet access. Exiting ends an Offline game immediately. In an Online game, the departing seat passes to computer control without losing its dice or winnings, and the next human becomes host if needed. The last human's exit closes the room.
+
+Back to the bar reserves the seat for three minutes, including invitations opened without a tavern identity. An explicit return before the deadline cancels the departure; passive heartbeats do not. After three minutes, the same exit policy applies. Expiry is checked on live ticks and on the first request after an idle/restart period. Repeated departure signals do not restart the clock. A scroll beside the game title opens the rules, including this website's one-round adaptation and the difference from Royale modules.

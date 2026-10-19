@@ -815,3 +815,9 @@ merely not-literally-on-top-of-one, since a chair's own drawn canopy/art
 extends past its single tile and a near miss still reads as broken.
 A purely decorative plant with no collision role (placed far from any
 furniture, like the map's four corner plants) does not need this.
+
+## 2026-10-19 correction — exits and three-minute departures
+
+This supersedes the earlier two-minute table-only description. Default grace is now 180000 ms. A persistent room_departures table covers invitation/direct entry without a bar identity, alongside table_departures for physical table bindings. Both resolve through the actual player's session, never a kiosk's shared-room pointer. Departure upserts preserve the first timestamp. A deliberate room resume clears both departure records; passive heartbeat/rejoin never does. Recorded departures reserve lobby seats against the shorter disconnect grace.
+
+Explicit authenticated Exit game and expired departures share exitGame: lobby leave/cancel; started Online seat becomes NPC without changing dice/turn order, host passes to a remaining human; no remaining human closes the room, including Offline games. Clear both binding and timers in the same transaction. Do not revive an NPC-handed-off seat using an old session. Enforce on live ticks and before incoming requests, including after restart/idle. Request-triggered enforcement runs OUTSIDE that request's AsyncLocalStorage verification context, so a stored session checked for expiry cannot incorrectly verify the incoming HTTP caller. Only authenticated self responses may contain activeSeat; refresh the Return button from the heartbeat response, never broadcast a private binding.

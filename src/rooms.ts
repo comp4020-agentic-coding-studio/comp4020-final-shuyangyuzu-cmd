@@ -139,10 +139,12 @@ function sweepStaleLobbyPlayers(db: Database.Database, row: RoomRow): void {
 
   const now = new Date();
   const seen = lastSeenTimes(db, row.id);
+  const explicitlyAway = (id:string) => !!db.prepare(`SELECT 1 FROM room_departures WHERE player_id = ?
+    UNION ALL SELECT 1 FROM table_departures d JOIN bar_players b ON b.id = d.bar_player_id WHERE b.current_game_player_id = ? LIMIT 1`).get(id,id);
   const staleIds = Object.values(state.players)
-    .filter((p) => isPastGrace(seen.get(p.id) ?? p.joinedAt, now))
+    .filter((p) => !explicitlyAway(p.id) && isPastGrace(seen.get(p.id) ?? p.joinedAt, now))
     .map((p) => p.id);
-  const staleRequestIds = state.pendingRequests.filter((r) => isPastGrace(r.requestedAt, now)).map((r) => r.id);
+  const staleRequestIds = state.pendingRequests.filter((r) => !explicitlyAway(r.id) && isPastGrace(r.requestedAt, now)).map((r) => r.id);
   if (staleIds.length === 0 && staleRequestIds.length === 0) return;
 
   transact(db, () => {
@@ -823,10 +825,69 @@ export function leaveRoom(db: Database.Database, code: string, playerId: string,
   });
 }
 
-/** Host-only, lobby-only, and requires an explicit confirm — this
- * destroys the room for everyone immediately, so a bare POST with no
- * confirmation marker is refused the same way a careless client-only
- * confirm dialog could be bypassed. */
+/** Persist the first explicit departure, independently of a bar identity. */
+export function departGame(db: Database.Database, code:string, playerId:string, sessionSecret:string):void {
+  const row=loadOpenRoom(db,code);requireSession(db,row.id,playerId,sessionSecret);
+  db.prepare('INSERT OR IGNORE INTO room_departures (player_id,room_id,left_at) VALUES (?,?,?)').run(playerId,row.id,new Date().toISOString());
+  logAction(db,{action:'depart_game',outcome:'ok',verified:true,actor:{kind:'room',id:playerId},room:{code}});
+}
+
+export function resumeGame(db: Database.Database, code:string, playerId:string, sessionSecret:string):void {
+  const row=loadOpenRoom(db,code);requireSession(db,row.id,playerId,sessionSecret);
+  const state:RoomState=JSON.parse(row.state_json);
+  if(!state.pendingRequests.some(p=>p.id===playerId)&&(!state.players[playerId]||state.players[playerId].controller==='npc'))throw new RoomError('your seat has already been released','player_removed',409);
+  transact(db,()=>{
+    if(state.players[playerId])recordHeartbeat(db,row.id,playerId);
+    const room=db.prepare('DELETE FROM room_departures WHERE player_id = ?').run(playerId);
+    const table=db.prepare('DELETE FROM table_departures WHERE bar_player_id IN (SELECT id FROM bar_players WHERE current_game_player_id = ?)').run(playerId);
+    if(room.changes||table.changes)logAction(db,{action:'resume_game',outcome:'ok',verified:true,actor:{kind:'room',id:playerId},room:{code}});
+  });
+}
+
+export function expireGameDepartures(db:Database.Database,awayMs:number):string[]{
+  return transact(db,()=>{
+    const due=db.prepare(`SELECT d.player_id,d.room_id,s.session_secret,r.code FROM room_departures d
+      JOIN sessions s ON s.player_id=d.player_id JOIN rooms r ON r.id=d.room_id WHERE d.left_at <= ?`).all(new Date(Date.now()-awayMs).toISOString()) as Array<{player_id:string;session_secret:string;code:string}>;
+    for(const d of due) exitGame(db,d.code,d.player_id,d.session_secret);
+    return [...new Set(due.map(d=>d.code))];
+  });
+}
+
+export function exitGame(db: Database.Database, code: string, playerId: string, sessionSecret: string): void {
+  const row = getRoomRow(db, code);
+  requireSession(db, row.id, playerId, sessionSecret);
+  transact(db, () => {
+    const fresh = getRoomRow(db, code);
+    if (!fresh.closed_at) {
+      const state: RoomState = JSON.parse(fresh.state_json);
+      const player = state.players[playerId];
+      if (state.phase === "lobby") {
+        if (player) leaveRoom(db, code, playerId, sessionSecret);
+        else if (state.pendingRequests.some(p=>p.id===playerId)) cancelJoinRequest(db,code,playerId,sessionSecret);
+      } else if (player && player.controller !== "npc") {
+        handoffToNpc(db, code, playerId);
+        const after: RoomState = JSON.parse(getRoomRow(db, code).state_json);
+        const humans = Object.values(after.players).filter(p => p.controller !== "npc").sort((a,b)=>a.seat-b.seat);
+        if (!humans.length) {
+          db.prepare("UPDATE rooms SET closed_at = ?, version = version + 1 WHERE id = ?").run(new Date().toISOString(), row.id);
+          logEvent(db, row.id, "room_closed", { reason: "last human exited" });
+          logAction(db, { action: "room_closed", outcome: "ok", verified: true, actor: { kind: "room", id: playerId }, room: { code }, detail: { reason: "last human exited" } });
+        } else if (fresh.host_player_id === playerId) {
+          db.prepare("UPDATE rooms SET host_player_id = ? WHERE id = ?").run(humans[0].id,row.id);
+          logEvent(db,row.id,"host_transferred",{newHostId:humans[0].id,reason:"host exited"});
+          logAction(db,{action:"host_transferred",outcome:"ok",verified:true,actor:{kind:"room",id:humans[0].id},room:{code},detail:{reason:"host exited"}});
+        }
+        logEvent(db, row.id, "player_exited", { playerId });
+        logAction(db,{action:"player_exited",outcome:"ok",verified:true,actor:{kind:"room",id:playerId},room:{code}});
+      }
+    }
+    db.prepare("DELETE FROM table_departures WHERE bar_player_id IN (SELECT id FROM bar_players WHERE current_game_player_id = ?)").run(playerId);
+    db.prepare('DELETE FROM room_departures WHERE player_id = ?').run(playerId);
+    db.prepare("UPDATE bar_players SET current_table_id = NULL, current_game_player_id = NULL WHERE current_game_player_id = ?").run(playerId);
+  });
+}
+
+/** Host-only lobby closure; requires an explicit confirmation marker. */
 export function disbandRoom(
   db: Database.Database,
   code: string,

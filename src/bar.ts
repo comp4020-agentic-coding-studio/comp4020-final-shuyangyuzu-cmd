@@ -377,7 +377,7 @@ export function sitAtSeat(db: Database.Database, playerId: string, sessionSecret
     db.prepare(`UPDATE bar_seats SET occupied_by = ? WHERE id = ?`).run(playerId, seatId);
 
     // Sitting at a real seat while bound to a game table means stepping
-    // away from it, physically — starts (or refreshes) the 2-minute
+    // away from it, physically — starts (or refreshes) the 3-minute
     // away-from-table clock (CLAUDE.md's leave/exit states). Standing
     // back up from this seat does NOT clear the clock on its own — only
     // actually re-engaging with the game (a heartbeat/rejoin/action
@@ -387,7 +387,7 @@ export function sitAtSeat(db: Database.Database, playerId: string, sessionSecret
     if (player.current_table_id) {
       db.prepare(
         `INSERT INTO table_departures (bar_player_id, table_id, left_at) VALUES (?, ?, ?)
-         ON CONFLICT(bar_player_id) DO UPDATE SET table_id = excluded.table_id, left_at = excluded.left_at`,
+         ON CONFLICT(bar_player_id) DO NOTHING`,
       ).run(playerId, player.current_table_id, new Date().toISOString());
     }
     logAction(db, {

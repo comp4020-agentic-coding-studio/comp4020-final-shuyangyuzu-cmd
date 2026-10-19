@@ -187,6 +187,11 @@ function migrate(db: Database.Database): void {
       client_msg_id TEXT NOT NULL,
       expires_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS room_departures (
+      player_id TEXT PRIMARY KEY REFERENCES sessions(player_id) ON DELETE CASCADE,
+      room_id TEXT NOT NULL REFERENCES rooms(id),
+      left_at TEXT NOT NULL
+    );
   `);
 
   // Added after the first deploy. "CREATE TABLE IF NOT EXISTS" above is a

@@ -20,6 +20,7 @@ const { createTavern } = await import(`./tavern.js?v=${assetVersion}`);
 const { shouldApplyLiveUpdate } = await import(`./liveSync.js?v=${assetVersion}`);
 const COLORS = ["red", "blue", "green", "yellow", "purple"];
 const HEARTBEAT_MS = 5000; // comfortably under the server's default PRESENCE_STALE_MS (15s)
+let activeRoomCode = null;
 // Cheap insurance only, not the primary path (Crit 9: live updates come
 // from GET /api/rooms/:code/events over SSE, below) — in case a stream
 // silently stalls without EventSource noticing. Gated through the same
@@ -131,27 +132,25 @@ function backToHomeButton() {
     {
       type: "button",
       class: "secondary",
-      onclick: () => {
-        // Returning to the bar while a table binding is still active
-        // starts the 2-minute away-from-table clock (CLAUDE.md's
-        // leave/exit states) — a best-effort, fire-and-forget signal
-        // alongside the navigation itself, not something this click
-        // blocks on. Reads the bar session directly from localStorage
-        // (same pattern buildClassicPanel already uses for the nickname
-        // prefill) since this view only otherwise holds the game room's
-        // own session, a different identity space (CLAUDE.md).
+      onclick: async () => {
+        // Persist the three-minute departure before navigating. Room
+        // identity covers direct invitation users without a bar identity;
+        // the optional bar binding uses its separate session.
         try {
+          const code=codeFromUrl(),roomSession=code?loadSession(code):null;
+          if(code&&roomSession)await api(`/rooms/${code}/depart`,roomSession);
           const barSession = JSON.parse(localStorage.getItem("vegas:bar:session") || "null");
           if (barSession?.playerId && barSession?.sessionSecret) {
-            fetch("/api/bar/depart", {
+            const response = await fetch("/api/bar/depart", {
               method: "POST",
               headers: { "content-type": "application/json" },
               body: JSON.stringify(barSession),
-            }).catch(() => {});
+            });
+            if (!response.ok) throw new Error('Could not save your departure. Please try again.');
           }
-        } catch {
-          // No bar identity on this browser, or storage unavailable —
-          // nothing to depart from.
+        } catch (error) {
+          alert(error.message || 'Could not return to the bar. Please try again.');
+          return;
         }
         navigate("/");
       },
@@ -163,7 +162,7 @@ function backToHomeButton() {
 // ---- Router -------------------------------------------------------------
 
 function codeFromUrl() {
-  return new URLSearchParams(location.search).get("room");
+  return new URLSearchParams(location.search).get("room")?.toUpperCase() || null;
 }
 
 function navigate(path) {
@@ -179,6 +178,15 @@ function route() {
 
   tavern.stop();
   const code = codeFromUrl();
+  if (activeRoomCode && !code) {
+    try {
+      const oldSession=loadSession(activeRoomCode);
+      if(oldSession)fetch(`/api/rooms/${activeRoomCode}/depart`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(oldSession),keepalive:true}).catch(()=>{});
+      const barSession=JSON.parse(localStorage.getItem('vegas:bar:session')||'null');
+      if(barSession)fetch('/api/bar/depart',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(barSession),keepalive:true}).catch(()=>{});
+    } catch {}
+  }
+  activeRoomCode=code;
   if (!code) {
     tavern.mount();
     return;
@@ -443,7 +451,7 @@ function enterRoom(code, session) {
   // a cleared/rotated secret should fall back to a clear message with a
   // way out, not a silent dead end (CLAUDE.md: identity recovery is
   // browser-local and has no fallback once that's gone; the UI says so).
-  api(`/rooms/${code}/rejoin`, session)
+  api(`/rooms/${code}/resume`, session).then(()=>api(`/rooms/${code}/rejoin`, session))
     .then((state) => {
       startHeartbeat(code, session);
       // rejoin's own response is already the room's current state —
@@ -717,7 +725,8 @@ function renderTable(code, session, state) {
 
   const header = el("header", {}, [
     el("h1", {}, "Las Vegas"),
-    el("p", {class:"table-subtitle"}, state.solo ? `SOLO TABLE · ${state.players.length - 1} NPCs` : ["Room ", el("strong", {}, code)]),
+    gameRulesButton(),
+    el("p", {class:"table-subtitle"}, state.solo ? `OFFLINE MODE · ${state.players.length - 1} computer opponents` : ["Room ", el("strong", {}, code)]),
     ...(state.solo ? [] : [copyInviteLinkControl(shareLink)]),
   ]);
 
@@ -823,11 +832,54 @@ function renderTable(code, session, state) {
     el(
       "div",
       { class: "table" },
-      [header, showPlayerListHere ? playerList : null, pendingSection, body, notes, backToHomeButton()].filter(
+      [header, showPlayerListHere ? playerList : null, pendingSection, body, notes,
+        state.phase !== 'lobby' ? exitGameButton(code,session,state.solo) : null,
+        el('p',{class:'note'},'Back to the bar keeps your seat for 3 minutes. Exit game leaves immediately.'),backToHomeButton()].filter(
         Boolean,
       ),
     ),
   );
+}
+
+function exitGameButton(code,session,solo){
+  return el('button',{class:'danger',onclick:()=>{
+    const error=el('p',{class:'error',role:'status'});
+    const dialog=el('dialog',{class:'rules-dialog','aria-label':'Confirm exit'},[
+      el('h2',{},'Exit game?'),
+      el('p',{},solo?'This ends your offline game immediately.':'A computer will take your seat while other human players continue. If nobody remains, the game ends.'),
+      error,
+      el('button',{class:'secondary',onclick:()=>dialog.close()},'Keep playing'),
+      el('button',{class:'danger',onclick:async e=>{
+        e.currentTarget.disabled=true;
+        try{await api(`/rooms/${code}/exit`,session);}
+        catch(err){error.textContent=err.message;e.currentTarget.disabled=false;return;}
+        dialog.close();stopLive();stopHeartbeat();clearSession(code);navigate('/');
+      }},'Confirm exit'),
+    ]);
+    dialog.addEventListener('close',()=>dialog.remove(),{once:true});document.body.appendChild(dialog);dialog.showModal();
+  }},'Exit game');
+}
+
+function gameRulesButton(){
+  return el('button',{class:'rules-button secondary','aria-label':'Game rules',title:'Game rules',onclick:()=>{
+    const dialog=el('dialog',{class:'rules-dialog','aria-labelledby':'vegas-rules-title'},[
+      el('h2',{id:'vegas-rules-title'},'How to play Las Vegas'),
+      el('p',{},'A game of dice placement and competing for casino prizes. Choose a colour when taking a seat; everyone shares the six casinos.'),
+      el('ol',{},[
+        el('li',{},'2–5 players start with 8 dice each. Casinos 1–6 each receive at least $50,000 in prizes.'),
+        el('li',{},'On your turn, roll all remaining dice. Choose one face and place every die with that face on the matching casino.'),
+        el('li',{},'Continue in turn until all dice are placed. At each casino, every player tied on dice count is excluded from its payout.'),
+        el('li',{},'Among the remaining players, most dice earns the highest banknote, next most earns the next banknote, and so on. No banknote left means no prize.'),
+      ]),
+      el('h3',{},'This website'),
+      el('p',{},'This is a one-round adaptation; highest winnings wins. The original base game has four rounds. Winnings here are public. Royale special casino tiles and large-die powers are not included.'),
+      el('p',{},'Online: request a seat and wait for host approval, then everyone readies up. Offline: play against computer opponents; an internet connection is still required.'),
+      el('p',{},'Back to the bar reserves your seat for 3 minutes. Exit game leaves immediately. The game keeps running while these rules are open.'),
+      el('a',{href:'https://www.ravensburger.org/spielanleitungen/ecm/Spielanleitungen/26938_Vegas_EN.pdf',target:'_blank',rel:'noopener'},'Original official rules'),
+      el('button',{class:'secondary',onclick:()=>dialog.close()},'Close rules'),
+    ]);
+    dialog.addEventListener('close',()=>dialog.remove(),{once:true});document.body.appendChild(dialog);dialog.showModal();
+  }},'📜');
 }
 
 function lobbyControls(code, session, state, isHost, me) {
@@ -859,7 +911,7 @@ function lobbyControls(code, session, state, isHost, me) {
       onclick: async () => {
         if (!confirm("Leave this table? Your seat is given up — someone else could take it.")) return;
         try {
-          await api(`/rooms/${code}/leave`, session);
+          await api(`/rooms/${code}/exit`, session);
         } catch (err) {
           alert(err.message);
           return;
@@ -883,7 +935,7 @@ function lobbyControls(code, session, state, isHost, me) {
     el(
       "p",
       { class: "note" },
-      "\"Back to the bar\" keeps your seat here — come back any time. \"Leave table\" gives it up for good.",
+      "Back to the bar keeps your seat for 3 minutes. Leave table gives it up immediately.",
     ),
   ];
 
