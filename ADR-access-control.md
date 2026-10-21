@@ -55,11 +55,17 @@ layers' own checks ever needing to know about each other.
 **What the public sees.** `toPublicState` (`src/rooms.ts:1188-1221`)
 is the only function that turns a room's internal state into what a
 client receives, and it is a strict allowlist: id, nickname, colour,
-seat, dice count, winnings, ready flag, a freshly-computed `connected`
+seat, dice count, ready flag, a freshly-computed `connected`
 flag, and `controller`. It never includes `session_secret` — not even
 the requesting player's own — and the deck is reported only as
-`deckSize`, never its contents or order, so a drawn/placed/returned bill
-is visible but what hasn't been drawn yet never is. The equivalent bar-
+`deckSize`, never its contents or order. Casino bills and round payouts
+are public; the pile's future order, including returned notes, is not.
+Following the 2026-10-22 four-round update, cumulative bank totals and
+won-note lists are null in public HTTP and SSE snapshots until `game_end`.
+An authenticated POST to `/api/rooms/:code/winnings` returns only the
+caller's seated, human-controlled player's own bank; another player's
+session cannot read it. Final standings reveal all banks at game end.
+The equivalent bar-
 side function, `getPublicBarState` (`src/bar.ts`), follows the same
 shape: nickname, colour, skin, position, seat, and current speech, never
 a secret.

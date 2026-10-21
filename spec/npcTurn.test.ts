@@ -54,13 +54,15 @@ function startTwoPlayerGame() {
   setReady(db, host.code, host.playerId, host.sessionSecret, true);
   setReady(db, host.code, guest.playerId, guest.sessionSecret, true);
   startGame(db, host.code, host.playerId, host.sessionSecret);
-  return { code: host.code, host, guest };
+  const first=getPublicState(db,host.code).currentPlayerId===host.playerId;
+  // Actor aliases for these turn tests; first player is now server-random.
+  return {code:host.code,host:first?host:guest,guest:first?guest:host};
 }
 
 it("the current-turn player's handoff lets the NPC engine roll and place legally, without double-executing", () => {
   const { code, host, guest } = startTwoPlayerGame();
   let state = getPublicState(db, code);
-  expect(state.currentPlayerId).toBe(host.playerId); // join order -> host goes first
+  expect(state.currentPlayerId).toBe(host.playerId); // helper aliases the actual first actor
 
   handoffToNpc(db, code, host.playerId);
   state = getPublicState(db, code);
@@ -169,7 +171,8 @@ it("npcRoll/npcPlace survive a process restart (a fresh connection to the same d
   setReady(liveDb, host.code, host.playerId, host.sessionSecret, true);
   setReady(liveDb, host.code, guest.playerId, guest.sessionSecret, true);
   startGame(liveDb, host.code, host.playerId, host.sessionSecret);
-  handoffToNpc(liveDb, host.code, host.playerId);
+  const actorId=getPublicState(liveDb,host.code).currentPlayerId!;
+  handoffToNpc(liveDb, host.code, actorId);
 
   // Simulate a restart: close this connection, open a brand-new one
   // against the same file — nothing in src/server.ts's in-memory
@@ -181,7 +184,7 @@ it("npcRoll/npcPlace survive a process restart (a fresh connection to the same d
   expect(npcRoll(liveDb, host.code)).toBe(true);
   const state = getPublicState(liveDb, host.code);
   expect(state.phase).toBe("awaiting_placement");
-  expect(state.players.find((p) => p.id === host.playerId)?.controller).toBe("npc");
+  expect(state.players.find((p) => p.id === actorId)?.controller).toBe("npc");
 
   liveDb.close();
 });

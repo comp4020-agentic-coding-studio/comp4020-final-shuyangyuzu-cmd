@@ -13,12 +13,14 @@ async function startedTwoPlayerRoom(): Promise<{ code: string; host: Session; bo
   const host = await createRoom(baseUrl, "Alice", "red");
   const bob = (await joinRoom(baseUrl, host.code, "Bob", "blue")).body as Session;
   await readyUpAndStart(baseUrl, host.code, host, [host, bob]);
-  return { code: host.code, host, bob };
+  const state=await getState(baseUrl,host.code);
+  // These aliases are the first actor and the other actor, not host authority.
+  return { code:host.code, host:state.currentPlayerId===host.playerId?host:bob, bob:state.currentPlayerId===host.playerId?bob:host };
 }
 
 it("refuses to roll out of turn", async () => {
   const { code, bob } = await startedTwoPlayerRoom();
-  const res = await rollDice(baseUrl, code, bob); // Alice (host) goes first, join order
+  const res = await rollDice(baseUrl, code, bob); // the non-current player
   expect(res.status).toBe(409);
   expect(res.body.error).toBe("not_your_turn");
 });

@@ -81,7 +81,7 @@ export interface TableStatusView {
 
 function phaseToStatus(phase: PublicState["phase"]): "waiting" | "in_progress" | "finished" {
   if (phase === "lobby") return "waiting";
-  if (phase === "round_end") return "finished";
+  if (phase === "game_end") return "finished";
   return "in_progress";
 }
 

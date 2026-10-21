@@ -123,10 +123,12 @@ apply it once).
 - `session_secret`, for any player, ever — not even the requesting
   player's own, in case a response is ever logged or cached somewhere it
   shouldn't be.
-- The draw pile's future order. Bills already placed on a casino, already
-  won by a player, or already returned to the bottom are fine to show;
-  what hasn't been drawn yet is not, even though this week's single round
-  never actually reshuffles mid-game.
+- The draw pile's future order, including notes returned to its bottom.
+  Casino bills and round payouts are public. Cumulative winnings and
+  won-banknote lists are private until `game_end`: public HTTP/SSE state
+  must return null for every player's bank, including the requester.
+  The authenticated own-winnings endpoint returns only that seated
+  human's bank; the client merges it into its own view, never a broadcast.
 
 ## Identity recovery
 
@@ -138,10 +140,11 @@ exist.
 
 ## Scope discipline
 
-No chat, no matchmaking beyond a single room's own link/code, no AI
-player, no neutral white-dice variant, no more than one round. These
-remain explicitly deferred (see `PLAN.md`) — do not build ahead of what
-the current crit asks for.
+The original Crit 8 scope deferred chat, NPCs and multiple rounds.
+Later user requests explicitly superseded those deferrals: tavern speech,
+NPC games and four-round base games are now implemented. Optional neutral
+white dice, Royale modules and matchmaking remain deferred. Do not infer
+new game variants from reference images.
 
 Sub-second real-time sync — listed here as deferred all the way through
 Crit 8 — is Crit 9's own explicit requirement instead: a change one
@@ -149,9 +152,7 @@ person makes must reach every other open session in about a second, with
 no reload. See `PLAN.md`'s Crit 9 section for what was actually built
 (the transport decision, the architecture, what was measured) and the
 section immediately below for the authority rule that transport has to
-follow. This is the one deferred item in this file ever superseded by a
-later crit's own spec; it's recorded here as a deliberate edit, not left
-as a silent contradiction with the paragraph above.
+follow. Later user-directed scope changes are recorded in `PLAN.md` too.
 
 ## Real-time push is a transport, not a new authority
 
@@ -821,3 +822,18 @@ furniture, like the map's four corner plants) does not need this.
 This supersedes the earlier two-minute table-only description. Default grace is now 180000 ms. A persistent room_departures table covers invitation/direct entry without a bar identity, alongside table_departures for physical table bindings. Both resolve through the actual player's session, never a kiosk's shared-room pointer. Departure upserts preserve the first timestamp. A deliberate room resume clears both departure records; passive heartbeat/rejoin never does. Recorded departures reserve lobby seats against the shorter disconnect grace.
 
 Explicit authenticated Exit game and expired departures share exitGame: lobby leave/cancel; started Online seat becomes NPC without changing dice/turn order, host passes to a remaining human; no remaining human closes the room, including Offline games. Clear both binding and timers in the same transaction. Do not revive an NPC-handed-off seat using an old session. Enforce on live ticks and before incoming requests, including after restart/idle. Request-triggered enforcement runs OUTSIDE that request's AsyncLocalStorage verification context, so a stored session checked for expiry cannot incorrectly verify the incoming HTTP caller. Only authenticated self responses may contain activeSeat; refresh the Return button from the heartbeat response, never broadcast a private binding.
+
+## Four-round games and winnings privacy (2026-10-22)
+
+The user superseded the one-round adaptation for both modes. Keep four
+rounds, eight dice per player per round, cumulative won-banknotes, and the
+same deck across rounds. Round 1 chooses its starter using server RNG;
+subsequent rounds advance that marker through the fixed clockwise order.
+This random-first choice intentionally differs from the physical oldest-
+player rule. `round_end` is a pause, never a finished table; only
+`game_end` reveals ranked banks and winner IDs. Equal money compares note
+count; equal count too permits joint winners. Only the authenticated host
+may advance a round, using the expected round to reject stale retries.
+Never expose cumulative banks through shared SSE, public snapshots or
+other players' authenticated requests before game end. Existing legacy
+rooms must retain winnings, deck and identity during metadata migration.

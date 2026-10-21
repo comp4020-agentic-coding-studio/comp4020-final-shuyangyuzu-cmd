@@ -468,3 +468,10 @@ body.table-mode { --bg:#50372a; --panel:#49372f; --fg:#f5e7ca; --muted:#d0b997; 
 .rules-dialog h2,.rules-dialog h3 { color:#e4bb79; }
 .rules-dialog li { margin-bottom:10px; }
 .rules-dialog a { color:#e4bb79; display:block; margin:14px 0; }
+.table-mode .round-marker { flex-basis:100%; color:#e5c48e; font:12px monospace; padding:9px 0 0; }
+.table-mode .game-results h2 { color:#f5d18b; font-family:Georgia,serif; font-size:clamp(22px,4vw,34px); overflow-wrap:anywhere; }
+.table-mode .final-standings { width:100%; border-collapse:collapse; margin:18px 0 24px; font-size:14px; }
+.table-mode .final-standings th,.table-mode .final-standings td { padding:12px 8px; border-bottom:1px solid #c59a5c55; text-align:left; overflow-wrap:anywhere; }
+.table-mode .winner-row { background:#b1843540; color:#ffe3a2; }
+.table-mode .next-round-button { padding:14px 24px; font-weight:bold; margin:10px 0 20px; }
+.table-mode .round-payouts { display:flex; flex-wrap:wrap; gap:8px 22px; padding-left:20px; color:#ead4ae; }

@@ -198,7 +198,7 @@ function scheduleNpcTurnIfNeeded(code: string): void {
         // A placement can end the round, which flips the bound table's
         // displayed status for anyone watching from the bar — same as a
         // human's own place handler already accounts for.
-        if (after.phase === "round_end") publishBarSnapshot();
+        if (after.phase === "round_end" || after.phase === "game_end") publishBarSnapshot();
       }
     } catch {
       // Room closed in the meantime, etc. — fine, there's nothing left to act on.
@@ -391,6 +391,17 @@ app.post("/api/rooms/:code/start", async (c) => {
   return c.json(state);
 });
 
+app.post('/api/rooms/:code/next-round',async c=>{
+  const body=(await c.req.json()) as AuthedBody & {expectedRound?:unknown};
+  const code=c.req.param('code');
+  rooms.nextRound(db,code,playerId(body),sessionSecret(body),Number(body.expectedRound));
+  const state=publishRoomState(code,rooms.getPublicState(db,code));publishBarSnapshot();return c.json(state);
+});
+app.post('/api/rooms/:code/winnings',async c=>{
+  const body=(await c.req.json()) as AuthedBody;
+  return c.json(rooms.ownWinnings(db,c.req.param('code'),playerId(body),sessionSecret(body)));
+});
+
 app.post("/api/rooms/:code/roll", async (c) => {
   const code = c.req.param("code");
   const body = (await c.req.json().catch(() => ({}))) as AuthedBody;
@@ -406,7 +417,7 @@ app.post("/api/rooms/:code/place", async (c) => {
   const state = publishRoomState(code, rooms.getPublicState(db, code));
   // A placement can end the round (phase -> round_end), which flips the
   // bound table's displayed status for anyone watching from the bar.
-  if (state.phase === "round_end") publishBarSnapshot();
+  if (state.phase === "round_end" || state.phase === "game_end") publishBarSnapshot();
   return c.json(state);
 });
 

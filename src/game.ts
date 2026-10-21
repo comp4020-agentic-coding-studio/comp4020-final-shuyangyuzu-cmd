@@ -9,7 +9,8 @@
 import { dealToMinimum } from "./deck.ts";
 import type { Rng } from "./rng.ts";
 import { rollDice } from "./rng.ts";
-import type { Casino, Player, RoomState } from "./types.ts";
+import type { Casino, Player, RoomState, Standing } from "./types.ts";
+export const TOTAL_ROUNDS = 4;
 
 export class GameError extends Error {
   readonly code: string;
@@ -52,6 +53,9 @@ export function startGame(state: RoomState, rng: Rng, connectedPlayerIds: Readon
     .sort((a, b) => a.seat - b.seat)
     .map((p) => p.id);
 
+  next.round = 1;
+  next.startingPlayerId = turnOrder[rng.randomInt(turnOrder.length)];
+  next.winnerIds = [];
   let deck = shuffleDeck(next.deck, rng);
   const casinos: Casino[] = [];
   for (let value = 1 as 1 | 2 | 3 | 4 | 5 | 6; value <= 6; value++) {
@@ -66,12 +70,41 @@ export function startGame(state: RoomState, rng: Rng, connectedPlayerIds: Readon
   }
 
   next.turnOrder = turnOrder;
-  next.currentPlayerId = turnOrder[0];
+  next.currentPlayerId = next.startingPlayerId;
   next.casinos = casinos;
   next.deck = deck;
   next.lastRoll = null;
   next.phase = "awaiting_roll";
   return next;
+}
+
+/** Preserve the fixed clockwise order, moving only the start-player marker. */
+export function startNextRound(state: RoomState): RoomState {
+  if (state.phase !== 'round_end' || state.round >= TOTAL_ROUNDS) throw new GameError('there is no next round to start','wrong_phase');
+  const next = clone(state);
+  const previous = next.turnOrder.indexOf(next.startingPlayerId!);
+  next.startingPlayerId = next.turnOrder[(previous + 1) % next.turnOrder.length];
+  next.currentPlayerId = next.startingPlayerId;
+  next.round++;
+  next.lastRoll = null;
+  next.winnerIds = [];
+  let deck = next.deck;
+  next.casinos = next.casinos.map(c => {
+    const { drawn, remaining } = dealToMinimum(deck);
+    deck = remaining;
+    return { value: c.value, bills: drawn, placements: {} };
+  });
+  next.deck = deck;
+  for (const player of Object.values(next.players)) player.diceInHand = 8;
+  next.phase = 'awaiting_roll';
+  return next;
+}
+
+export function finalStandings(state: RoomState): Standing[] {
+  const rows = Object.values(state.players).map(p => ({ playerId: p.id, moneyTotal: p.wonBills.reduce((a,b)=>a+b,0), banknoteCount:p.wonBills.length, rank:0 }))
+    .sort((a,b)=>b.moneyTotal-a.moneyTotal || b.banknoteCount-a.banknoteCount);
+  rows.forEach((row,i)=>{const previous=rows[i-1];row.rank=previous&&previous.moneyTotal===row.moneyTotal&&previous.banknoteCount===row.banknoteCount?previous.rank:i+1;});
+  return rows;
 }
 
 function shuffleDeck(deck: number[], rng: Rng): number[] {
@@ -196,7 +229,8 @@ export function settleRound(state: RoomState): RoomState {
   next.deck = deck;
   next.currentPlayerId = null;
   next.lastRoll = null;
-  next.phase = "round_end";
+  next.phase = next.round >= TOTAL_ROUNDS ? 'game_end' : 'round_end';
+  next.winnerIds = next.phase === 'game_end' ? finalStandings(next).filter(p=>p.rank===1).map(p=>p.playerId) : [];
   return next;
 }
 

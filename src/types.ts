@@ -5,7 +5,8 @@ export type Color = "red" | "blue" | "green" | "yellow" | "purple";
 
 export const COLORS: readonly Color[] = ["red", "blue", "green", "yellow", "purple"];
 
-export type Phase = "lobby" | "awaiting_roll" | "awaiting_placement" | "round_end";
+export type Phase = "lobby" | "awaiting_roll" | "awaiting_placement" | "round_end" | "game_end";
+export interface Standing { playerId: string; moneyTotal: number; banknoteCount: number; rank: number }
 
 export interface Player {
   id: string;
@@ -13,9 +14,8 @@ export interface Player {
   color: Color;
   seat: number;
   diceInHand: number;
-  /** Bills won this round, kept as a list (not just a sum) so a later,
-   * multi-round version of this app can judge an equal-total tie by who
-   * holds more banknotes, per the official rule. */
+  /** Bills accumulated across all rounds; the count breaks equal-money
+   * ties at game end. Private before the final standings. */
   wonBills: number[];
   /** Lobby-only. Defaults false on join; the host must ready up too.
    * Meaningless once the game has started (left at whatever it was). */
@@ -67,8 +67,11 @@ export interface PendingRequest {
  * see toPublicState, which drops the deck's future order. */
 export interface RoomState {
   phase: Phase;
-  /** Fixed at game start: join order (join = approval order for a
-   * request) for round 1. */
+  round: number;
+  startingPlayerId: string | null;
+  winnerIds: string[];
+  /** Fixed clockwise seat order. The independently chosen starting-player
+   * marker rotates through this order between rounds. */
   turnOrder: string[];
   currentPlayerId: string | null;
   players: Record<string, Player>;
@@ -100,8 +103,8 @@ export interface PublicPlayer {
   color: Color;
   seat: number;
   diceInHand: number;
-  wonBills: number[];
-  moneyTotal: number;
+  wonBills: number[] | null;
+  moneyTotal: number | null;
   ready: boolean;
   /** Derived at read time from how recently a heartbeat landed — never
    * stored, so it's never stale (CLAUDE.md). */
@@ -127,6 +130,11 @@ export interface PublicState {
   closed: boolean;
   closedAt: string | null;
   phase: Phase;
+  round: number;
+  totalRounds: number;
+  startingPlayerId: string | null;
+  winnerIds: string[];
+  standings: Standing[];
   turnOrder: string[];
   currentPlayerId: string | null;
   players: PublicPlayer[];

@@ -221,6 +221,9 @@ function migrateRoomState(db: Database.Database): void {
     for (const row of rows) {
       const state: RoomState = JSON.parse(row.state_json);
       let changed = false;
+      if(state.round==null){state.round=state.phase==='lobby'?0:1;changed=true;}
+      if(state.startingPlayerId===undefined){state.startingPlayerId=state.turnOrder?.[0]??null;changed=true;}
+      if(state.winnerIds==null){state.winnerIds=[];changed=true;}
       if (state.pendingRequests == null) {
         state.pendingRequests = [];
         changed = true;

@@ -20,6 +20,7 @@ import {
   approveJoin,
   createRoom,
   disbandRoom,
+  getPublicState,
   handoffToNpc,
   joinRoom,
   npcRoll,
@@ -121,8 +122,8 @@ it("acting out of turn logs no success line for that attempt", () => {
   startGame(db, host.code, host.playerId, host.sessionSecret);
 
   const spy = vi.spyOn(console, "log").mockImplementation(() => {});
-  // Alice (host) goes first by join order — Bob acting now is out of turn.
-  expect(() => roll(db, host.code, bob.playerId, bob.sessionSecret)).toThrow();
+  const other=getPublicState(db,host.code).currentPlayerId===host.playerId?bob:host;
+  expect(() => roll(db, host.code, other.playerId, other.sessionSecret)).toThrow();
   const lines = captureLogLines(spy);
   spy.mockRestore();
 
@@ -152,13 +153,11 @@ it("an NPC-controlled seat's turn logs with controller: npc and no verified:fals
   // something to act on, without waiting out a real 2-minute clock.
   // Whoever's turn it is first (join order: host first) must roll/place
   // before Bob's turn comes up — drive one full human turn first.
-  roll(db, host.code, host.playerId, host.sessionSecret);
-  const fresh = JSON.parse(
-    (db.prepare(`SELECT state_json FROM rooms WHERE id = (SELECT id FROM rooms WHERE code = ?)`).get(host.code) as {
-      state_json: string;
-    }).state_json,
-  );
-  place(db, host.code, host.playerId, host.sessionSecret, fresh.lastRoll.values[0]);
+  if(getPublicState(db,host.code).currentPlayerId===host.playerId){
+    roll(db,host.code,host.playerId,host.sessionSecret);
+    const fresh=getPublicState(db,host.code);
+    place(db,host.code,host.playerId,host.sessionSecret,fresh.lastRoll!.values[0]);
+  }
   handoffToNpc(db, host.code, bob.playerId);
 
   const spy = vi.spyOn(console, "log").mockImplementation(() => {});

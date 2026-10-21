@@ -487,6 +487,7 @@ let heartbeatHandle = null;
 // since a restarted process's sequence legitimately restarts at 0 — see
 // PLAN.md's Crit 9 phase 7).
 let liveCursor = null;
+let liveGeneration = 0;
 let visibilityHandler = null;
 // Set by startLive to its own staleness-gated apply function, so an
 // action handler (ready/start/roll/place/...) can hand its own request's
@@ -499,6 +500,7 @@ let applyIncoming = () => {};
 let refreshNow = () => {};
 
 function stopLive() {
+  liveGeneration++;
   if (eventSource) {
     eventSource.close();
     eventSource = null;
@@ -534,6 +536,12 @@ function startHeartbeat(code, session) {
 // a first fetch or the stream's first frame.
 function startLive(code, session, initialState) {
   stopLive();
+  const generation=liveGeneration;
+  let latestState=null, ownBalance=null, requestedBankVersion=-1;
+  function draw(state){
+    const visible=ownBalance?.version===state.version?{...state,players:state.players.map(p=>p.id===session.playerId?{...p,moneyTotal:ownBalance.moneyTotal,wonBills:ownBalance.wonBills}:p)}:state;
+    renderTable(code,session,visible);
+  }
 
   function apply(state) {
     // The one staleness rule, used for every source of state below (the
@@ -579,7 +587,14 @@ function startLive(code, session, initialState) {
       renderPendingRequest(code, session, state);
       return;
     }
-    renderTable(code, session, state);
+    latestState=state;draw(state);
+    if(!state.closed&&state.phase!=='game_end'&&requestedBankVersion!==state.version&&state.players.some(p=>p.id===session.playerId&&p.controller==='human')){
+      requestedBankVersion=state.version;
+      api(`/rooms/${code}/winnings`,session).then(bank=>{
+        if(generation!==liveGeneration||!latestState||bank.version!==latestState.version)return;
+        ownBalance=bank;draw(latestState);
+      }).catch(()=>{if(generation===liveGeneration)requestedBankVersion=-1;});
+    }
   }
   applyIncoming = apply;
 
@@ -729,6 +744,7 @@ function renderTable(code, session, state) {
     el("p", {class:"table-subtitle"}, state.solo ? `OFFLINE MODE · ${state.players.length - 1} computer opponents` : ["Room ", el("strong", {}, code)]),
     ...(state.solo ? [] : [copyInviteLinkControl(shareLink)]),
   ]);
+  if(state.phase!=='lobby')header.appendChild(el('p',{class:'round-marker'},`Round ${state.round} / ${state.totalRounds} · First player: ${state.players.find(p=>p.id===state.startingPlayerId)?.nickname??'—'}`));
 
   const playerList = el(
     "ul",
@@ -740,7 +756,7 @@ function renderTable(code, session, state) {
       if (!p.connected) tags.push("disconnected");
       return el("li", { class: p.id === state.currentPlayerId ? "current-turn" : "" }, [
         el("span", { class: `swatch ${p.color}` }),
-        `${p.nickname}${tags.length ? ` (${tags.join(", ")})` : ""} — ${p.diceInHand} dice — $${p.moneyTotal.toLocaleString()}`,
+        `${p.nickname}${tags.length ? ` (${tags.join(", ")})` : ""} — ${p.diceInHand} dice — ${p.moneyTotal==null?'Hidden':`$${p.moneyTotal.toLocaleString()}`}`,
       ]);
     }),
   );
@@ -803,9 +819,32 @@ function renderTable(code, session, state) {
   if (state.phase === "lobby") {
     body = lobbyControls(code, session, state, isHost, me);
   } else if (state.phase === "round_end") {
+    const error=el('p',{class:'error',role:'status'});
     body = el("div", {}, [hexBoard(code, session, state, false),
-      el("h2", {}, "Round over"),
-      el("p", {}, "Final money totals are shown above. Thanks for playing!"),
+      el("h2", {}, `Round ${state.round} complete`),
+      el('ul',{class:'round-payouts'},state.players.map(p=>{
+        const gained=state.casinos.reduce((sum,c)=>sum+(c.payout?.[p.id]||0),0);
+        return el('li',{},`${p.nickname}: +$${gained.toLocaleString()} this round`);
+      })),
+      el('p',{},isHost?`Review the payouts, then start round ${state.round+1}.`:`Waiting for ${state.players.find(p=>p.id===state.hostPlayerId)?.nickname??'the host'} to start round ${state.round+1}.`),
+      ...(isHost?[el('button',{class:'next-round-button',onclick:async e=>{
+        const button=e.currentTarget;button.disabled=true;
+        try{applyIncoming(await api(`/rooms/${code}/next-round`,{...session,expectedRound:state.round}));}
+        catch(err){error.textContent=err.message;button.disabled=false;}
+      }},`Start round ${state.round+1}`)]:[]),error,
+    ]);
+  } else if(state.phase==='game_end'){
+    const names=state.winnerIds.map(id=>state.players.find(p=>p.id===id)?.nickname??id);
+    body=el('section',{class:'game-results'},[
+      el('h2',{},names.length===1?`Winner: ${names[0]}`:`Joint winners: ${names.join(' & ')}`),
+      el('p',{},'All 4 rounds complete. Most money wins; tied totals are decided by banknote count. A complete tie shares the win.'),
+      el('table',{class:'final-standings','aria-label':'Final standings'},[
+        el('thead',{},[el('tr',{},['Rank','Player','Total','Banknotes'].map(text=>el('th',{scope:'col'},text)))]),
+        el('tbody',{},state.standings.map(row=>el('tr',{class:row.rank===1?'winner-row':''},[
+          el('td',{},String(row.rank)),el('td',{},state.players.find(p=>p.id===row.playerId)?.nickname??row.playerId),
+          el('td',{},`$${row.moneyTotal.toLocaleString()}`),el('td',{},String(row.banknoteCount)),
+        ]))),
+      ]),hexBoard(code,session,state,false),
     ]);
   } else {
     body = hexBoard(code, session, state, isMyTurn);
@@ -816,7 +855,7 @@ function renderTable(code, session, state) {
     el(
       "p",
       {},
-      "Winnings are shown openly to everyone here, continuously — unlike the physical board game, where they're kept face-down and hidden until the end. A deliberate choice for a shared, multi-phone table.",
+      "Your accumulated winnings are private until the end of round 4. You can see your own bank; everyone sees the final standings. Casino payouts remain visible when a round settles.",
     ),
     el(
       "p",
@@ -872,7 +911,7 @@ function gameRulesButton(){
         el('li',{},'Among the remaining players, most dice earns the highest banknote, next most earns the next banknote, and so on. No banknote left means no prize.'),
       ]),
       el('h3',{},'This website'),
-      el('p',{},'This is a one-round adaptation; highest winnings wins. The original base game has four rounds. Winnings here are public. Royale special casino tiles and large-die powers are not included.'),
+      el('p',{},'Play four rounds. Most total money wins; tied totals compare banknote count. If both tie, share the win. Your bank is private until the end. The server randomly chooses the first starter, then the marker passes to the next seat each round. The host starts each next round. Royale special casino tiles and large-die powers are not included.'),
       el('p',{},'Online: request a seat and wait for host approval, then everyone readies up. Offline: play against computer opponents; an internet connection is still required.'),
       el('p',{},'Back to the bar reserves your seat for 3 minutes. Exit game leaves immediately. The game keeps running while these rules are open.'),
       el('a',{href:'https://www.ravensburger.org/spielanleitungen/ecm/Spielanleitungen/26938_Vegas_EN.pdf',target:'_blank',rel:'noopener'},'Original official rules'),
@@ -1046,7 +1085,7 @@ function hexBoard(code, session, state, isMyTurn) {
     return [card,bills];
   });
   const current=state.players.find(p=>p.id===state.currentPlayerId);
-  const finished=state.phase==='round_end';
+  const finished=state.phase==='round_end'||state.phase==='game_end';
   const rolled=state.lastRoll?.values||[];
   const tray=el('div',{class:'dice-bowl'},[
     el('span',{class:'tray-label'},'LAS VEGAS'),
@@ -1074,10 +1113,10 @@ function hexBoard(code, session, state, isMyTurn) {
   },[
     el('span',{class:'player-token','aria-hidden':'true'},'♟'),
     el('div',{class:'player-identity'},[el('strong',{},p.controller==='npc'?p.nickname.replace(/\s*\(NPC\)$/,''):p.nickname),el('small',{},p.controller==='npc'?'NPC':p.id===session.playerId?'YOU':p.connected?'ONLINE':'AWAY')]),
-    el('div',{class:'player-totals'},[el('span',{},`${p.diceInHand} dice`),el('strong',{},`$${p.moneyTotal.toLocaleString()}`)]),
+    el('div',{class:'player-totals'},[el('span',{},`${p.diceInHand} dice`),el('strong',{},p.moneyTotal==null?(p.id===session.playerId?'Your bank…':'Hidden'):`$${p.moneyTotal.toLocaleString()}`)]),
   ])));
   return el('div',{class:'hex-board-wrap'},[
-    el('div',{class:'board-caption'},[el('span',{},'VEGAS DICE'),el('span',{},'ONE ROUND · 2–5 PLAYERS')]),
+    el('div',{class:'board-caption'},[el('span',{},'VEGAS DICE'),el('span',{},`ROUND ${state.round} / ${state.totalRounds} · 2–5 PLAYERS`)]),
     el('div',{class:'hex-board'},[casinoRing(),...pieces,tray]),
     el('section',{class:'table-controls','aria-label':'Turn controls'},actionChildren),players,
   ]);

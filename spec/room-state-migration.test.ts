@@ -112,5 +112,6 @@ it("preserves started-game progress and is idempotent without overwriting existi
   db = openDb(path);
   expect(db.prepare("SELECT state_json, version FROM rooms WHERE id = ?").get(row.id)).toEqual({ state_json: original, version: 42 });
   expect(db.prepare("SELECT * FROM events").all()).toEqual(events);
-  expect(getPublicState(db, room.code)).toMatchObject({ phase: "awaiting_placement", lastRoll: state.lastRoll, players: [expect.objectContaining({ controller: "npc", wonBills: [90000] })] });
+  expect(getPublicState(db, room.code)).toMatchObject({ phase: "awaiting_placement", lastRoll: state.lastRoll, players: [expect.objectContaining({ controller: "npc", wonBills: null })] });
+  expect(JSON.parse((db.prepare('SELECT state_json FROM rooms WHERE id = ?').get(row.id) as {state_json:string}).state_json).players[room.playerId].wonBills).toEqual([90000]);
 });

@@ -10,7 +10,7 @@ For me, good means that a newly invited friend can understand the space and join
 
 I also want the room to feel welcoming. Dark wood, warm lighting, recognisable furniture and small characters should make it somewhere to spend time, rather than a form with a decorative picture. My reference is [Gather](https://www.gather.town/): making other people's presence visible through a shared space. I take that spatial idea into a casual game setting. Stardew Valley's interiors and Red Dead Redemption 2's saloons are visual and atmosphere references, not sources of copied assets. The current artwork is drawn in code.
 
-Fairness matters as much as atmosphere. The server must decide turns, rolls, legal placements and payouts. One person's duplicate click must not change the game twice, and two tables must not share a game accidentally. I use the [official Las Vegas rulebook](https://www.ravensburger.org/spielanleitungen/ecm/Spielanleitungen/26938_Vegas_EN.pdf) as the rules reference. This adaptation currently plays one round, omits the optional neutral dice and displays winnings publicly, unlike the physical game's hidden winnings.
+Fairness matters as much as atmosphere. The server must decide turns, rolls, legal placements and payouts. One person's duplicate click must not change the game twice, and two tables must not share a game accidentally. I use the [official Las Vegas rulebook](https://www.ravensburger.org/spielanleitungen/ecm/Spielanleitungen/26938_Vegas_EN.pdf) as the rules reference. Online and Offline now play four rounds. I deliberately chose a random first starter instead of the rulebook's oldest-player rule; the starting marker then moves one seat clockwise each round. Optional neutral dice and Royale modules remain outside scope.
 
 ## Try the current version
 
@@ -18,13 +18,15 @@ Choose clothing colour, skin tone and a nickname, then enter. Walk using WASD, a
 
 The nine game tables include two playable online Vegas tables and one playable solo Vegas table; the six other game slots are reserved. Click a game chair to choose its colour, now five per table (a purple fifth joined the original four) to match the official rulebook's own base-game player count. The first player at an empty online table becomes host; later players request admission and the host approves or declines. Pending requests do not occupy seats. Invite a friend through the room link. With two to five seated players, everyone must be ready before the host starts. The solo table lets its starter choose a total player count from two to five (default five: one human and four NPCs) before it starts immediately. Roll your remaining dice, choose one face, and place all dice showing it. Equal dice counts cancel at settlement; the remaining players receive bills in descending order.
 
+After rounds 1–3, the host clicks Start round 2, 3 or 4 on the settlement screen. Dice reset to eight and winnings carry over. Unawarded notes return to the bottom of the same deck; each casino receives at least $50,000 again. You can see your own cumulative bank, while everyone else's stays hidden until the end. Individual round payouts remain visible. After round 4, the screen announces the winner and final standings: most money wins, then most banknotes; an exact tie shares the win.
+
 Use the Say something input and Send to speak publicly. Other people in the tavern see your text in a wrapping bubble over your character for about eight seconds. These new messages are public, not private conversation; previous private-chat records are not broadcast.
 
 Use separate browsers, profiles or devices to try different players. Identity is stored in that browser; clearing its storage or switching devices does not recover the same player.
 
 ## What I can check, and what I must judge
 
-The tests cover game actions, readiness, identity checks, table membership, migrations, exclusive tile occupancy, speech validation and expiry, persistence-related behaviour, and server-side action logging. Direction-control tests cover release and cancellation. The latest CI run passed 234 tests. `CLAUDE.md` turns these promises into agent constraints. Whether the room is inviting and its controls understandable needs actual use: I rejected the earlier form-led interface despite passing tests, and later found that painted chairs did not match their clickable tiles. My feedback and the agent's automated checks are separate evidence. A physical-phone long-press check remains outstanding.
+The tests cover game actions, readiness, identity checks, table membership, migrations, exclusive tile occupancy, speech validation and expiry, persistence-related behaviour, and server-side action logging. Direction-control tests cover release and cancellation. The current local check passed 245 tests, including complete four-round games for every player count, NPC continuation, private winnings and simultaneous next-round requests. `CLAUDE.md` turns these promises into agent constraints. Whether the room is inviting and its controls understandable needs actual use: I rejected the earlier form-led interface despite passing tests, and later found that painted chairs did not match their clickable tiles. My feedback and the agent's automated checks are separate evidence. A physical-phone long-press check remains outstanding.
 
 For Crit 9, shared positions, presence, table status and game progress travel through server-sent events, targeting updates within about a second without reload. Earlier agent measurements recorded roughly 50–220 ms propagation; these are measurements from the documented runs, not a guarantee for every connection. Restart epochs and per-channel revisions prevent old responses from replacing newer state. I chose host-approved admission so friends can control their table, with transaction-validated capacity rather than optimistic client reservations; [the decision record](ADR-last-seat.md) explains alternatives and costs.
 
@@ -38,11 +40,11 @@ The current online and solo Vegas board presents six connected casino
 sectors around a hexagonal dice tray on a wooden tabletop, with actual
 bills outside each casino and coloured dice/counts inside. Vegas tables
 in the tavern are round with five evenly spaced chairs. Solo NPC rooms
-omit invitations; online rooms retain them. These are presentation
-changes; the single-round rule adaptation described above remains.
+omit invitations; online rooms retain them. Both use the four-round
+base-game flow described above.
 
 ## Exit and return
 
 Both Online and Offline games offer Exit game during play and after settlement. Offline means a personal game against computer opponents; this website still needs internet access. Exiting ends an Offline game immediately. In an Online game, the departing seat passes to computer control without losing its dice or winnings, and the next human becomes host if needed. The last human's exit closes the room.
 
-Back to the bar reserves the seat for three minutes, including invitations opened without a tavern identity. An explicit return before the deadline cancels the departure; passive heartbeats do not. After three minutes, the same exit policy applies. Expiry is checked on live ticks and on the first request after an idle/restart period. Repeated departure signals do not restart the clock. A scroll beside the game title opens the rules, including this website's one-round adaptation and the difference from Royale modules.
+Back to the bar reserves the seat for three minutes, including invitations opened without a tavern identity. An explicit return before the deadline cancels the departure; passive heartbeats do not. After three minutes, the same exit policy applies. Expiry is checked on live ticks and on the first request after an idle/restart period. Repeated departure signals do not restart the clock. A scroll beside the game title opens the rules, including the four-round flow, random first starter and the difference from Royale modules.

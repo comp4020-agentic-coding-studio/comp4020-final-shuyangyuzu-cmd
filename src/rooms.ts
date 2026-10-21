@@ -7,7 +7,7 @@ import type Database from "better-sqlite3";
 import { randomBytes, randomInt, randomUUID } from "node:crypto";
 import { logAction, markIdentityVerified, shortIdFor, transact } from "./actionLog.ts";
 import { freshDeck } from "./deck.ts";
-import { applyPlacement, applyRoll, GameError, startGame as startGameLogic } from "./game.ts";
+import { applyPlacement, applyRoll, finalStandings, GameError, startGame as startGameLogic, startNextRound, TOTAL_ROUNDS } from "./game.ts";
 import { chooseNpcPlacement } from "./npc.ts";
 import {
   forgetPresence,
@@ -46,6 +46,9 @@ export class RoomError extends Error {
 function emptyState(): RoomState {
   return {
     phase: "lobby",
+    round: 0,
+    startingPlayerId: null,
+    winnerIds: [],
     turnOrder: [],
     currentPlayerId: null,
     players: {},
@@ -399,14 +402,14 @@ export function createSoloNpcGame(db: Database.Database, nickname: string, color
       JSON.stringify(started),
       roomId,
     );
-    logEvent(db, roomId, "game_started", { turnOrder: started.turnOrder });
+    logEvent(db, roomId, "game_started", { turnOrder: started.turnOrder, startingPlayerId: started.startingPlayerId, round: 1 });
     logAction(db, {
       action: "game_started",
       outcome: "ok",
       verified: true,
       actor: { kind: "room", id: humanId, nickname: trimmed },
       room: { code },
-      detail: { playerCount: started.turnOrder.length },
+      detail: { playerCount: started.turnOrder.length, startingPlayerId: started.startingPlayerId!, round: 1 },
     });
   });
 
@@ -1072,9 +1075,8 @@ export function npcPlace(db: Database.Database, code: string): boolean {
       detail: { controller: "npc", value },
     });
     // state.phase is already narrowed to "awaiting_placement" above, so
-    // (unlike the human place() below) next.phase === "round_end" alone
-    // is enough to mean "this placement is what ended it."
-    if (next.phase === "round_end") {
+    // a settled next phase means this placement ended the round/game.
+    if (next.phase === "round_end" || next.phase === "game_end") {
       logEvent(db, row.id, "round_settled", {
         wonBills: Object.fromEntries(Object.values(next.players).map((p) => [p.id, p.wonBills])),
       });
@@ -1085,6 +1087,7 @@ export function npcPlace(db: Database.Database, code: string): boolean {
         actor: null,
         room: { code: row.code },
       });
+      recordGameResult(db,row.id,row.code,next);
     }
     acted = true;
   });
@@ -1125,14 +1128,14 @@ export function startGame(db: Database.Database, code: string, playerId: string,
       row.id,
       fresh.version,
     );
-    logEvent(db, row.id, "game_started", { turnOrder: next.turnOrder });
+    logEvent(db, row.id, "game_started", { turnOrder: next.turnOrder, startingPlayerId: next.startingPlayerId, round: 1 });
     logAction(db, {
       action: "game_started",
       outcome: "ok",
       verified: true,
       actor: { kind: "room", id: playerId },
       room: { code: row.code },
-      detail: { playerCount: next.turnOrder.length },
+      detail: { playerCount: next.turnOrder.length, startingPlayerId: next.startingPlayerId!, round: 1 },
     });
   });
 }
@@ -1231,7 +1234,7 @@ export function place(
       room: { code: row.code },
       detail: { value },
     });
-    if (next.phase === "round_end" && state.phase !== "round_end") {
+    if (next.phase === "round_end" || next.phase === "game_end") {
       logEvent(db, row.id, "round_settled", {
         wonBills: Object.fromEntries(Object.values(next.players).map((p) => [p.id, p.wonBills])),
       });
@@ -1242,14 +1245,43 @@ export function place(
         actor: null,
         room: { code: row.code },
       });
+      recordGameResult(db,row.id,row.code,next);
     }
   });
+}
+
+function recordGameResult(db:Database.Database,roomId:string,code:string,state:RoomState):void {
+  if(state.phase!=='game_end')return;
+  logEvent(db,roomId,'game_finished',{round:state.round,winnerIds:state.winnerIds,standings:finalStandings(state)});
+  logAction(db,{action:'game_finished',outcome:'ok',verified:true,actor:null,room:{code},detail:{round:state.round,winners:state.winnerIds.map(id=>state.players[id].nickname).join(', ')}});
 }
 
 export function getPublicState(db: Database.Database, code: string): PublicState {
   const row = loadRoomAfterSweep(db, code);
   const state: RoomState = JSON.parse(row.state_json);
   return toPublicState(db, row, state);
+}
+
+export function nextRound(db:Database.Database,code:string,playerId:string,sessionSecret:string,expectedRound:number):void {
+  const row=loadOpenRoom(db,code);requireSession(db,row.id,playerId,sessionSecret);
+  if(row.host_player_id!==playerId)throw new RoomError('only the host can continue to the next round','not_host',403);
+  transact(db,()=>{
+    const fresh=getRoomRow(db,code), state:RoomState=JSON.parse(fresh.state_json);
+    refuseIfNpcControlled(state,playerId);
+    if(!Number.isInteger(expectedRound)||state.round!==expectedRound)throw new RoomError('this round has already changed; refresh the board','stale_round',409);
+    let next:RoomState;
+    try{next=startNextRound(state);}catch(err){if(err instanceof GameError)throw new RoomError(err.message,err.code,409);throw err;}
+    db.prepare('UPDATE rooms SET state_json = ?, version = version + 1 WHERE id = ? AND version = ?').run(JSON.stringify(next),row.id,fresh.version);
+    logEvent(db,row.id,'round_started',{round:next.round,startingPlayerId:next.startingPlayerId});
+    logAction(db,{action:'round_started',outcome:'ok',verified:true,actor:{kind:'room',id:playerId},room:{code},detail:{round:next.round,startingPlayerId:next.startingPlayerId!}});
+  });
+}
+
+export function ownWinnings(db:Database.Database,code:string,playerId:string,sessionSecret:string){
+  const row=loadRoomAfterSweep(db,code);requireSession(db,row.id,playerId,sessionSecret);
+  const state:RoomState=JSON.parse(row.state_json);requireSeated(state,playerId);refuseIfNpcControlled(state,playerId);
+  const wonBills=state.players[playerId].wonBills;
+  return {version:row.version,round:state.round,wonBills:[...wonBills],moneyTotal:wonBills.reduce((a,b)=>a+b,0)};
 }
 
 function toPublicState(db: Database.Database, row: RoomRow, state: RoomState): PublicState {
@@ -1262,6 +1294,11 @@ function toPublicState(db: Database.Database, row: RoomRow, state: RoomState): P
     closed: row.closed_at !== null,
     closedAt: row.closed_at,
     phase: state.phase,
+    round: state.round,
+    totalRounds: TOTAL_ROUNDS,
+    startingPlayerId: state.startingPlayerId,
+    winnerIds: state.winnerIds,
+    standings: state.phase==='game_end'?finalStandings(state):[],
     turnOrder: state.turnOrder,
     currentPlayerId: state.currentPlayerId,
     players: Object.values(state.players)
@@ -1272,8 +1309,8 @@ function toPublicState(db: Database.Database, row: RoomRow, state: RoomState): P
         color: p.color,
         seat: p.seat,
         diceInHand: p.diceInHand,
-        wonBills: p.wonBills,
-        moneyTotal: p.wonBills.reduce((sum, b) => sum + b, 0),
+        wonBills: state.phase==='game_end'||state.phase==='lobby'?p.wonBills:null,
+        moneyTotal: state.phase==='game_end'||state.phase==='lobby'?p.wonBills.reduce((sum, b) => sum + b, 0):null,
         ready: p.ready,
         connected: isConnected(seen.get(p.id) ?? p.joinedAt, now),
         controller: p.controller,

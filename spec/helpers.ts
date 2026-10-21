@@ -140,7 +140,7 @@ export async function playFullRound(
 ): Promise<PublicState> {
   let state = await getState(baseUrl, code);
   let guard = 0;
-  while (state.phase !== "round_end") {
+  while (state.phase !== "round_end" && state.phase !== "game_end") {
     if (++guard > 200) throw new Error("playFullRound: too many turns, something's stuck");
     const session = sessions[state.currentPlayerId!];
     const rolled = await rollDice(baseUrl, code, session);
