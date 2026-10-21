@@ -4330,6 +4330,30 @@ this session cannot do on its own):
 ## Deployment and production verification
 
 `pnpm check` (260/260) and `pnpm check:evidence` both green against a
-freshly started isolated `DATA_DIR`, immediately before pushing — see the
-entry immediately below for the actual commit, CI run, production
-`/version`, and live smoke check once the deploy completes.
+freshly started isolated `DATA_DIR`, immediately before pushing.
+Committed as `6f411e7` ("Add phone-style room voice calls for Online
+tables"), pushed to `main` as a fast-forward (confirmed
+`git merge-base --is-ancestor origin/main HEAD` first — no divergence to
+reconcile). GitHub Actions run `39636811453` (`check` and `deploy` jobs)
+both passed. Production `/version` returned `9f85d551e2`, a new hash
+confirming the deploy actually updated (distinct from the prior
+`21df6c29f8`).
+
+Live HTTP smoke check against production (two disposable identities,
+`ProdVoiceA`/`ProdVoiceB`, room created and disbanded within this same
+check — no existing production room touched): `voice/start` correctly
+created a call and invited B; B's own authenticated view correctly
+showed `status: "invited"` with `invitedBy: "ProdVoiceA"`; B's accept
+correctly added them as a real participant; a forged session on A's
+playerId with a wrong secret was correctly rejected 403 `unauthorized`;
+the authenticated `voice/ice-servers` endpoint returned the public STUN
+server only (`stun:stun.l.google.com:19302`) — confirming no TURN
+credentials are configured on this deployment, matching the stated
+limitation above exactly, not silently different from what's documented;
+both leaving ended the call (`active: false`); the test room was then
+disbanded via the host's own confirmed disband. This is a server-side
+HTTP smoke check against production, not the real two-device audio
+check — that remains the student's own step, listed above.
+
+Crit 8/9/10 tags were not moved; `/ship` was not run; the repository's
+existing public visibility is unchanged by this work.
