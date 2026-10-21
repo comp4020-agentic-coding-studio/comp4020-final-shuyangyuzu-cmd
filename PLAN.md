@@ -4067,3 +4067,269 @@ Deployment and production verification are recorded in the follow-up below when 
 ### Deployment verification — 2026-10-22 (Codex)
 
 Implementation commit `1e92cea` passed GitHub Actions run `39619193684` (check and deploy). Production `/version` returned `21df6c29f8`, matching a SHA-256 hash computed from the committed Git asset blobs, avoiding Windows working-tree newline differences. Codex then created two disposable Online identities and drove all four rounds over the production HTTPS API. Each inter-round settlement kept public banks null; the own-bank request succeeded and a forged other-player request returned 403. A non-host next-round request returned 403, valid host continuation returned 200, and repeating the old round returned 409. Final state was `game_end` with winner IDs and both final standings, and starting a fifth round returned 409. Both probes explicitly exited their own room afterward. These were HTTP checks, distinct from the actual local browser Offline four-round play-through above. No existing production room was used. Crit 8/9/10 tags and reflections remain unchanged; `src/orders.ts` is still untracked and excluded.
+
+# Room voice calls — implementation (2026-10-22, Claude)
+
+## Receiving Codex's handoff (recorded before any new code)
+
+Read CLAUDE.md, PLAN.md and PROCESS.md, then independently re-ran
+`pnpm check` and `pnpm check:evidence` against a freshly started,
+isolated local server (not production) before touching anything:
+245/245 tests passed, matching Codex's own count exactly; `check:evidence`
+confirmed all three reflections present and all 27 cited commits in
+`PROCESS.md` resolve. Confirmed directly: commit `1e92cea` ("Complete
+four-round Vegas games...") and `3be36d3` ("Record production
+verification...") both exist in this branch's history exactly where
+PLAN.md says. `gh run list` confirmed both commits' CI runs completed
+successfully (`checks` workflow, `success`). Production
+`https://comp4020-final-shuyangyuzu-cmd.fly.dev/version` returned
+`21df6c29f8`, matching PLAN.md's own recorded figure exactly. Nothing in
+the handoff needed correcting — the record matches the real repository
+state.
+
+## Plan (written before implementation, per the student's instruction)
+
+1. Server: new additive tables (`room_voice_calls`,
+   `room_voice_participants`), a new `src/voice.ts` module layered above
+   `rooms.ts` the same one-directional way `tables.ts`/`chat.ts` already
+   are, new routes in `src/server.ts`, a new private per-(room,player)
+   signaling channel in `src/live.ts`.
+2. Tests: `spec/voice.test.ts`, black-box over HTTP like the rest of
+   `spec/`.
+3. Client: `public/voiceCall.js` (WebRTC mesh + call state, kept outside
+   `app.js`'s full-DOM-replace render cycle), wired into `app.js`'s header
+   and route/enter/leave lifecycle.
+4. Browser verification with Chromium's fake-media-device flags (real
+   getUserMedia/RTCPeerConnection code path, synthetic audio — proves the
+   mesh negotiates correctly, not that a human heard sound).
+5. Deploy, verify production, update docs.
+
+## What was built
+
+**Data model** (`src/db.ts`): two new tables, `room_voice_calls` (one row
+per room with an active call — `room_code` is `UNIQUE`, which is the
+entire mechanism behind "two simultaneous initiates merge into one call":
+both INSERTs race the same unique constraint, the loser's insert is a
+no-op and that caller simply becomes a second joiner of the winner's row)
+and `room_voice_participants` (one row per call per player, `status`
+`'invited'` or `'joined'` — a decline or hangup just `DELETE`s the row
+rather than keeping a third status, which is what makes "a past decliner
+can join later with no special-casing" fall out for free: nothing
+distinguishes a past decliner from someone never invited, once the row is
+gone).
+
+**Server module** (`src/voice.ts`, ~340 lines): every mutation goes
+through `rooms.requireSeatedHumanPlayer` (a new export added to
+`rooms.ts` for this — real session, currently seated, `controller ===
+"human"`, same `RoomError` shapes every other authenticated room action
+already throws). Membership is reconciled lazily on every read
+(`getPublicCallSummary`), the same "evaluated fresh, no background
+sweep" principle CLAUDE.md already establishes for the lobby grace and
+the away-from-table clock — a participant who left, got NPC-handed-off,
+or went presence-stale is dropped the next time anyone reads the call's
+state, which in practice is within about a second since the existing
+presence ticker (`src/server.ts`) already calls this on every actively-
+watched room. A call that loses its last joined participant ends
+entirely and pushes `call_ended` to anyone still invited, so a pending
+ringer's screen closes with an honest reason rather than hanging forever.
+
+**Signaling** (`src/live.ts`'s `subscribeRoomVoice`/`publishToRoomVoice`,
+a new private channel keyed by `(roomCode, playerId)`, deliberately
+separate from the existing chat-inbox map since a game-room player id and
+a bar player id are different identity spaces per CLAUDE.md): SDP
+offers/answers and ICE candidates are relayed only between two
+participants the server has just re-confirmed are both `status ===
+'joined'` in the same call — never broadcast on the room's public SSE
+channel, and never reaching a declined/not-yet-accepted invitee. A
+deterministic initiator-per-pair rule (lexicographically smaller
+`playerId` always offers) avoids any coordinator or glare without extra
+state. Payloads are size-capped (16,000 chars) and rate-limited
+separately from the start/respond/leave/mute actions (which have their
+own, tighter limit) — both backstops against a hostile/malformed client,
+not UX-facing limits a real session could hit by normal use.
+
+**Public state**: `voiceCall: {active, callId, startedBy, participants}`
+rides the room's *existing* public payload (`GET /state`, every
+mutation's own response, every SSE push) — no new public transport.
+`participants` only ever lists `status === 'joined'` rows; an invited-
+but-undecided player's identity never appears there (verified directly
+in `spec/voice.test.ts`). The personal side — "you've been invited",
+"removed from the call", the authenticated own-view fallback fetch — is
+a separate route (`POST /rooms/:code/voice/state`) and the private SSE
+channel above, never folded into the public payload.
+
+**ICE/TURN** (`src/iceConfig.ts`): STUN (`stun.l.google.com:19302`,
+public, free, no credentials) always offered; TURN only appears if
+`TURN_URLS`/`TURN_USERNAME`/`TURN_CREDENTIAL` are set as real Fly
+secrets — this app never defaults to, purchases, or stands up an
+unauthenticated TURN relay on its own. The `/voice/ice-servers` endpoint
+is gated behind the same seated-human check as everything else, since a
+configured TURN credential is exactly the kind of secret CLAUDE.md says
+must never reach an unauthenticated caller.
+
+**Client** (`public/voiceCall.js`, new module, ~400 lines, kept outside
+`app.js`'s render cycle since `RTCPeerConnection`s/the mic stream/hidden
+`<audio>` elements can't survive a full DOM replace): a small closure
+exposing `enterRoom`/`leaveRoom`/`onStateUpdate`/`widget`/
+`incomingInviteModal` to `app.js`. Mic permission (`getUserMedia`) is
+requested only from the person's own deliberate click (start, or accept)
+— never on receiving an invite, never on decline, never on page
+load/refresh (a stale `'joined'` row found on reconnect is corrected by
+leaving that call again, since this fresh tab genuinely has no real
+connections for it — refresh never auto-opens the mic or auto-rejoins,
+per CLAUDE.md). A failed permission request tears down anything
+partially started and shows a retry affordance, never leaving a fake
+"in progress" state. The header's phone icon shows "📞 N" once a call is
+active; a click when not yet in the call starts/joins it, a click while
+already in it toggles the compact expand panel (participants, mute,
+hang up) — this two-step distinction is exactly what the real browser
+verification below caught needed covering explicitly. The incoming-call
+prompt is a small fixed corner toast (`.voice-invite-toast`), never a
+full-screen overlay, confirmed not to cover the board/rules/exit button
+in either desktop or the existing 650px mobile breakpoint.
+
+**Lifecycle**: `route()` (the single dispatcher every navigation already
+goes through) calls `voiceCall.leaveRoom()` on every route change — this
+is what tears down media/connections uniformly on "back to the bar",
+"exit game", disband, and a plain navigate-away, since every one of those
+already ends by calling `navigate('/')` or an equivalent route change,
+with no separate per-button wiring needed. Server-side reconciliation
+(not a client signal) is what actually removes a seat handed off to NPC
+control or genuinely disconnected past the presence-stale threshold —
+the client's own teardown on route change is only for *this* tab's own
+deliberate departure.
+
+## Tests (`spec/voice.test.ts`, 15 new, black-box over HTTP)
+
+Covers: invite-then-accept adds a real participant; decline doesn't join
+and the decliner can later join from the header's own start-or-join
+route; two simultaneous initiates merge into one call (never two) —
+verified via the final read-back state rather than either racing
+response, since which response reports what depends on commit order, not
+on the merge guarantee itself; repeated/stale accept doesn't duplicate
+membership; accurate participant count with mute not decreasing it,
+hangup only removing self, and the true last leaver ending the call;
+a late-joining room player can see and join an already-running call;
+solo/Offline games refuse voice entirely (`voice_not_available`); a
+forged session, a cross-room session, a pending (not-yet-approved) join
+request, and a seat already handed off to NPC control are all refused
+the same way every other authenticated room action already refuses them;
+signaling is relayed only between two joined participants and rejects a
+stale/ended call id and an oversized payload; the public payload never
+names an invited-but-undecided player; mute requires being an actual
+joined participant, not merely invited.
+
+**Two real test-authoring mistakes caught and fixed before trusting the
+suite, not server bugs**: the simultaneous-initiate test originally
+asserted on one racing response's own participant list, which is an
+ordering artifact (whichever write committed first may legitimately
+report only itself at that instant) — fixed to assert on the final
+read-back state instead, which is the actual "did they both really end
+up merged" guarantee. The NPC-handoff test originally readied up only 2
+of 3 players in a 3-player room, which `startGame` correctly refused
+(requires everyone present ready) — fixed to use a clean 2-player room.
+
+`pnpm check`: 260/260 (245 prior + 15 new), run against a freshly
+restarted isolated `DATA_DIR`, confirmed stable across two full runs.
+`pnpm check:evidence`: green.
+
+## Browser verification (Playwright, local, not production)
+
+A throwaway Playwright install (outside the repo, matching this
+project's own established pattern for browser checks with no committed
+test-runner dependency) launched Chromium with
+`--use-fake-device-for-media-stream --use-fake-ui-for-media-stream` —
+this makes `getUserMedia` succeed deterministically with a synthetic
+audio track and no OS-level permission dialog blocking automation, while
+still exercising the real client code path: real permission grant
+timing, real `RTCPeerConnection` negotiation, real ICE, real `<audio>`
+element wiring. **This proves the code path runs correctly end to end,
+not that a human actually heard audio** — that distinction is kept
+explicit throughout this entry and is not overstated anywhere below.
+
+Three real browser contexts (Alice/host, Bob, Carol — each its own
+character + room identity, going through the real bar-world entry flow
+then the classic join-by-code overlay) drove, in order: room creation and
+two joins; A starting a call (mic requested only then, panel count shows
+1); B and C both receiving the corner invite toast naming "VoiceAlice";
+B accepting (count becomes 2, mic requested only on this click); C
+declining (no panel appears, C never joined); C later joining via the
+header's own icon rather than a fresh invite (count becomes 3); muting B
+(count stays 3, A's own participant list shows Bob's 🔇 tag); A — the
+original initiator — hanging up (B and C's call continues, count drops
+to 2, confirming "hangup only removes self" and "initiator isn't a call
+admin"); B hanging up (C's call continues alone, count 1); C hanging up
+last (the call fully ends, the header's count disappears); A starting a
+genuinely new call afterward (proving the old call's end didn't leave
+stale state blocking a fresh one); A clicking "Back to the bar" and
+confirming every voice-call DOM element (icon, panel) is gone from that
+tab afterward, matching the lifecycle teardown design above.
+
+**20/20 checks passed.** No console errors were logged during the run
+(listened for directly on every page, not assumed absent). Two real
+test-script bugs were found and fixed while building this driver, not
+server bugs: the script initially assumed a single icon click both
+starts a call and opens its panel; the real (and intentional) design is
+two separate actions — a first click while not yet in the call starts
+it, a second click while already in it toggles the expand panel — the
+driver's assertions were corrected to match the actual, deliberate UX
+rather than the panel-auto-opens assumption being treated as a bug to
+fix in the app.
+
+## What is, and isn't, verified — stated plainly
+
+**Verified by this session**: the server-side membership/signaling logic
+(automated HTTP tests); the real client code path for permission timing,
+invite/accept/decline/join-from-header, accurate participant counting,
+mute-doesn't-decrease-count, hangup-only-removes-self, last-leaver-ends-
+the-call, and full teardown on "back to the bar" — all via a real
+Chromium browser with fake media devices, which is a genuine automated
+link test, not a synthetic claim of "it works."
+
+**Not verified by this session, and not claimed as such anywhere above**:
+that two real humans on two separate physical devices, on two separate
+real networks (e.g. one on home broadband, one on mobile data), can
+actually hear each other's real voice. Fake-device audio proves the
+signaling/negotiation path is correct; it does not exercise a real NAT
+traversal across genuinely different networks, nor does it prove a human
+ear hears anything. TURN is implemented and will activate automatically
+if real credentials are ever configured via `TURN_URLS`/`TURN_USERNAME`/
+`TURN_CREDENTIAL` Fly secrets, but **no TURN server is configured for
+this deployment** — without one, two peers behind symmetric NATs or
+restrictive firewalls (common on some mobile carriers and corporate
+networks) may fail to connect directly at all. This is a genuine,
+unresolved limitation of the current deployment, not a design oversight:
+CLAUDE.md explicitly forbids standing up an unauthenticated or
+self-purchased TURN relay without the student's own decision to pay for
+and configure one.
+
+**The student's own two-device, two-network acceptance steps** (what
+this session cannot do on its own):
+1. Open the deployed URL on two different physical devices, ideally on
+   two different networks (e.g. one on home Wi-Fi, one on mobile data
+   with Wi-Fi off) — the scenario that actually exercises real NAT
+   traversal, which this session's single-machine Playwright run cannot.
+2. Both characters join the same Online table (host + join-by-code or
+   table dialog), ready up.
+3. One device clicks the phone icon to start a call; confirm the other
+   device shows the incoming-call toast naming the first player.
+4. Accept on the second device; confirm audio is actually heard in both
+   directions (speak on one device, listen on the other, and vice
+   versa) — this is the one step only a real human can confirm.
+5. Try muting on one side and confirm the other side's participant list
+   shows the 🔇 tag while the header count stays the same.
+6. Hang up on one device and confirm the other's call continues; then
+   hang up on the second device and confirm the header's count
+   disappears for both.
+7. If step 4 fails specifically when the two devices are on genuinely
+   different networks (but works fine on the same Wi-Fi), that is the
+   expected signature of the missing-TURN limitation above, not a new
+   bug — report it, but it does not necessarily mean the feature is
+   broken.
+
+## Deployment and production verification
+
+`pnpm check` (260/260) and `pnpm check:evidence` both green against a
+freshly started isolated `DATA_DIR`, immediately before pushing — see the
+entry immediately below for the actual commit, CI run, production
+`/version`, and live smoke check once the deploy completes.

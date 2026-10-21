@@ -22,6 +22,8 @@ import { TableError } from "./tables.ts";
 import * as tables from "./tables.ts";
 import type { Color, PublicState } from "./types.ts";
 import { BUILD_VERSION, renderIndexHtml } from "./version.ts";
+import * as voice from "./voice.ts";
+import { getIceServers } from "./iceConfig.ts";
 
 // Every outgoing room payload carries `epoch` (SERVER_EPOCH, constant for
 // this process) and `rev` (this room's own push-revision, src/live.ts) in
@@ -32,10 +34,16 @@ import { BUILD_VERSION, renderIndexHtml } from "./version.ts";
 // `version` would be wrong (it would make an unrelated roll/place race
 // against it), and PLAN.md's Crit 9 phase 7 entry for the independent
 // review that caught this.
-type LivePublicState = PublicState & live.LiveCursor;
+// `voiceCall` rides this same payload, same channel — no new transport
+// (CLAUDE.md's voice-call section: the public summary is just one more
+// field on the state every room mutation already broadcasts). Only
+// JOINED participants are ever named here (voice.getPublicCallSummary's
+// own contract) — an invited-but-undecided player's identity never
+// appears on this public payload at all.
+type LivePublicState = PublicState & live.LiveCursor & { voiceCall: voice.PublicVoiceCall };
 
 function withLiveCursor(state: PublicState, rev: number): LivePublicState {
-  return { ...state, epoch: live.SERVER_EPOCH, rev };
+  return { ...state, epoch: live.SERVER_EPOCH, rev, voiceCall: voice.getPublicCallSummary(db, state.code) };
 }
 
 /** A plain read of a room's current public state — a GET, a rejoin, or
@@ -50,12 +58,16 @@ function currentRoomState(code: string): LivePublicState {
  * (connected flags) or the lazy disconnect-grace sweep (closed,
  * hostPlayerId, who's still seated) alone, with no real mutation and no
  * `version` bump — what tickRoomPresence diffs against the last thing
- * actually broadcast to decide whether there's anything new to push. */
+ * actually broadcast to decide whether there's anything new to push.
+ * Voice-call membership can also change this way (reconciliation dropping
+ * a participant whose seat just got swept) — included here for exactly
+ * that reason, not because a call itself is a presence concept. */
 function roomPresenceSignature(state: PublicState): string {
   return JSON.stringify({
     closed: state.closed,
     hostPlayerId: state.hostPlayerId,
     players: state.players.map((p) => ({ id: p.id, connected: p.connected })),
+    voiceCall: voice.getPublicCallSummary(db, state.code),
   });
 }
 const lastRoomPresenceSignature = new Map<string, string>();
@@ -530,6 +542,132 @@ app.post("/api/rooms/:code/requests/cancel", async (c) => {
   rooms.cancelJoinRequest(db, code, playerId(body), sessionSecret(body));
   const state = publishRoomState(code, rooms.getPublicState(db, code));
   return c.json(state);
+});
+
+// ---- Room voice calls (phone-style invite calling, Online rooms only —
+// CLAUDE.md's voice-call section). Every route re-verifies a real
+// session, current seat, human controller and room/call identity itself
+// (src/voice.ts's own requireSeatedHumanPlayer and callId checks) — never
+// trusts a client-claimed state. Every mutation re-broadcasts the room's
+// public state so the new voiceCall summary (participant count, who's
+// joined/muted) reaches every open SSE viewer within about a second, same
+// as any other room mutation; the personal side (an invite landing, a
+// forced removal, SDP/ICE signaling) goes out over the separate private
+// per-(room,player) channel below, never this broadcast.
+
+app.post("/api/rooms/:code/voice/start", async (c) => {
+  const code = c.req.param("code");
+  const body = (await c.req.json().catch(() => ({}))) as AuthedBody;
+  voice.startOrJoinCall(db, code, playerId(body), sessionSecret(body));
+  const state = publishRoomState(code, rooms.getPublicState(db, code));
+  return c.json(state);
+});
+
+app.post("/api/rooms/:code/voice/respond", async (c) => {
+  const code = c.req.param("code");
+  const body = (await c.req.json().catch(() => ({}))) as AuthedBody & { callId?: unknown; accept?: unknown };
+  voice.respondToInvite(db, code, playerId(body), sessionSecret(body), String(body.callId ?? ""), body.accept === true);
+  const state = publishRoomState(code, rooms.getPublicState(db, code));
+  return c.json(state);
+});
+
+app.post("/api/rooms/:code/voice/leave", async (c) => {
+  const code = c.req.param("code");
+  const body = (await c.req.json().catch(() => ({}))) as AuthedBody & { callId?: unknown };
+  voice.leaveCall(db, code, playerId(body), sessionSecret(body), String(body.callId ?? ""));
+  const state = publishRoomState(code, rooms.getPublicState(db, code));
+  return c.json(state);
+});
+
+app.post("/api/rooms/:code/voice/mute", async (c) => {
+  const code = c.req.param("code");
+  const body = (await c.req.json().catch(() => ({}))) as AuthedBody & { callId?: unknown; muted?: unknown };
+  voice.setMuted(db, code, playerId(body), sessionSecret(body), String(body.callId ?? ""), body.muted === true);
+  const state = publishRoomState(code, rooms.getPublicState(db, code));
+  return c.json(state);
+});
+
+// Signaling relay — never broadcast, delivered only to the named
+// recipient's own private channel (CLAUDE.md: "SDP、ICE、会话凭证不能广播
+// 给公共 SSE 订阅者"). Deliberately does NOT call publishRoomState: a
+// signal changes nothing about the call's public membership/mute state,
+// only carries a private negotiation message between two already-joined
+// participants.
+app.post("/api/rooms/:code/voice/signal", async (c) => {
+  const code = c.req.param("code");
+  const body = (await c.req.json().catch(() => ({}))) as AuthedBody & {
+    callId?: unknown;
+    toPlayerId?: unknown;
+    signalType?: unknown;
+    data?: unknown;
+  };
+  voice.relaySignal(
+    db,
+    code,
+    playerId(body),
+    sessionSecret(body),
+    String(body.callId ?? ""),
+    String(body.toPlayerId ?? ""),
+    String(body.signalType ?? ""),
+    body.data,
+  );
+  return c.json({ ok: true });
+});
+
+// Authenticated personal fallback — what a client fetches on page
+// load/reconnect to catch up on a pending invite or call state it might
+// have missed while its own .../voice/events connection was down (the
+// same "never trust a dropped connection alone" principle CLAUDE.md
+// already states for the room/bar channels).
+app.post("/api/rooms/:code/voice/state", async (c) => {
+  const code = c.req.param("code");
+  const body = (await c.req.json().catch(() => ({}))) as AuthedBody;
+  return c.json(voice.getOwnVoiceView(db, code, playerId(body), sessionSecret(body)));
+});
+
+// The ICE server list (STUN always; TURN only if real credentials are
+// configured via env — see src/iceConfig.ts) a joined participant's
+// RTCPeerConnection needs to actually negotiate. Gated behind the same
+// seated-human check as every other voice action — not because the STUN
+// URL itself is sensitive, but because a configured TURN credential is
+// exactly the kind of thing CLAUDE.md says must never be handed to an
+// unauthenticated caller, and there is no cheaper way to tell "a real
+// TURN secret" from "just the public STUN URL" at this call site than
+// gating the whole response the same way.
+app.post("/api/rooms/:code/voice/ice-servers", async (c) => {
+  const code = c.req.param("code");
+  const body = (await c.req.json().catch(() => ({}))) as AuthedBody;
+  rooms.requireSeatedHumanPlayer(db, code, playerId(body), sessionSecret(body));
+  return c.json({ iceServers: getIceServers() });
+});
+
+// This caller's own private voice channel — invites, forced removals,
+// and the actual SDP/ICE signaling relay, scoped to exactly this
+// (room, player) pair (src/live.ts's subscribeRoomVoice/
+// publishToRoomVoice). Authenticated via query params, same reasoning
+// as the chat inbox stream above (a GET/EventSource has no body).
+app.get("/api/rooms/:code/voice/events", (c) => {
+  const code = c.req.param("code");
+  const pId = c.req.query("playerId") ?? "";
+  const secret = c.req.query("sessionSecret") ?? "";
+  rooms.requireSeatedHumanPlayer(db, code, pId, secret); // thrown synchronously, before streamSSE opens the response
+  return streamSSE(c, async (stream) => {
+    const send = (data: string) => {
+      stream.writeSSE({ data }).catch(() => {});
+    };
+    const unsubscribe = live.subscribeRoomVoice(code, pId, send);
+    stream.onAbort(() => unsubscribe());
+    while (!stream.closed && !stream.aborted) {
+      try {
+        await stream.sleep(SSE_PING_MS);
+      } catch {
+        break;
+      }
+      if (stream.closed || stream.aborted) break;
+      await stream.writeSSE({ event: "ping", data: "" }).catch(() => {});
+    }
+    unsubscribe();
+  });
 });
 
 // ---- The bar (Phase 1: identity, movement, presence — see PLAN.md) ----

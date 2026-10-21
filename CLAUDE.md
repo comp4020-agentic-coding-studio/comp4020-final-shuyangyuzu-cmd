@@ -837,3 +837,83 @@ may advance a round, using the expected round to reject stale retries.
 Never expose cumulative banks through shared SSE, public snapshots or
 other players' authenticated requests before game end. Existing legacy
 rooms must retain winnings, deck and identity during metadata migration.
+
+## Room voice calls (2026-10-22)
+
+Online rooms only — never Offline/solo NPC games, never a pending
+join-request identity, never an NPC-controlled seat. WebRTC mesh audio
+(2–5 seated humans); the server handles authentication, signaling relay,
+and call-membership state, never audio itself — no media server, nothing
+recorded.
+
+**Phone-style, not persistent chat.** A call is started by one seated
+human's own deliberate action, which must request microphone permission
+only after that action and only for the person who took it — an invited
+player, or anyone who merely sees the call exists, must never have
+`getUserMedia` called on their behalf before they themselves accept.
+Declining is a one-time "not this call," never a standing block: the
+same person can join later from the room's own call-status header with
+no special-casing, since a decline simply removes that invite row rather
+than recording a block.
+
+**One call per room, ever, at a time.** Two simultaneous "start a call"
+requests must merge into the same call, never spawn two — enforced by a
+database uniqueness constraint on the room, not application-level
+locking, so the merge is correct even under a genuine race. The person
+who happened to create the call row is not its administrator: hanging up
+removes only that person, never forces the call to end for anyone else.
+The call ends, and only ends, when its last actually-joined participant
+leaves — at that point every still-pending invitee is told the call
+ended, not left to ring indefinitely.
+
+**Membership is reconciled lazily, like every other grace period in this
+file.** There is no background sweep dedicated to voice calls. A
+participant who left the room, was handed off to NPC control, or went
+presence-stale past the existing connected-threshold is dropped from the
+call the next time anything reads its state — which, via the existing
+presence ticker, is within about the same ~1 second as everything else
+already pushed live. A call's own public summary (who's joined, who's
+muted, a plain count) rides the room's existing public state/SSE
+payload; nothing about this introduces a second transport for the public
+half. An invited-but-undecided player's identity must never appear on
+that public payload — only confirmed, joined participants are public,
+matching the existing player-list transparency rule for everything else
+in a room.
+
+**Signaling is never public.** SDP offers/answers and ICE candidates are
+relayed only between two participants the server re-confirms are both
+genuinely joined to the same call, over a channel scoped to exactly one
+(room, player) pair — never the room's shared SSE broadcast, and never
+reaching a declined or not-yet-accepted invitee. Every signaling and
+membership action re-verifies session, current seat, human controller,
+same room, and the call's own identity (a stale or ended call id is
+refused, not silently accepted) before doing anything.
+
+**STUN always, TURN only if actually configured.** A public STUN server
+is always offered so ordinary NAT traversal works without any
+credential. TURN only appears when real credentials are present as
+server secrets — this app must never default to, purchase, or stand up
+an unauthenticated TURN relay on its own initiative, and a TURN
+credential must never be hardcoded into the client bundle. Without TURN
+configured, two peers behind symmetric NATs or restrictive firewalls may
+simply fail to connect — a real, stated limitation, not something to
+paper over by testing only on one shared network and reporting success.
+
+**Refresh never silently rejoins a call or reopens the microphone.**
+Reconnecting after a dropped connection re-fetches this player's own
+authenticated call state as a catch-up, exactly like every other private
+channel in this app already does on reconnect — but if that catch-up
+finds a stale "joined" row from before this exact page load, the correct
+action is to actually leave that call again (this fresh page genuinely
+holds no real peer connections for it), never to assume presence and
+suppress reconnection. Leaving the room view (back to the bar, exit,
+disband, a seat handed to NPC control) must tear down the microphone,
+any peer connections, and any audio playback — the same lifecycle
+discipline this file already requires for every other resource a
+departing player can leave dangling.
+
+**The incoming-call prompt is a toast, not a modal.** It must never cover
+the board, dice, rules, or exit controls, on desktop or at the existing
+mobile breakpoint; declining or accepting must each be a single,
+unambiguous action, and nothing about receiving or declining an invite
+may trigger a repeated ring or auto-retry.

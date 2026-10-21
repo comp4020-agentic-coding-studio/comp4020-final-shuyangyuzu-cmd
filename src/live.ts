@@ -216,3 +216,62 @@ export function publishToPlayer(playerId: string, payload: unknown): void {
   const data = JSON.stringify(payload);
   for (const send of set) send(data);
 }
+
+// ---- Room voice calls (phone-style invite calling, Online rooms only) —
+// src/voice.ts ----
+//
+// Two separate things ride two separate transports, by design (CLAUDE.md:
+// real-time push only ever carries server-computed state outward, and a
+// public room payload may never carry signaling):
+//
+// 1. The call's PUBLIC summary (participant count, who's joined, who's
+//    muted — never who's merely been invited) rides the room's EXISTING
+//    public SSE channel above, as one more field on the same payload
+//    every other room mutation already broadcasts through
+//    publishRoomState — no new transport for this half.
+// 2. Everything personal — "you've been invited", "the call just ended
+//    while your invite was still pending", and the actual SDP/ICE
+//    signaling relay once two participants are both joined — goes out
+//    over a channel scoped to one (room code, player id) pair, keyed
+//    exactly like the chat inbox above but deliberately a SEPARATE map:
+//    a game-room player id and a bar player id are two different
+//    identity spaces that happen to both be random UUIDs (CLAUDE.md's
+//    bar/game separation), and keying both kinds of private channel off
+//    the same map would make that distinction invisible here even though
+//    it's load-bearing everywhere else in this codebase. Keying by
+//    `${roomCode}:${playerId}` rather than playerId alone also means a
+//    stale channel from a since-closed room can never accidentally
+//    deliver into a player id that was reused in a brand-new room (ids
+//    are randomUUID()s in practice, but the room-scoped key removes any
+//    reliance on that being true).
+const roomVoiceSubscribers = new Map<string, Set<Send>>();
+
+function roomVoiceKey(roomCode: string, playerId: string): string {
+  return `${roomCode}:${playerId}`;
+}
+
+export function subscribeRoomVoice(roomCode: string, playerId: string, send: Send): () => void {
+  const key = roomVoiceKey(roomCode, playerId);
+  let set = roomVoiceSubscribers.get(key);
+  if (!set) {
+    set = new Set();
+    roomVoiceSubscribers.set(key, set);
+  }
+  set.add(send);
+  return () => {
+    set!.delete(send);
+    if (set!.size === 0) roomVoiceSubscribers.delete(key);
+  };
+}
+
+/** Delivers `payload` to one (room, player) pair's own private channel
+ * only — never broadcast, and a no-op if that player has no open
+ * subscription right now (the same fallback-poll-plus-push pattern used
+ * everywhere else in this codebase is what covers a missed push: see
+ * src/voice.ts's own GET .../voice/state). */
+export function publishToRoomVoice(roomCode: string, playerId: string, payload: unknown): void {
+  const set = roomVoiceSubscribers.get(roomVoiceKey(roomCode, playerId));
+  if (!set || set.size === 0) return;
+  const data = JSON.stringify(payload);
+  for (const send of set) send(data);
+}

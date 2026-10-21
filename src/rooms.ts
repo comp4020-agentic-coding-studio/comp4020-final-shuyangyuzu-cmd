@@ -1262,6 +1262,44 @@ export function getPublicState(db: Database.Database, code: string): PublicState
   return toPublicState(db, row, state);
 }
 
+/** Verifies a real session AND that `playerId` is a currently seated,
+ * human-controlled player of an open room — the one check src/voice.ts
+ * needs before any room-voice-call action (start/join/decline/leave/
+ * mute/signal all funnel through this). Throws the same RoomError shapes
+ * every other authenticated room action already throws
+ * (room_not_found/room_closed from loadOpenRoom, unauthorized from
+ * requireSession, player_removed/npc_controlled matching requireSeated/
+ * refuseIfNpcControlled's own wording above) — src/server.ts's existing
+ * RoomError handling in app.onError covers this without a new error
+ * type. Returns the room's fresh public state so the caller doesn't need
+ * a second read. */
+export function requireSeatedHumanPlayer(
+  db: Database.Database,
+  code: string,
+  playerId: string,
+  sessionSecret: string,
+): PublicState {
+  const row = loadOpenRoom(db, code);
+  requireSession(db, row.id, playerId, sessionSecret);
+  const state = getPublicState(db, code);
+  const player = state.players.find((p) => p.id === playerId);
+  if (!player) {
+    throw new RoomError(
+      "you're no longer in this room (likely removed after being disconnected too long)",
+      "player_removed",
+      410,
+    );
+  }
+  if (player.controller === "npc") {
+    throw new RoomError(
+      "this seat is now played by the table, not your session — it was handed off after being away too long",
+      "npc_controlled",
+      403,
+    );
+  }
+  return state;
+}
+
 export function nextRound(db:Database.Database,code:string,playerId:string,sessionSecret:string,expectedRound:number):void {
   const row=loadOpenRoom(db,code);requireSession(db,row.id,playerId,sessionSecret);
   if(row.host_player_id!==playerId)throw new RoomError('only the host can continue to the next round','not_host',403);

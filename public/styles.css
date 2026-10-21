@@ -475,3 +475,30 @@ body.table-mode { --bg:#50372a; --panel:#49372f; --fg:#f5e7ca; --muted:#d0b997; 
 .table-mode .winner-row { background:#b1843540; color:#ffe3a2; }
 .table-mode .next-round-button { padding:14px 24px; font-weight:bold; margin:10px 0 20px; }
 .table-mode .round-payouts { display:flex; flex-wrap:wrap; gap:8px 22px; padding-left:20px; color:#ead4ae; }
+
+/* Phone-style room voice calls (CLAUDE.md's voice-call section). Kept
+   compact and anchored in the header row, never a full-screen overlay —
+   must never cover the board, dice, rules scroll or exit controls. */
+.voice-call-widget { position:relative; display:flex; flex-direction:column; align-items:flex-start; }
+.voice-call-icon { position:relative; display:flex; align-items:center; gap:6px; padding:7px 10px; margin:0; font-size:20px; line-height:1; background:#392c26; color:#f4dfb7; border:1px solid #bc985a80; border-radius:8px; }
+.voice-call-count { font:600 12px monospace; color:#e4bb79; }
+.voice-call-panel { position:absolute; top:100%; left:0; z-index:5; margin-top:6px; min-width:200px; max-width:min(280px,calc(100vw - 32px)); padding:12px; display:flex; flex-direction:column; gap:10px; background:#2e2219; border:1px solid #bc985a80; border-radius:10px; box-shadow:0 12px 30px #0007; }
+.voice-call-participants { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:6px; font-size:13px; color:#f1e2c2; }
+.voice-call-participants li { display:flex; align-items:center; gap:6px; }
+.voice-muted-tag { opacity:.8; }
+.voice-call-actions { display:flex; gap:8px; }
+.voice-call-actions button { flex:1; padding:7px 10px; font-size:12px; }
+.voice-call-error { margin-top:6px; max-width:260px; padding:8px 10px; font-size:12px; color:#ffd9d9; background:#4a2420; border:1px solid #9b4a4a; border-radius:8px; display:flex; flex-direction:column; gap:6px; }
+.voice-call-error button { align-self:flex-start; padding:5px 9px; font-size:11px; }
+
+/* The incoming-call prompt: a compact corner toast, not a modal that
+   blocks the board — deliberately styled closer to a notification than a
+   dialog, and sized to never cover the table. */
+.voice-invite-toast { position:fixed; right:16px; bottom:16px; z-index:20; width:min(280px,calc(100vw - 32px)); padding:14px; display:flex; flex-direction:column; gap:10px; color:#f5e7ca; background:#48352b; border:2px solid #b9925e; border-radius:12px; box-shadow:0 20px 60px #0008; }
+.voice-invite-toast p { margin:0; font-size:13px; }
+.voice-invite-actions { display:flex; gap:8px; }
+.voice-invite-actions button { flex:1; padding:8px 10px; font-size:12px; }
+@media(max-width:650px) {
+  .voice-invite-toast { right:8px; bottom:8px; left:8px; width:auto; }
+  .voice-call-panel { max-width:calc(100vw - 24px); }
+}

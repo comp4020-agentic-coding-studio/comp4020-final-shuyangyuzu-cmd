@@ -192,6 +192,48 @@ function migrate(db: Database.Database): void {
       room_id TEXT NOT NULL REFERENCES rooms(id),
       left_at TEXT NOT NULL
     );
+
+    -- Phone-style room voice calls (src/voice.ts). Brand-new tables, so
+    -- CREATE TABLE IF NOT EXISTS is genuinely sufficient here (CLAUDE.md's
+    -- migration section only requires addColumnIfMissing for a column
+    -- added to a table that already exists in production).
+    --
+    -- Exactly one active call per room at a time, enforced by the UNIQUE
+    -- constraint on room_code: two simultaneous "start call" requests race
+    -- an INSERT OR IGNORE against this constraint, so whichever commits
+    -- first wins and the loser's own request transparently joins the
+    -- winner's row instead of creating a second, parallel call (the
+    -- "merge" requirement) — no application-level locking needed, the
+    -- same reasoning every other single-writer-process race in this
+    -- codebase already relies on (src/rooms.ts's own header comment).
+    -- room_code, not room_id: src/voice.ts deliberately never reads the
+    -- rooms table directly — every check it needs (seated, human,
+    -- online-not-solo, connected) already comes back from
+    -- rooms.getPublicState, so keying off the public code keeps this
+    -- module a one-directional consumer of rooms.ts, never the reverse
+    -- (the same layering tables.ts/chat.ts already use against
+    -- rooms.ts/bar.ts).
+    CREATE TABLE IF NOT EXISTS room_voice_calls (
+      id TEXT PRIMARY KEY,
+      room_code TEXT NOT NULL UNIQUE,
+      started_by TEXT NOT NULL,
+      started_at TEXT NOT NULL
+    );
+    -- status is 'invited' or 'joined' only — a decline or a hangup simply
+    -- DELETEs the row rather than keeping a third status value, which is
+    -- what makes "don't re-invite a decliner for the rest of this same
+    -- call, but do invite them again for a genuinely new one" fall out
+    -- for free: there's nothing left recording the old decline once the
+    -- call that held it is gone.
+    CREATE TABLE IF NOT EXISTS room_voice_participants (
+      call_id TEXT NOT NULL REFERENCES room_voice_calls(id),
+      player_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      muted INTEGER NOT NULL DEFAULT 0,
+      invited_at TEXT NOT NULL,
+      joined_at TEXT,
+      PRIMARY KEY (call_id, player_id)
+    );
   `);
 
   // Added after the first deploy. "CREATE TABLE IF NOT EXISTS" above is a

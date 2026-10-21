@@ -18,6 +18,8 @@ const { createTavern } = await import(`./tavern.js?v=${assetVersion}`);
 // its own hand-written copy — see public/liveSync.js's own doc comment
 // for why (Crit 9 phase 7's independent review).
 const { shouldApplyLiveUpdate } = await import(`./liveSync.js?v=${assetVersion}`);
+const { createVoiceCall } = await import(`./voiceCall.js?v=${assetVersion}`);
+const voiceCall = createVoiceCall({ el });
 const COLORS = ["red", "blue", "green", "yellow", "purple"];
 const HEARTBEAT_MS = 5000; // comfortably under the server's default PRESENCE_STALE_MS (15s)
 let activeRoomCode = null;
@@ -175,6 +177,13 @@ window.addEventListener("popstate", route);
 function route() {
   stopHeartbeat();
   stopLive();
+  // Leaving the room view entirely (back to the bar, exit, a navigate
+  // away) always tears down the voice call's media/connections —
+  // CLAUDE.md: "返回大厅、退出游戏、房间解散、座位转交 NPC 时，退出语音并
+  // 释放麦克风、音频播放和连接。" Re-entering the same room (below) starts
+  // a fresh, unjoined voice-call state — never auto-rejoins, never
+  // auto-opens the mic.
+  voiceCall.leaveRoom();
 
   tavern.stop();
   const code = codeFromUrl();
@@ -454,6 +463,11 @@ function enterRoom(code, session) {
   api(`/rooms/${code}/resume`, session).then(()=>api(`/rooms/${code}/rejoin`, session))
     .then((state) => {
       startHeartbeat(code, session);
+      // A refresh/reopen never auto-rejoins a voice call or opens the mic
+      // on its own (CLAUDE.md) — enterRoom only wires up the private
+      // signaling channel and its own-view catch-up fetch; actually
+      // joining still requires the player's own click.
+      voiceCall.enterRoom(code, session, () => { if (lastRenderedState) renderTable(code, session, lastRenderedState); });
       // rejoin's own response is already the room's current state —
       // hand it straight to startLive instead of fetching it again.
       startLive(code, session, state);
@@ -498,6 +512,10 @@ let applyIncoming = () => {};
 // fallback poll, the on-reconnect/on-visible resync, and as a safety net;
 // always goes through the same staleness gate as everything else.
 let refreshNow = () => {};
+// The last state renderTable actually drew — voiceCall's own redraw
+// callback (an invite arriving, a mic error, a mute toggle) re-renders
+// from this rather than needing its own copy of the room's full state.
+let lastRenderedState = null;
 
 function stopLive() {
   liveGeneration++;
@@ -719,6 +737,14 @@ function renderPendingRequest(code, session, state) {
 }
 
 function renderTable(code, session, state) {
+  lastRenderedState = state;
+  // Voice-call membership is part of the same public state push, so this
+  // is where the client's own mesh stays in sync with the server's
+  // authoritative participant list — every state update, not just a
+  // voice-specific action's own response (CLAUDE.md: the server decides
+  // who's in the call; the client only reflects and connects to that).
+  voiceCall.onStateUpdate(state);
+
   if (state.closed) {
     stopLive();
     stopHeartbeat();
@@ -741,9 +767,10 @@ function renderTable(code, session, state) {
   const header = el("header", {}, [
     el("h1", {}, "Las Vegas"),
     gameRulesButton(),
+    voiceCall.widget(state, me),
     el("p", {class:"table-subtitle"}, state.solo ? `OFFLINE MODE · ${state.players.length - 1} computer opponents` : ["Room ", el("strong", {}, code)]),
     ...(state.solo ? [] : [copyInviteLinkControl(shareLink)]),
-  ]);
+  ].filter(Boolean));
   if(state.phase!=='lobby')header.appendChild(el('p',{class:'round-marker'},`Round ${state.round} / ${state.totalRounds} · First player: ${state.players.find(p=>p.id===state.startingPlayerId)?.nickname??'—'}`));
 
   const playerList = el(
@@ -873,7 +900,11 @@ function renderTable(code, session, state) {
       { class: "table" },
       [header, showPlayerListHere ? playerList : null, pendingSection, body, notes,
         state.phase !== 'lobby' ? exitGameButton(code,session,state.solo) : null,
-        el('p',{class:'note'},'Back to the bar keeps your seat for 3 minutes. Exit game leaves immediately.'),backToHomeButton()].filter(
+        el('p',{class:'note'},'Back to the bar keeps your seat for 3 minutes. Exit game leaves immediately.'),backToHomeButton(),
+        // Floats above everything else but is a small corner toast, not a
+        // full-screen overlay — CLAUDE.md: must never cover key game
+        // controls (roll/place/rules/exit stay fully clickable underneath).
+        voiceCall.incomingInviteModal()].filter(
         Boolean,
       ),
     ),
