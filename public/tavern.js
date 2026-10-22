@@ -25,7 +25,8 @@ export function bindDirectionHold(button, { onPress, onRelease, onTap }) {
     win.removeEventListener('blur', release); button.ownerDocument.removeEventListener('visibilitychange', hidden);
   };
 }
-export function createTavern({ el, render, navigate, buildClassicPanel, saveSession, shouldApplyLiveUpdate }) {
+export function createTavern({ el, render, navigate, buildClassicPanel, saveSession, shouldApplyLiveUpdate, createMixology }) {
+  const mixology=createMixology({el});
   const colors = { red:'#c85e59', blue:'#6485bc', green:'#629e86', yellow:'#ddba65', purple:'#997cb5', teal:'#66b5b0', orange:'#cf8858', pink:'#cd88a3' };
   const skins = { fair:'#f3d7b6', warm:'#dcb58a', tan:'#ba875f', brown:'#906044', deep:'#614437' };
   let dispose = () => {};
@@ -129,7 +130,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     standBtn.style.display='none';
     const hud=el('header',{class:'world-hud'},[
       el('div',{class:'world-brand'},[el('span',{class:'brand-mark'},'◆'),el('div',{},[el('strong',{},'Las Vegas'),el('small',{},'A little place to be together')])]),
-      el('div',{class:'hud-actions'},[online,standBtn,el('button',{class:'hud-button',onclick:()=>{path=[];chooseCharacter();}},'Your character'),el('button',{class:'hud-button',onclick:()=>openGames()},'Join by code')]),
+      el('div',{class:'hud-actions'},[online,standBtn,el('button',{class:'hud-button','aria-label':'Open mixology book',onclick:()=>openMixology()},'Mixology book'),el('button',{class:'hud-button',onclick:()=>{path=[];chooseCharacter();}},'Your character'),el('button',{class:'hud-button',onclick:()=>openGames()},'Join by code')]),
     ]);
     const directions=el('div',{class:'world-dpad','aria-label':'Movement controls'});
     for(const [label,dx,dy] of [['↑',0,-1],['←',-1,0],['↓',0,1],['→',1,0]]) {
@@ -143,6 +144,11 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     const seatLayer=el('div',{class:'seat-layer'});
     const scene=el('div',{class:'tavern-world'},[canvas,seatLayer,hud,toast,directions]); render(scene);
     const overlay=el('div',{class:'world-overlay'});scene.appendChild(overlay);
+    function openMixology(){
+      if(!mine||overlay.childElementCount)return;
+      path=[];destination=null;keys.clear();heldDirection=null;pendingSitSeat=null;approachTarget=null;
+      mixology.open(overlay);
+    }
     let layout;
     try { layout=await read('/layout'); } catch(e) {toast.textContent=e.message;return;}
     if(!active)return;
@@ -576,7 +582,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       // dialog/message instead.
       if(f&&f.blocksMovement!==false){
         if(f.kind==='game_table'){if(!f.available)toast.textContent=`${f.label}`;else if(f.tableMode==='npc')openNpcTableDialog(f);else openTableDialog(f);}
-        else if(f.kind==='counter')toast.textContent='The kitchen is not open yet. Grab a game while you wait.';
+        else if(f.kind==='counter')openMixology();
         else if(f.kind==='stool'||f.kind==='dining_table'){
           // Phase 2: a real seat — pick the nearest free one belonging to
           // this fixture (its own x/y distance to where this patron is
@@ -931,5 +937,5 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     if(session){try{const resp=await post('/rejoin',session);applyIncoming(resp);activeSeat=resp.activeSeat??null;if(active){if(enteredThisPage)begin();else chooseCharacter();}}catch(e){if(e.status===403){session=null;localStorage.removeItem(sessionKey);chooseCharacter();}else toast.textContent='Unable to reconnect. Reload to retry.';}}
     else chooseCharacter();
   }
-  return {mount,stop:()=>dispose()};
+  return {mount,stop:()=>{mixology.close();dispose();}};
 }

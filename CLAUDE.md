@@ -3,6 +3,10 @@
 Rules the agent holds itself to while building this app. See `PLAN.md` for
 what's being built and why; this file is the how.
 
+## Mixology book
+
+The counter's recipe assistant is browser-local planning, separate from games and the paused food-ordering module. Never send pantry/party lists over public SSE or change chips, room state or orders when a recipe is selected. Keep source links and adaptation notes with each recipe. Unmeasured top-ups need visible estimate labels; do not present house quantities as official IBA values. Scale from each recipe's source yield (Cornhusker Crush serves two), sum only compatible units, and exclude optional garnish/ice from required-ingredient matching. Pantry availability must never imply stock quantities. Clipboard/storage failures need honest feedback. The module must participate in the deployed asset hash; modal opening stops held movement and route disposal closes it.
+
 ## Server authority
 
 The server is the only source of truth for anything that must be fair or
