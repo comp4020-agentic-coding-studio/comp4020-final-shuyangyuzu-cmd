@@ -970,3 +970,18 @@ responses and preserve invitation retry controls after a rejected join.
 Existing voice remains Vegas-only; do not pretend it was wired into
 poker. Keep initial rules/decisions in ADR-poker.md and distinguish agent
 browser verification from student/friend acceptance.
+
+### Room-entry recovery and round-table presentation (Codex, 2026-10-23)
+
+Room-entry failures must distinguish closed/missing/released seats from
+authentication failures and transient errors. Preserve saved sessions on
+transient failures; an error page must always allow navigation to the bar.
+An authenticated bar owner may exit their own linked Vegas room without
+the browser's room secret. Match the requested room code to the current
+binding so an old tab cannot exit a newly joined game. Never return the
+server's room secret to implement this fallback.
+
+Poker seat rotation is visual only. Keep authoritative seat numbers,
+dealer and turn order unchanged. Draw only the cards actually supplied by
+the private snapshot; placing cards visibly on felt does not authorize
+revealing opponents' hands before showdown.

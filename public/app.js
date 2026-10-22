@@ -127,7 +127,7 @@ function render(node) {
   root.replaceChildren(node);
 }
 
-function backToHomeButton() {
+function backToHomeButton({ recordDeparture = true } = {}) {
   // Navigates only — never calls /leave. Phase 2: this is explicitly
   // *not* the same action as the Leave room button in the lobby, and
   // the two must not be confused in the copy (PLAN.md).
@@ -137,12 +137,21 @@ function backToHomeButton() {
       type: "button",
       class: "secondary",
       onclick: async () => {
+        // An unavailable/invalid seat must never trap navigation behind
+        // another request using the very credentials that just failed.
+        if (!recordDeparture) { navigate('/'); return; }
         // Persist the three-minute departure before navigating. Room
         // identity covers direct invitation users without a bar identity;
         // the optional bar binding uses its separate session.
         try {
           const code=codeFromUrl(),roomSession=code?loadSession(code):null;
-          if(code&&roomSession)await api(`/rooms/${code}/depart`,roomSession);
+          if(code&&roomSession){
+            try{await api(`/rooms/${code}/depart`,roomSession);}
+            catch(err){
+              if(!['unauthorized','room_closed','room_not_found','player_removed','npc_controlled'].includes(err.code))throw err;
+              clearSession(code);
+            }
+          }
           const barSession = JSON.parse(localStorage.getItem("vegas:bar:session") || "null");
           if (barSession?.playerId && barSession?.sessionSecret) {
             const response = await fetch("/api/bar/depart", {
@@ -150,7 +159,7 @@ function backToHomeButton() {
               headers: { "content-type": "application/json" },
               body: JSON.stringify(barSession),
             });
-            if (!response.ok) throw new Error('Could not save your departure. Please try again.');
+            if (!response.ok && ![403,404,410].includes(response.status)) throw new Error('Could not save your departure. Please try again.');
           }
         } catch (error) {
           alert(error.message || 'Could not return to the bar. Please try again.');
@@ -466,6 +475,7 @@ function enterRoom(code, session) {
   // browser-local and has no fallback once that's gone; the UI says so).
   api(`/rooms/${code}/resume`, session).then(()=>api(`/rooms/${code}/rejoin`, session))
     .then((state) => {
+      if(codeFromUrl()!==code)return;
       startHeartbeat(code, session);
       // A refresh/reopen never auto-rejoins a voice call or opens the mic
       // on its own (CLAUDE.md) — enterRoom only wires up the private
@@ -476,16 +486,37 @@ function enterRoom(code, session) {
       // hand it straight to startLive instead of fetching it again.
       startLive(code, session, state);
     })
-    .catch(() => {
+    .catch((err) => {
+      if (codeFromUrl() !== code) return;
+      const terminal = ['unauthorized','player_removed','npc_controlled','room_closed','room_not_found'].includes(err.code);
+      if (terminal) clearSession(code);
+      const message = err.code === 'room_closed' ? 'This game has ended. You can return to the bar and start a new game.'
+        : err.code === 'room_not_found' ? 'This game is no longer available. Return to the bar to choose a table.'
+        : ['player_removed','npc_controlled'].includes(err.code) ? 'Your seat has been released. Return to the bar to join a new game.'
+        : err.code === 'unauthorized' ? 'This browser can no longer use the saved game seat. Return to the bar to choose your table again.'
+        : 'Could not load this game. Your saved seat has been kept. Try again, or return to the bar.';
       render(
         el("div", { class: "entry" }, [
           el("h1", {}, "Las Vegas"),
           el(
             "p",
             { class: "error" },
-            "This browser's saved seat for this room no longer works (cleared data, or a different device). There's no way to recover it — ask the host for a fresh invite if the room hasn't started yet.",
+            message,
           ),
-          backToHomeButton(),
+          ...(!terminal ? [el('button',{onclick:()=>enterRoom(code,session)},'Try again')] : []),
+          el('button',{class:'danger',onclick:async e=>{
+            const button=e.currentTarget;button.disabled=true;
+            try {
+              const barSession=JSON.parse(localStorage.getItem('vegas:bar:session')||'null');
+              if(barSession)await api('/bar/exit-game',{...barSession,roomCode:code});
+              else await api(`/rooms/${code}/exit`,session);
+              clearSession(code);navigate('/');
+            } catch(exitError) {
+              if(['room_closed','room_not_found','unauthorized','player_removed'].includes(exitError.code)){clearSession(code);navigate('/');}
+              else {button.disabled=false;button.parentElement.querySelector('.error').textContent=exitError.message;}
+            }
+          }},'Exit game'),
+          backToHomeButton({recordDeparture:false}),
         ]),
       );
     });

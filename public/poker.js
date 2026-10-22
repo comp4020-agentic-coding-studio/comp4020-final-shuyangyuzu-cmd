@@ -1,3 +1,41 @@
+// Seat rotation is presentation only: preserve the server's seat order,
+// always put the viewer at the near edge, and render only dealt cards
+// supplied by the authenticated snapshot (opponents remain face down).
+export function renderPokerTable(el,room,viewerId) {
+  const suits={c:'♣',d:'♦',h:'♥',s:'♠'};
+  const card=c=>el('span',{class:`poker-card ${c?'dh'.includes(c[1])?'red':'':'card-back'}`,'aria-label':c?`${c[0]}${suits[c[1]]}`:'Hidden card'},c?`${c[0]}${suits[c[1]]}`:'◆');
+  const me=room.players.find(p=>p.id===viewerId),anchor=me?.seat??0;
+  const between=['waiting','showdown'].includes(room.phase);
+  const colors=['#bc655c','#658ab5','#70a88b','#d4ad60','#9d7bb5'];
+  const seats=[];
+  for(let i=0;i<5;i++){
+    const seat=(anchor+i)%5,p=room.players.find(p=>p.seat===seat&&(!p.leaving||!between));
+    const angle=(90+i*72)*Math.PI/180;
+    const at=r=>`left:${50+r*Math.cos(angle)}%;top:${50+r*Math.sin(angle)}%;`;
+    const north=i===2||i===3;
+    seats.push(el('article',{class:`poker-seat${north?' poker-seat-north':''}${p?.id===room.actor?' current-turn':''}${p?'':' vacant'}`,style:at(39)+`--shirt:${colors[seat]}`,'aria-label':p?`${p.nickname}${p.id===viewerId?' · You':''}, seat ${seat+1}`:`Empty seat ${seat+1}`},[
+      el('div',{class:'poker-chair','aria-hidden':'true'},p?[el('div',{class:'poker-avatar'},[el('i',{class:'avatar-head'}),el('i',{class:'avatar-shirt'}),el('i',{class:'avatar-legs'})])]:[]),
+      el('div',{class:'poker-seat-label'},[
+        el('strong',{title:p?.nickname??'Empty seat'},p?`${p.nickname}${p.id===viewerId?' · You':p.npc?' · NPC':''}`:'Empty seat'),
+        ...(p?[el('span',{class:'poker-stack'},`${p.stack} chips`),el('small',{},[p.seat===room.dealer?'D · Dealer':'',p.waiting?'Next hand':'',p.leaving?'Left':'',p.folded?'Folded':'',!p.stack&&!p.waiting?(between?'Out of chips':'All in'):'',p.handName??''].filter(Boolean).join(' · '))]:[]),
+      ]),
+    ]));
+    if(p&&!p.waiting&&room.hand>0)seats.push(el('div',{class:`poker-hand-zone${north?' poker-hand-north':''}${p.folded?' folded':''}`,style:at(north?18:24),'aria-label':`${p.nickname}'s cards and bet`},[
+      el('div',{class:'poker-cards'},p.hole.length?p.hole.map(card):[card(null),card(null)]),
+      ...(p.bet>0?[el('span',{class:'poker-wager'},[el('i',{'aria-hidden':'true'},'●'),` ${p.bet}`])]:[]),
+    ]));
+  }
+  return el('section',{class:'poker-table-scene','aria-label':'Five seats around the poker table'},[
+    el('div',{class:'poker-round-felt','aria-hidden':'true'}),
+    el('div',{class:'poker-table-center'},[
+      el('span',{class:'poker-table-brand'},'LAS VEGAS'),
+      el('p',{class:'poker-pot'},`${between?'Last pot':'Pot'} · ${room.pot}`),
+      el('div',{class:'poker-community','aria-label':'Community cards'},[...room.board.map(card),...Array.from({length:5-room.board.length},()=>el('span',{class:'poker-card empty','aria-label':'Undealt community card'},'·'))]),
+      el('span',{class:'poker-street'},room.phase.toUpperCase()),
+    ]),...seats,
+  ]);
+}
+
 export function createPokerUI({el,navigate}) {
   let session=null,room=null,lastVersion=null,mounted=false,polling=false,error='',query='',results=[],raiseTo='',lastInvite='',generation=0;
   const banner=el('aside',{class:'poker-invite',hidden:true});document.body.append(banner);
@@ -33,8 +71,6 @@ export function createPokerUI({el,navigate}) {
       if(room&&!mounted)resume.replaceChildren(el('button',{onclick:()=>navigate(`/?poker=${room.id}`)},'Return to poker'),el('button',{onclick:async()=>{try{await api('leave');resume.hidden=true;}catch(e){notify(e);}}},'Leave table'));
     }catch(e){if(mounted)notify(e);}finally{polling=false;}
   }
-  const suits={c:'♣',d:'♦',h:'♥',s:'♠'};
-  function card(c){return el('span',{class:`poker-card ${c&&'dh'.includes(c[1])?'red':''}`,'aria-label':c?`${c[0]}${suits[c[1]]}`:'Hidden card'},c?`${c[0]}${suits[c[1]]}`:'◆');}
   function draw(){
     const root=document.getElementById('app');if(!mounted||!root)return;
     if(!room){root.replaceChildren(el('main',{class:'poker-page'},[el('h1',{},'Texas Hold’em'),el('p',{},error||'Loading your table…'),el('button',{onclick:()=>navigate('/')},'Back to the bar')]));return;}
@@ -54,12 +90,6 @@ export function createPokerUI({el,navigate}) {
     if(between&&room.host===session.playerId)buttons.push(el('button',{disabled:room.players.filter(p=>!p.leaving&&(p.stack>0||p.npc)).length<2,onclick:()=>perform('deal')},room.hand?'Deal next hand':'Start game'));
     if(between&&me?.stack===0)buttons.push(el('button',{onclick:()=>perform('rebuy')},'Rebuy 500 play chips'));
     const controls=el('section',{class:'poker-controls'},[el('p',{},turn?'Your turn':between?(room.hand?'Review the result. The host deals the next hand.':'Invite a friend. At least two funded players are needed to start.'):`Waiting for ${room.players.find(p=>p.id===room.actor)?.nickname||'the table'}`),...buttons]);
-    const players=room.players.filter(p=>!p.leaving||!between).map(p=>el('article',{class:`poker-player ${p.id===room.actor?'current-turn':''}`},[
-      el('strong',{},`${p.nickname}${p.npc?' · NPC':''}${p.id===session.playerId?' · You':''}`),
-      el('small',{},`${p.seat===room.dealer?'Dealer · ':''}${p.waiting?'Next hand · ':''}${p.leaving?'Left · ':''}${p.folded?'Folded · ':''}${!p.stack&&!p.waiting?(between?'Out of chips · ':'All in · '):''}Stack ${p.stack} · Bet ${p.bet}`),
-      el('div',{class:'poker-cards'},p.hole.length?p.hole.map(card):[card(null),card(null)]),
-      ...(p.handName?[el('small',{},p.handName)]:[]),
-    ]));
     const invitePanel=[];
     if(room.mode==='online'){
       const input=el('input',{'aria-label':'Search online players',placeholder:'Search online player nickname',value:query,oninput:e=>{query=e.target.value;}});
@@ -73,8 +103,8 @@ export function createPokerUI({el,navigate}) {
     root.replaceChildren(el('main',{class:'poker-page'},[
       el('header',{class:'poker-header'},[el('h1',{},'Texas Hold’em'),el('span',{},`${room.mode==='offline'?'Offline · NPC opponents':'Online · invitation table'} · Hand ${room.hand}`),el('button',{onclick:async()=>{try{await api('leave');generation++;room=null;navigate('/');}catch(e){notify(e);}}},'Leave table')]),
       rules,el('p',{class:'error',role:'status'},error),
-      el('section',{class:'poker-felt'},[el('p',{class:'eyebrow'},`${room.phase.toUpperCase()} · ${between?'Last pot':'Pot'} ${room.pot}`),el('div',{class:'poker-community','aria-label':'Community cards'},[...room.board.map(card),...Array.from({length:5-room.board.length},()=>el('span',{class:'poker-card empty'},'·'))]),el('p',{class:'poker-result'},room.result)]),
-      el('section',{class:'poker-players'},players),controls,...invitePanel,
+      renderPokerTable(el,room,session.playerId),
+      el('p',{class:'poker-result',role:'status'},room.result),controls,...invitePanel,
     ]));
   }
   function mount(){document.body.classList.add('table-mode');mounted=true;error='';lastVersion=null;draw();poll();}

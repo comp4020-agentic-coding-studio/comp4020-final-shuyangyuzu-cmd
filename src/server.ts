@@ -827,6 +827,14 @@ app.post("/api/bar/depart", async (c) => {
 // deliberate, explicit bar-world action and not a passive room
 // heartbeat/rejoin (a follow-up review caught an earlier version doing
 // exactly that, which was wrong).
+app.post('/api/bar/exit-game',async(c)=>{
+  const body=(await c.req.json().catch(()=>({}))) as BarAuthedBody & {roomCode?:unknown};
+  const code=tables.exitActiveGame(db,barPlayerId(body),barSessionSecret(body),String(body.roomCode??''));
+  if(code)publishRoomState(code,rooms.getPublicState(db,code));
+  publishBarSnapshot();
+  return c.json({ok:true});
+});
+
 app.post("/api/bar/resume", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody;
   tables.resumeActiveTable(db, barPlayerId(body), barSessionSecret(body));

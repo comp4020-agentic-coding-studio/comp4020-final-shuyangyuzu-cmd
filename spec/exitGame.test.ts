@@ -28,6 +28,19 @@ it('offline exit authenticates, closes the game, clears its binding, and permits
   expect(tables.startNpcGame(db,'vegas-npc-1',bar.playerId,bar.sessionSecret,'green',3).code).not.toBe(game.code);
 });
 
+it('the bar owner can exit without a stored room secret, but cannot exit another room or a newer binding',()=>{
+  const a=solo('Recovery A'),b=solo('Recovery B');
+  expect(()=>tables.exitActiveGame(db,a.bar.playerId,'wrong',a.game.code)).toThrow();
+  expect(tables.exitActiveGame(db,a.bar.playerId,a.bar.sessionSecret,b.game.code)).toBeNull();
+  expect(rooms.getPublicState(db,b.game.code).closed).toBe(false);
+  expect(tables.exitActiveGame(db,a.bar.playerId,a.bar.sessionSecret,a.game.code)).toBe(a.game.code);
+  expect(rooms.getPublicState(db,a.game.code).closed).toBe(true);
+  const next=tables.startNpcGame(db,'vegas-npc-1',a.bar.playerId,a.bar.sessionSecret,'green',3);
+  expect(tables.exitActiveGame(db,a.bar.playerId,a.bar.sessionSecret,a.game.code)).toBeNull();
+  expect(rooms.getPublicState(db,next.code).closed).toBe(false);
+  expect(tables.getActiveSeat(db,a.bar.playerId)?.roomCode).toBe(next.code);
+});
+
 it('online exit preserves other humans and turn data, transfers host, then closes after the last human exits',()=>{
   const a=joinBar(db,'Host','red','warm'), b=joinBar(db,'Guest','blue','warm');
   const host=tables.createTableRoom(db,'vegas-1',a.playerId,a.sessionSecret,'red');

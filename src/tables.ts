@@ -331,6 +331,19 @@ export function getActiveSeat(
   return seat ? { tableId: seat.tableId, roomCode: seat.code, pending: seat.pending } : null;
 }
 
+/** A lost browser room secret must not prevent its authenticated bar
+ * owner leaving. Match the requested room so an old error tab can never
+ * accidentally exit a newer game this person has since joined. */
+export function exitActiveGame(db: Database.Database, barPlayerId: string, secret: string, code: string): string | null {
+  requireBarSession(db,barPlayerId,secret);
+  return transact(db,()=>{
+    const seat=resolveActiveSeat(db,barPlayerId);
+    if(!seat || seat.code!==code.toUpperCase())return null;
+    rooms.exitGame(db,seat.code,seat.playerId,seat.sessionSecret);
+    return seat.code;
+  });
+}
+
 function getBarNickname(db: Database.Database, barPlayerId: string): string {
   const row = db.prepare(`SELECT nickname FROM bar_players WHERE id = ?`).get(barPlayerId) as
     | { nickname: string }
