@@ -46,12 +46,46 @@ export function createVoiceCall({ el }) {
   let incomingInvite = null; // { callId, inviterNickname } or null
   let latestVoiceCall = { active: false, callId: null, startedBy: null, participants: [] };
   let onNeedsRedraw = () => {};
+  let roomGeneration = 0;
+  let mediaGeneration = 0;
+  let membershipRevision = 0;
+  let viewRequest = 0;
+  let voiceCursor = null;
+  let joiningSignals = [];
 
-  async function api(path, body) {
+  function applySummary(state) {
+    if (!state.voiceCall) return false;
+    if (typeof state.epoch === 'number' && typeof state.rev === 'number') {
+      if (voiceCursor && (state.epoch < voiceCursor.epoch || state.epoch === voiceCursor.epoch && state.rev < voiceCursor.rev)) return false;
+      voiceCursor = {epoch:state.epoch,rev:state.rev};
+    }
+    latestVoiceCall = state.voiceCall;
+    return true;
+  }
+
+  function context() { return { generation: roomGeneration, code, session }; }
+  function isCurrent(ctx) { return ctx.generation === roomGeneration && ctx.code === code && !!session; }
+  function request(ctx, path, body = {}, keepalive = false) {
+    return api(`/rooms/${ctx.code}${path}`, { ...ctx.session, ...body }, keepalive);
+  }
+  function stopStream(stream) { for (const track of stream.getTracks()) track.stop(); }
+  function resetMembership() {
+    mediaGeneration++;
+    membershipRevision++;
+    teardownMedia();
+    ownStatus = 'none';
+    callId = null;
+    panelExpanded = false;
+    busy = false;
+    joiningSignals = [];
+  }
+
+  async function api(path, body, keepalive = false) {
     const res = await fetch(`/api${path}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body ?? {}),
+      keepalive,
     });
     const data = await res.json();
     if (!res.ok) throw Object.assign(new Error(data.message ?? "request failed"), { code: data.error, status: res.status });
@@ -88,12 +122,16 @@ export function createVoiceCall({ el }) {
       for (const track of localStream.getTracks()) track.stop();
       localStream = null;
     }
+    pendingCandidates.clear();
+    reconnectAttempts.clear();
   }
 
   async function ensureIceServers() {
     if (iceServersCache && iceServersCache.callId === callId) return iceServersCache.servers;
-    const res = await roomApi("/voice/ice-servers", {});
-    iceServersCache = { callId, servers: res.iceServers };
+    const ctx = context(), id = callId, generation = mediaGeneration;
+    const res = await request(ctx, "/voice/ice-servers");
+    if (!isCurrent(ctx) || id !== callId || generation !== mediaGeneration || ownStatus !== 'joined') throw new Error('call changed');
+    iceServersCache = { callId: id, servers: res.iceServers };
     return res.iceServers;
   }
 
@@ -110,18 +148,22 @@ export function createVoiceCall({ el }) {
     }
   }
 
-  async function createPeer(remoteId, iceServers) {
+  function createPeer(remoteId, iceServers) {
+    if (peerConnections.has(remoteId)) return peerConnections.get(remoteId);
+    const ctx = context(), id = callId, generation = mediaGeneration;
+    const active = () => isCurrent(ctx) && id === callId && generation === mediaGeneration && ownStatus === 'joined' && peerConnections.get(remoteId) === pc;
     const pc = new RTCPeerConnection({ iceServers });
     peerConnections.set(remoteId, pc);
     if (localStream) {
       for (const track of localStream.getTracks()) pc.addTrack(track, localStream);
     }
     pc.onicecandidate = (ev) => {
-      if (ev.candidate) {
-        roomApi("/voice/signal", { callId, toPlayerId: remoteId, signalType: "ice-candidate", data: ev.candidate }).catch(() => {});
+      if (ev.candidate && active()) {
+        request(ctx, "/voice/signal", { callId: id, toPlayerId: remoteId, signalType: "ice-candidate", data: ev.candidate }).catch(() => {});
       }
     };
     pc.ontrack = (ev) => {
+      if (!active()) return;
       let audioEl = remoteAudioEls.get(remoteId);
       if (!audioEl) {
         audioEl = document.createElement("audio");
@@ -133,6 +175,7 @@ export function createVoiceCall({ el }) {
       audioEl.srcObject = ev.streams[0];
     };
     pc.onconnectionstatechange = () => {
+      if (!active()) return;
       if (pc.connectionState === "connected") {
         reconnectAttempts.set(remoteId, 0);
         onNeedsRedraw();
@@ -148,6 +191,7 @@ export function createVoiceCall({ el }) {
   // retried forever (CLAUDE.md: "失联不能永久占用人数"; a mesh link that
   // can't recover degrades gracefully rather than hanging the whole call).
   async function attemptIceRestart(remoteId) {
+    const ctx = context(), id = callId, generation = mediaGeneration;
     const pc = peerConnections.get(remoteId);
     if (!pc) return;
     const attempts = reconnectAttempts.get(remoteId) ?? 0;
@@ -162,10 +206,11 @@ export function createVoiceCall({ el }) {
     if (!(session.playerId < remoteId)) return;
     try {
       await new Promise((r) => setTimeout(r, SIGNAL_RECONNECT_DELAY_MS));
-      if (!peerConnections.has(remoteId)) return;
+      if (!isCurrent(ctx) || generation !== mediaGeneration || peerConnections.get(remoteId) !== pc) return;
       const offer = await pc.createOffer({ iceRestart: true });
       await pc.setLocalDescription(offer);
-      await roomApi("/voice/signal", { callId, toPlayerId: remoteId, signalType: "offer", data: pc.localDescription });
+      if (!isCurrent(ctx) || generation !== mediaGeneration) return;
+      await request(ctx, "/voice/signal", { callId: id, toPlayerId: remoteId, signalType: "offer", data: pc.localDescription });
     } catch {
       // Will be retried on the next failed transition, up to the cap above.
     }
@@ -173,8 +218,10 @@ export function createVoiceCall({ el }) {
 
   async function connectToParticipant(remoteId) {
     if (peerConnections.has(remoteId) || remoteId === session.playerId) return;
+    const ctx = context(), id = callId, generation = mediaGeneration;
     const iceServers = await ensureIceServers();
-    const pc = await createPeer(remoteId, iceServers);
+    if (!isCurrent(ctx) || generation !== mediaGeneration || !isActiveParticipant(remoteId) || peerConnections.has(remoteId)) return;
+    const pc = createPeer(remoteId, iceServers);
     // Deterministic initiator per pair, so both sides independently reach
     // the same decision with no coordinator and no glare: the
     // lexicographically smaller playerId always offers, the other always
@@ -182,7 +229,8 @@ export function createVoiceCall({ el }) {
     if (session.playerId < remoteId) {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      await roomApi("/voice/signal", { callId, toPlayerId: remoteId, signalType: "offer", data: pc.localDescription });
+      if (!isCurrent(ctx) || generation !== mediaGeneration) return;
+      await request(ctx, "/voice/signal", { callId: id, toPlayerId: remoteId, signalType: "offer", data: pc.localDescription });
     }
   }
 
@@ -196,18 +244,24 @@ export function createVoiceCall({ el }) {
   }
 
   async function handleSignal(msg) {
+    if (ownStatus !== 'joined' || !localStream || msg.callId !== callId || !isActiveParticipant(msg.from)) return;
+    const ctx = context(), generation = mediaGeneration, id = callId;
+    const active = () => isCurrent(ctx) && generation === mediaGeneration && id === callId && ownStatus === 'joined';
     const { from, signalType, data } = msg;
     let pc = peerConnections.get(from);
     if (signalType === "offer") {
       if (!pc) {
         const iceServers = await ensureIceServers();
-        pc = await createPeer(from, iceServers);
+        if (!active()) return;
+        pc = createPeer(from, iceServers);
       }
       await pc.setRemoteDescription(data);
+      if (!active()) return;
       await flushPendingCandidates(from, pc);
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
-      await roomApi("/voice/signal", { callId, toPlayerId: from, signalType: "answer", data: pc.localDescription });
+      if (!active()) return;
+      await request(ctx, "/voice/signal", { callId: id, toPlayerId: from, signalType: "answer", data: pc.localDescription });
     } else if (signalType === "answer") {
       if (pc) {
         await pc.setRemoteDescription(data);
@@ -232,7 +286,9 @@ export function createVoiceCall({ el }) {
     if (eventSource) eventSource.close();
     const url = `/api/rooms/${code}/voice/events?playerId=${encodeURIComponent(session.playerId)}&sessionSecret=${encodeURIComponent(session.sessionSecret)}`;
     const es = new EventSource(url);
+    const ctx = context();
     es.onmessage = (ev) => {
+      if (!isCurrent(ctx) || eventSource !== es) return;
       let msg;
       try {
         msg = JSON.parse(ev.data);
@@ -243,13 +299,14 @@ export function createVoiceCall({ el }) {
         incomingInvite = { callId: msg.callId, inviterNickname: msg.inviterNickname };
         onNeedsRedraw();
       } else if (msg.type === "signal") {
-        handleSignal(msg).catch(() => {});
+        // The server may push the first offer before the HTTP join
+        // response arrives. Keep it only during this explicit mic join.
+        if (busy && localStream && ownStatus !== 'joined') {
+          if (joiningSignals.length < 128) joiningSignals.push(msg);
+        } else handleSignal(msg).catch(() => {});
       } else if (msg.type === "removed_from_call" || msg.type === "call_ended") {
-        if (msg.callId === callId || msg.type === "call_ended") {
-          teardownMedia();
-          callId = null;
-          ownStatus = "none";
-          panelExpanded = false;
+        if (msg.callId === callId) {
+          resetMembership();
           onNeedsRedraw();
         }
         if (incomingInvite && incomingInvite.callId === msg.callId) {
@@ -263,97 +320,92 @@ export function createVoiceCall({ el }) {
     // trusted to have delivered everything" rule CLAUDE.md states for the
     // room/bar channels).
     es.onopen = () => {
-      refreshOwnView().catch(() => {});
+      if (isCurrent(ctx) && eventSource === es) refreshOwnView().catch(() => {});
     };
     eventSource = es;
   }
 
   async function refreshOwnView() {
-    const view = await roomApi("/voice/state", {});
+    const ctx = context(), revision = membershipRevision, serial = ++viewRequest;
+    const view = await request(ctx, '/voice/state');
+    if (!isCurrent(ctx) || revision !== membershipRevision || serial !== viewRequest || busy) return;
     latestVoiceCall = { active: view.active, callId: view.callId, startedBy: view.startedBy, participants: view.participants };
-    if (view.own.status === "joined" && ownStatus !== "joined") {
-      // A stale 'joined' row from before this tab's own page load (a
-      // refresh, or a brand-new tab) — this fresh JS state has no real
-      // peer connections for it, so it must not silently count as present
-      // (CLAUDE.md: refresh never auto-rejoins or auto-opens the mic).
-      // Correcting this is honest, not a lie: from this tab's perspective
-      // it genuinely isn't connected right now.
-      callId = view.callId;
-      try {
-        await roomApi("/voice/leave", { callId: view.callId });
-      } catch {
-        // Already gone by the time we got here — fine either way.
+    if (view.own.status === 'joined') {
+      if (ownStatus === 'joined' && localStream && callId === view.callId) {
+        // A reconnect of this same page keeps its live media and controls.
+        reconcilePeerMesh();
+      } else {
+        // A fresh page has no media: release stale membership without opening a mic.
+        resetMembership();
+        await request(ctx, '/voice/leave', { callId: view.callId }).catch(() => {});
+        if (!isCurrent(ctx)) return;
       }
-      callId = null;
-      ownStatus = "none";
-    } else if (view.own.status === "invited") {
-      ownStatus = "invited";
-      callId = view.callId;
-      incomingInvite = { callId: view.callId, inviterNickname: view.own.invitedBy };
     } else {
-      ownStatus = "none";
+      if (ownStatus === 'joined') resetMembership();
+      ownStatus = view.own.status === 'invited' ? 'invited' : 'none';
+      callId = ownStatus === 'invited' ? view.callId : null;
+      incomingInvite = ownStatus === 'invited' ? { callId: view.callId, inviterNickname: view.own.invitedBy } : null;
+    }
+    onNeedsRedraw();
+  }
+
+  async function joinCall(invite = null) {
+    if (busy || !session) return;
+    const ctx = context(), generation = ++mediaGeneration;
+    membershipRevision++;
+    const active = () => isCurrent(ctx) && generation === mediaGeneration;
+    busy = true;
+    lastErrorMessage = null;
+    onNeedsRedraw();
+    try {
+      // Keep the acquired stream local until the permission promise belongs
+      // to the current room/operation. A navigation cannot cancel the OS
+      // prompt, but its late result must be stopped without making a join.
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      if (!active()) { stopStream(stream); return; }
+      localStream = stream;
+      const res = await request(ctx, invite ? '/voice/respond' : '/voice/start', invite ? {callId:invite.callId,accept:true} : {});
+      const joined = res.voiceCall;
+      if (!active()) {
+        // The join may have committed while the user was navigating away.
+        // Clean up that captured room, never use a later room's credentials.
+        if (joined?.participants.some(p => p.playerId === ctx.session.playerId) && !(isCurrent(ctx) && ownStatus === 'joined' && callId === joined.callId)) {
+          await request(ctx, '/voice/leave', {callId:joined.callId}, true).catch(() => {});
+        }
+        return;
+      }
+      if (!joined?.active || !joined.participants.some(p => p.playerId === ctx.session.playerId) || invite && joined.callId !== invite.callId) {
+        throw new Error('That invitation has ended. Join the current call from the phone icon.');
+      }
+      applySummary(res);
+      callId = joined.callId;
+      ownStatus = 'joined';
+      incomingInvite = null;
+      membershipRevision++;
+      reconcilePeerMesh();
+      const queued = joiningSignals;
+      joiningSignals = [];
+      for (const msg of queued) {
+        if (!active()) return;
+        await handleSignal(msg).catch(() => {});
+      }
+    } catch (err) {
+      if (!active()) return;
+      teardownMedia();
+      ownStatus = 'none';
       callId = null;
-    }
-    onNeedsRedraw();
-  }
-
-  async function acquireMic() {
-    if (localStream) return localStream;
-    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-    return localStream;
-  }
-
-  async function startOrJoinCall() {
-    if (busy) return;
-    busy = true;
-    lastErrorMessage = null;
-    onNeedsRedraw();
-    try {
-      // Mic permission is requested only by the person's own deliberate
-      // action, and must succeed BEFORE anything is created/joined
-      // server-side — a failed permission request must never leave a
-      // fake "in progress" call behind (CLAUDE.md).
-      await acquireMic();
-      const res = await roomApi("/voice/start", {});
-      latestVoiceCall = res.voiceCall;
-      callId = res.voiceCall.callId;
-      ownStatus = "joined";
-      incomingInvite = null;
-      reconcilePeerMesh();
-    } catch (err) {
-      teardownMedia();
       lastErrorMessage = micErrorMessage(err);
     } finally {
-      busy = false;
-      onNeedsRedraw();
+      if (active()) { busy = false; onNeedsRedraw(); }
     }
   }
 
-  async function acceptInvite() {
-    if (busy || !incomingInvite) return;
-    busy = true;
-    lastErrorMessage = null;
-    const invite = incomingInvite;
-    onNeedsRedraw();
-    try {
-      await acquireMic();
-      const res = await roomApi("/voice/respond", { callId: invite.callId, accept: true });
-      latestVoiceCall = res.voiceCall;
-      callId = invite.callId;
-      ownStatus = "joined";
-      incomingInvite = null;
-      reconcilePeerMesh();
-    } catch (err) {
-      lastErrorMessage = micErrorMessage(err);
-      teardownMedia();
-    } finally {
-      busy = false;
-      onNeedsRedraw();
-    }
-  }
+  function startOrJoinCall() { return joinCall(); }
+  function acceptInvite() { if (incomingInvite) return joinCall(incomingInvite); }
 
   async function declineInvite() {
-    if (!incomingInvite) return;
+    if (busy || !incomingInvite) return;
+    membershipRevision++;
     const invite = incomingInvite;
     incomingInvite = null;
     onNeedsRedraw();
@@ -366,14 +418,12 @@ export function createVoiceCall({ el }) {
 
   async function hangUp() {
     if (!callId) return;
+    const ctx = context();
     const leavingCallId = callId;
-    teardownMedia();
-    ownStatus = "none";
-    callId = null;
-    panelExpanded = false;
+    resetMembership();
     onNeedsRedraw();
     try {
-      await roomApi("/voice/leave", { callId: leavingCallId });
+      await request(ctx, "/voice/leave", { callId: leavingCallId });
     } catch {
       // Already resolved — fine.
     }
@@ -399,6 +449,7 @@ export function createVoiceCall({ el }) {
   // ---- Public surface ---------------------------------------------------
 
   function enterRoom(newCode, newSession, redraw) {
+    leaveRoom();
     code = newCode;
     session = newSession;
     onNeedsRedraw = redraw || (() => {});
@@ -407,30 +458,37 @@ export function createVoiceCall({ el }) {
   }
 
   function leaveRoom() {
+    const ctx = context(), leavingCallId = callId;
+    roomGeneration++;
     if (eventSource) {
       eventSource.close();
       eventSource = null;
     }
-    teardownMedia();
-    callId = null;
-    ownStatus = "none";
+    resetMembership();
     incomingInvite = null;
     panelExpanded = false;
     lastErrorMessage = null;
     latestVoiceCall = { active: false, callId: null, startedBy: null, participants: [] };
     iceServersCache = null;
+    voiceCursor = null;
+    code = null;
+    session = null;
+    onNeedsRedraw = () => {};
+    if (ctx.session && leavingCallId) request(ctx, '/voice/leave', {callId:leavingCallId}, true).catch(() => {});
   }
 
   // Called every time app.js applies a fresh public room state — keeps
   // the mesh in sync with the server's own authoritative membership list.
   function onStateUpdate(state) {
-    latestVoiceCall = state.voiceCall ?? latestVoiceCall;
+    if (!applySummary(state)) return;
+    if (ownStatus === 'joined' && (!latestVoiceCall.active || latestVoiceCall.callId !== callId || !isActiveParticipant(session.playerId))) resetMembership();
+    if (incomingInvite && (!latestVoiceCall.active || latestVoiceCall.callId !== incomingInvite.callId)) incomingInvite = null;
     reconcilePeerMesh();
   }
 
   function widget(state, me) {
     if (!me || me.controller !== "human" || state.solo) return null;
-    const vc = state.voiceCall ?? latestVoiceCall;
+    const vc = latestVoiceCall;
     const items = [];
     const iconLabel = vc.active ? `${vc.participants.length} in call` : "Start voice call";
     const icon = el(

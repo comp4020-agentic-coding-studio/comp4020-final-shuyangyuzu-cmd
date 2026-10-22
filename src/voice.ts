@@ -109,6 +109,20 @@ function getActiveCallRow(db: Database.Database, code: string): CallRow | undefi
     .get(code) as CallRow | undefined;
 }
 
+// Game seats may remain reserved for three minutes, but voice permission
+// ends immediately on either direct-room or bar-bound departure.
+function isAway(db: Database.Database, playerId: string): boolean {
+  return !!db.prepare(`SELECT 1 FROM room_departures WHERE player_id = ?
+    UNION ALL SELECT 1 FROM table_departures d JOIN bar_players b ON b.id = d.bar_player_id
+    WHERE b.current_game_player_id = ? LIMIT 1`).get(playerId, playerId);
+}
+
+function requirePresentHuman(db: Database.Database, code: string, playerId: string, secret: string): PublicState {
+  const state = rooms.requireSeatedHumanPlayer(db, code, playerId, secret);
+  if (isAway(db, playerId)) throw new RoomError('return to your game before joining voice', 'voice_away', 403);
+  return state;
+}
+
 /** Notifies every still-invited participant that the call they were
  * asked to is now gone (CLAUDE.md: "来电尚未接受时若通话已结束，提示同步
  * 关闭"), then deletes every row for this call — nothing left to collide
@@ -142,7 +156,7 @@ function endCallEntirely(db: Database.Database, code: string, callId: string): v
  * 释放麦克风..."). */
 function reconcileParticipants(db: Database.Database, code: string, call: CallRow, state: PublicState): void {
   const seatedHumans = new Map(
-    state.closed ? [] : state.players.filter((p) => p.controller === "human").map((p) => [p.id, p] as const),
+    state.closed ? [] : state.players.filter((p) => p.controller === "human" && !isAway(db, p.id)).map((p) => [p.id, p] as const),
   );
   const rows = db
     .prepare(`SELECT player_id, status, invited_at FROM room_voice_participants WHERE call_id = ?`)
@@ -248,7 +262,7 @@ export function getOwnVoiceView(db: Database.Database, code: string, playerId: s
  * reasoning every other race in this codebase already relies on). */
 export function startOrJoinCall(db: Database.Database, code: string, playerId: string, sessionSecret: string): PublicVoiceCall {
   checkRateLimit(actionTimestamps, `${code}:${playerId}`, ACTION_RATE_LIMIT_COUNT, ACTION_RATE_LIMIT_WINDOW_MS, Date.now());
-  const state = rooms.requireSeatedHumanPlayer(db, code, playerId, sessionSecret);
+  const state = requirePresentHuman(db, code, playerId, sessionSecret);
   if (state.solo) throw new RoomError("voice calls aren't available in offline games", "voice_not_available", 409);
   const nickname = state.players.find((p) => p.id === playerId)?.nickname ?? "";
 
@@ -294,7 +308,7 @@ export function startOrJoinCall(db: Database.Database, code: string, playerId: s
     }
 
     if (createdFresh) {
-      const others = state.players.filter((p) => p.id !== playerId && p.controller === "human");
+      const others = state.players.filter((p) => p.id !== playerId && p.controller === "human" && !isAway(db, p.id));
       for (const other of others) {
         db.prepare(
           `INSERT INTO room_voice_participants (call_id, player_id, status, muted, invited_at, joined_at)
@@ -336,7 +350,7 @@ export function respondToInvite(
   accept: boolean,
 ): PublicVoiceCall {
   checkRateLimit(actionTimestamps, `${code}:${playerId}`, ACTION_RATE_LIMIT_COUNT, ACTION_RATE_LIMIT_WINDOW_MS, Date.now());
-  const state = rooms.requireSeatedHumanPlayer(db, code, playerId, sessionSecret);
+  const state = requirePresentHuman(db, code, playerId, sessionSecret);
   const nickname = state.players.find((p) => p.id === playerId)?.nickname ?? "";
   return transact(db, () => {
     const call = getActiveCallRow(db, code);
@@ -421,7 +435,7 @@ export function setMuted(
   callId: string,
   muted: boolean,
 ): PublicVoiceCall {
-  rooms.requireSeatedHumanPlayer(db, code, playerId, sessionSecret);
+  requirePresentHuman(db, code, playerId, sessionSecret);
   return transact(db, () => {
     const call = getActiveCallRow(db, code);
     if (!call || call.id !== callId) throw new RoomError("that call has ended", "voice_call_ended", 410);
@@ -453,7 +467,7 @@ export function relaySignal(
   signalType: string,
   data: unknown,
 ): void {
-  rooms.requireSeatedHumanPlayer(db, code, playerId, sessionSecret);
+  const state = requirePresentHuman(db, code, playerId, sessionSecret);
   if (typeof signalType !== "string" || !signalType) throw new RoomError("missing signal type", "bad_request", 400);
   if (typeof toPlayerId !== "string" || !toPlayerId) throw new RoomError("missing recipient", "bad_request", 400);
   const serialized = JSON.stringify(data ?? null);
@@ -467,7 +481,8 @@ export function relaySignal(
   const toRow = db
     .prepare(`SELECT status FROM room_voice_participants WHERE call_id = ? AND player_id = ?`)
     .get(callId, toPlayerId) as { status: string } | undefined;
-  if (fromRow?.status !== "joined" || toRow?.status !== "joined") {
+  const recipient = state.players.find(p => p.id === toPlayerId);
+  if (fromRow?.status !== "joined" || toRow?.status !== "joined" || !recipient || recipient.controller !== 'human' || !recipient.connected || isAway(db, toPlayerId)) {
     throw new RoomError("both sides must be active call participants", "not_in_call", 409);
   }
 

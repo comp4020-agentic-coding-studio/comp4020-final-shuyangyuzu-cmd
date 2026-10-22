@@ -490,7 +490,11 @@ app.post("/api/rooms/:code/exit", async (c) => {
 
 app.post('/api/rooms/:code/depart',async(c)=>{
   const body=(await c.req.json()) as AuthedBody;
-  rooms.departGame(db,c.req.param('code'),playerId(body),sessionSecret(body));return c.json({ok:true});
+  const code=c.req.param('code');
+  rooms.departGame(db,code,playerId(body),sessionSecret(body));
+  // Reconcile and push voice removal now; the game seat still has its grace.
+  publishRoomState(code,rooms.getPublicState(db,code));
+  return c.json({ok:true});
 });
 app.post('/api/rooms/:code/resume',async(c)=>{
   const body=(await c.req.json()) as AuthedBody;

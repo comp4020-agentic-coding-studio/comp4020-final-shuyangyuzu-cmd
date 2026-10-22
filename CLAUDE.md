@@ -917,3 +917,23 @@ the board, dice, rules, or exit controls, on desktop or at the existing
 mobile breakpoint; declining or accepting must each be a single,
 unambiguous action, and nothing about receiving or declining an invite
 may trigger a repeated ring or auto-retry.
+
+### Voice lifecycle correction (Codex, 2026-10-22)
+
+A signaling reconnect on the SAME page must retain its joined status,
+media and Hang up controls. A fresh page has no media and must release
+stale membership without auto-opening the mic. Guard every async mic,
+join, ICE and signaling continuation with the captured room/media
+lifecycle; late permission results must stop their tracks and must not
+join. A join which already committed while navigation was pending needs
+captured-room cleanup. Ignore old call events and stale state responses;
+briefly queue authorized early signals during explicit joins so this
+protection does not lose the first offer. Public removal also stops
+media, independently of private-channel delivery.
+
+Room and table departure records revoke voice immediately, even though
+retaining a game seat is legitimate for three minutes. Check BOTH sender
+and recipient eligibility for each signal, including bar/dining away
+states. Resume allows a new explicit join, never passive auto-join.
+Component tests use media adapters; do not describe them as real audio
+acceptance. STUN is not a TURN audio relay; TURN remains unconfigured.

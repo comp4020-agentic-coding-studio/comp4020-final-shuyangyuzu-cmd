@@ -291,3 +291,19 @@ it("mute requires being an active joined participant, not merely invited or a st
   expect(muteAttempt.status).toBe(409);
   expect(muteAttempt.body.error).toBe("not_in_call");
 });
+
+it('returning to the bar releases voice immediately while reserving the game seat',async()=>{
+  const {code,a,b}=await createThreePlayerRoom();
+  const started=await startCall(code,a),callId=started.body.voiceCall.callId;
+  await respond(code,b,callId,true);
+  expect((await postJson(`/api/rooms/${code}/depart`,a)).status).toBe(200);
+  const remaining=await ownView(code,b);
+  expect(remaining.body.participants.map((p:any)=>p.playerId)).toEqual([b.playerId]);
+  expect((await signal(code,a,callId,b.playerId,'offer',{sdp:'test'})).status).toBe(403);
+  expect((await signal(code,b,callId,a.playerId,'offer',{sdp:'test'})).status).toBe(409);
+  expect((await startCall(code,a)).status).toBe(403);
+  const state=await fetch(`${baseUrl}/api/rooms/${code}/state`).then(r=>r.json());
+  expect(state.players.some((p:any)=>p.id===a.playerId)).toBe(true);
+  await postJson(`/api/rooms/${code}/resume`,a);
+  expect((await startCall(code,a)).status).toBe(200);
+});
