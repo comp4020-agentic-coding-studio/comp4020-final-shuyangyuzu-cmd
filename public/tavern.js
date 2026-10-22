@@ -324,6 +324,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     const GAME_COLORS=['red','blue','green','yellow','purple'];
     const MAX_SEATS=GAME_COLORS.length;
     async function openTableDialog(f,preferredColor){
+      if(f.gameType==='texas'){window.dispatchEvent(new CustomEvent('poker-open',{detail:{mode:'online',seat:preferredColor}}));return;}
       path=[];
       let tableList;
       try{tableList=await read('/tables');}catch(e){toast.textContent='Could not reach the tables — try again.';return;}
@@ -394,6 +395,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     // is a separate, simpler flow from openTableDialog above: pick a
     // colour, start immediately against 3 computer-controlled opponents.
     async function openNpcTableDialog(f,preferredColor){
+      if(f.gameType==='texas'){window.dispatchEvent(new CustomEvent('poker-open',{detail:{mode:'offline',seat:preferredColor}}));return;}
       path=[];
       // Total players including the human (2-MAX_SEATS), defaulting to
       // the full table ("默认五人" — the product default, not a cap this
@@ -742,7 +744,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         box(fc,x+6,y+12,w-12,3,'#ffffff19');
         if(f.kind==='game_table'){
           for(let i=0;i<3;i++){box(fc,x+30+i*23,y+33,17,26,'#eadcc5');box(fc,x+34+i*23,y+41,7,7,i%2?'#c87769':'#4d515d');}
-          fc.textAlign='center';fc.font='bold 12px monospace';fc.fillStyle='#f7e6c6';fc.fillText(f.available?f.label:f.gameType.toUpperCase(),x+w/2,y+h-26);
+          fc.textAlign='center';fc.font='bold 12px monospace';fc.fillStyle='#f7e6c6';fc.fillText(f.gameType==='texas'?(f.tableMode==='npc'?'Hold’em Offline':'Hold’em Online'):f.available?f.label:f.gameType.toUpperCase(),x+w/2,y+h-26);
           if(!f.available){fc.fillStyle='#d0c0b1';fc.font='10px monospace';fc.fillText('COMING LATER',x+w/2,y+h-12);}
         }else{box(fc,x+43,y+35,28,24,'#eee0bd');box(fc,x+51,y+40,12,12,'#bd8253');box(fc,x+77,y+29,11,18,'#94b0a5');}
       }

@@ -122,6 +122,17 @@ function emptySeats(): Array<TableSeatView | null> {
 export function getTablesStatus(db: Database.Database): TableStatusView[] {
   return GAME_TABLES.map((t) => {
     const tableMode = t.tableMode ?? "online";
+    if(t.gameType==='texas'){
+      const row=tableMode==='online'?db.prepare("SELECT id,state_json FROM poker_rooms WHERE table_id=? AND closed=0 AND mode='online'").get(t.id) as {id:string;state_json:string}|undefined:undefined;
+      const state=row?JSON.parse(row.state_json):null;
+      const players=state?.players.filter((p:{leaving:boolean})=>!p.leaving)??[];
+      const seats:Array<TableSeatView|null>=[null,null,null,null,null];
+      for(const p of players){
+        const profile=db.prepare('SELECT color,skin FROM bar_players WHERE id=?').get(p.id) as {color:string;skin:string}|undefined;
+        seats[p.seat]={color:['red','blue','green','yellow','purple'][p.seat],nickname:p.nickname,connected:true,controller:'human',barPlayerId:p.id,skin:profile?.skin??'warm',present:true};
+      }
+      return {id:t.id,gameType:'texas',available:true,label:t.label,tableMode,status:row?(state.phase==='waiting'?'waiting':'in_progress'):'empty',roomCode:null,playerCount:players.length,takenColors:seats.filter(Boolean).map(p=>p!.color),seats,pendingCount:0};
+    }
     if (!t.available) {
       return {
         id: t.id,
@@ -297,6 +308,7 @@ function checkExistingSeat(
   barPlayerId: string,
   tableId: string,
 ): { code: string; playerId: string; sessionSecret: string; pending: boolean } | null {
+  if(db.prepare('SELECT 1 FROM poker_members WHERE bar_id=? AND active=1').get(barPlayerId))throw new TableError('Leave your poker table first','already_seated',409);
   const seat = resolveActiveSeat(db, barPlayerId);
   if (!seat) return null;
   if (seat.tableId !== tableId) {
@@ -351,7 +363,7 @@ export function createTableRoom(
   // Same guard as joinTableRoom's own: an NPC-mode fixture is never a
   // shared room another patron could create/join, so this endpoint must
   // reject it outright rather than let it through on `available` alone.
-  if (!furniture?.available || furniture.tableMode !== "online") {
+    if (!furniture?.available || furniture.tableMode !== "online" || furniture.gameType !== 'vegas') {
     throw new TableError("not a playable table", "table_not_found", 404);
   }
 
@@ -429,7 +441,7 @@ export function joinTableRoom(
   // table kinds use different start endpoints (startNpcGame) on purpose
   // (PLAN.md's product-direction-update: an NPC table is never shown as
   // joinable to anyone, including its own player calling the wrong route).
-  if (!furniture?.available || furniture.tableMode !== "online") {
+  if (!furniture?.available || furniture.tableMode !== "online" || furniture.gameType !== "vegas") {
     throw new TableError("not a playable online table", "table_not_found", 404);
   }
   return transact(db, () => {
@@ -493,7 +505,7 @@ export function startNpcGame(
 ): TableRoomResult {
   requireBarSession(db, barPlayerId, barSessionSecret);
   const furniture = GAME_TABLES.find((t) => t.id === tableId);
-  if (!furniture?.available || furniture.tableMode !== "npc") {
+  if (!furniture?.available || furniture.tableMode !== "npc" || furniture.gameType !== "vegas") {
     throw new TableError("not a solo NPC table", "table_not_found", 404);
   }
   if (!Number.isInteger(playerCount) || playerCount < 2 || playerCount > COLORS.length) {

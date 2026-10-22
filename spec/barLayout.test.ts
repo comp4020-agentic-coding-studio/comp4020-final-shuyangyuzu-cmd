@@ -284,18 +284,16 @@ it("the online row's own columns leave a real walkway beside every chair ring, r
   }
 });
 
-it("has nine tables in two labelled rows — 2 online + 1 NPC Vegas table playable, 6 reserved slots, all 2x2", () => {
+it("has nine tables in two labelled rows — 3 Vegas + 2 Hold’em playable, 4 reserved slots, all 2x2", () => {
   expect(GAME_TABLES).toHaveLength(9);
   expect(GAME_TABLES.filter((t) => t.gameType === "vegas")).toHaveLength(3); // 2 online + 1 NPC
-  expect(GAME_TABLES.filter((t) => t.available)).toHaveLength(3);
-  expect(GAME_TABLES.filter((t) => !t.available)).toHaveLength(6);
+  expect(GAME_TABLES.filter((t) => t.available)).toHaveLength(5);
+  expect(GAME_TABLES.filter((t) => !t.available)).toHaveLength(4);
   expect(GAME_TABLES.filter((t) => t.tableMode === "online")).toHaveLength(5);
   expect(GAME_TABLES.filter((t) => t.tableMode === "npc")).toHaveLength(4);
-  // Every available slot is a Vegas table — only this game is actually
-  // implemented this round (PLAN.md's product-direction-update), in both
-  // modes; every other game stays reserved in both rows.
+  // Vegas and Hold’em are playable; dominoes and blackjack remain reserved.
   for (const t of GAME_TABLES.filter((t) => t.available)) {
-    expect(t.gameType).toBe("vegas");
+    expect(["vegas","texas"]).toContain(t.gameType);
   }
   for (const t of GAME_TABLES) {
     expect(t.w).toBe(2);

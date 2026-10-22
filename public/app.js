@@ -20,6 +20,8 @@ const { createTavern } = await import(`./tavern.js?v=${assetVersion}`);
 const { shouldApplyLiveUpdate } = await import(`./liveSync.js?v=${assetVersion}`);
 const { createVoiceCall } = await import(`./voiceCall.js?v=${assetVersion}`);
 const voiceCall = createVoiceCall({ el });
+const { createPokerUI } = await import(`./poker.js?v=${assetVersion}`);
+const pokerUI = createPokerUI({el,navigate});
 const COLORS = ["red", "blue", "green", "yellow", "purple"];
 const HEARTBEAT_MS = 5000; // comfortably under the server's default PRESENCE_STALE_MS (15s)
 let activeRoomCode = null;
@@ -196,6 +198,8 @@ function route() {
     } catch {}
   }
   activeRoomCode=code;
+  pokerUI.routeChanged();
+  if(new URLSearchParams(location.search).has('poker')){pokerUI.mount();return;}
   if (!code) {
     tavern.mount();
     return;

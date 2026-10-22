@@ -23,6 +23,7 @@ import * as tables from "./tables.ts";
 import type { Color, PublicState } from "./types.ts";
 import { BUILD_VERSION, renderIndexHtml } from "./version.ts";
 import * as voice from "./voice.ts";
+import { registerPoker } from './pokerRoutes.ts';
 import { getIceServers } from "./iceConfig.ts";
 
 // Every outgoing room payload carries `epoch` (SERVER_EPOCH, constant for
@@ -256,7 +257,7 @@ app.use("*", async (c, next) => {
 // shows, without asking everyone to hard-refresh.
 app.use("*", async (c, next) => {
   await next();
-  c.header("Cache-Control", "no-cache");
+  c.header("Cache-Control", c.req.path.startsWith('/api/poker/')?'private, no-store':"no-cache");
 });
 
 // Best-effort claimed identity for a rejected request — read from the
@@ -273,7 +274,8 @@ app.use("*", async (c, next) => {
 async function claimedRejectionActor(c: Context): Promise<{ kind: "bar" | "room"; id: string } | null> {
   let body: Record<string, unknown> = {};
   try {
-    body = (await c.req.json()) as Record<string, unknown>;
+    const value = await c.req.json();
+    if(value && typeof value==='object' && !Array.isArray(value))body=value as Record<string,unknown>;
   } catch {
     // No JSON body on this request (a GET, or a body-less retry) — fall
     // through to query params below.
@@ -282,13 +284,13 @@ async function claimedRejectionActor(c: Context): Promise<{ kind: "bar" | "room"
   const fromQuery = c.req.query("playerId");
   const id = fromBody || fromQuery;
   if (!id) return null;
-  const kind: "bar" | "room" = c.req.path.startsWith("/api/bar") ? "bar" : "room";
+  const kind: "bar" | "room" = c.req.path.startsWith("/api/bar") || c.req.path.startsWith('/api/poker') ? "bar" : "room";
   return { kind, id };
 }
 
 app.onError(async (err, c) => {
   if (err instanceof RoomError || err instanceof BarError || err instanceof TableError || err instanceof ChatError) {
-    const status = err.status as 400 | 403 | 404 | 409 | 410 | 429;
+    const status = err.status as 400 | 403 | 404 | 409 | 410 | 413 | 429;
     const actor = await claimedRejectionActor(c);
     // `wasIdentityVerified()` is real evidence, not an inference from the
     // error's own code: a follow-up review caught that the original
@@ -1069,6 +1071,7 @@ setInterval(() => {
 // etc. The `?v=` query string on those is ignored for path matching
 // (serveStatic matches by pathname only), which is exactly what makes it
 // work as a cache-busting token rather than a routing concern.
+registerPoker(app,db);
 app.use("/*", serveStatic({ root: "./public" }));
 
 const port = Number(process.env.PORT ?? 8080);

@@ -7,6 +7,7 @@ import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { installTransactionLogging } from "./actionLog.ts";
+import { migratePoker } from './pokerSchema.ts';
 import { findFreeTile } from "./bar.ts";
 import { BAR_SEATS, GAME_TABLES, defaultSpawn, isWalkingFloor } from "./barLayout.ts";
 import type { RoomState } from "./types.ts";
@@ -24,6 +25,7 @@ export function openDb(path: string): Database.Database {
   // own, and before this db is handed back to any caller.
   installTransactionLogging(db);
   migrate(db);
+  migratePoker(db);
   seedBarFurniture(db);
   seedBarSeats(db);
   // Furniture can move on deploy. Keep seated patrons on their updated

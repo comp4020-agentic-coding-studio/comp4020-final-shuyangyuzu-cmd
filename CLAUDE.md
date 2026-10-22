@@ -937,3 +937,36 @@ and recipient eligibility for each signal, including bar/dining away
 states. Resume allows a new explicit join, never passive auto-join.
 Component tests use media adapters; do not describe them as real audio
 acceptance. STUN is not a TURN audio relay; TURN remains unconfigured.
+
+## Hold’em scope and authority (Codex, 2026-10-22)
+
+The user now explicitly authorizes Texas Hold’em in both existing Texas
+fixtures. It is independent of Vegas room JSON/session secrets. Reuse
+real bar-session authentication; one person cannot occupy poker and
+Vegas/another chair simultaneously. Five seats, 500 initial play chips,
+blinds 1/2, cash-table continuation, no payments. Timings, free rebuys and
+NPC refill are declared house rules, not exact RDR2 settings. Keep other
+reserved games and src/orders.ts untouched.
+
+Shuffle/deal/evaluate on the server. Preserve uncalled bets, all-in side
+pot eligibility, equal-hand splits, clockwise odd chips, minimum raises,
+and the distinction between a full raise and a short all-in. Waiting
+mid-hand arrivals receive no cards until the next deal. Explicit leave
+folds unless already all-in; host transfers. Refresh must not redeal or
+leave. Disconnect grace is three minutes, action timeout 45 seconds.
+
+Poker state, membership, wallets and event history persist in SQLite;
+state+event+stdout success share the existing transaction contract. An
+expected version rejects stale/duplicate actions. NPCs must not inspect
+other hole cards or the future deck. Only authenticated personal poker
+snapshots may contain the caller's hole cards; reveal non-folded hands
+at showdown. Never put a deck or private cards in public tavern SSE.
+All poker HTTP responses use private/no-store. Online invitations are
+recipient-bound, expiring, capacity-checked and rate limited, not seat
+reservations. Nicknames are search labels; actual IDs/session checks
+remain authority. The new polling UI must ignore old identity/navigation
+responses and preserve invitation retry controls after a rejected join.
+
+Existing voice remains Vegas-only; do not pretend it was wired into
+poker. Keep initial rules/decisions in ADR-poker.md and distinguish agent
+browser verification from student/friend acceptance.

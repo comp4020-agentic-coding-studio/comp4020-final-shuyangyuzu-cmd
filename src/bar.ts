@@ -275,6 +275,7 @@ const lastLoggedMoveAt = new Map<string, number>();
 
 export function moveBar(db: Database.Database, playerId: string, sessionSecret: string, x: number, y: number): void {
   requireBarSession(db, playerId, sessionSecret);
+  if(db.prepare('SELECT 1 FROM poker_members WHERE bar_id=? AND active=1').get(playerId))throw new BarError('Leave your poker table before walking in the bar','already_seated',409);
 
   const nickname = db.prepare(`SELECT nickname FROM bar_players WHERE id = ?`).get(playerId) as
     | { nickname: string }
@@ -346,6 +347,7 @@ export function getSeatLayout(): PublicSeat[] {
  * chair shouldn't surface a confusing refusal). */
 export function sitAtSeat(db: Database.Database, playerId: string, sessionSecret: string, seatId: string): void {
   requireBarSession(db, playerId, sessionSecret);
+  if(db.prepare('SELECT 1 FROM poker_members WHERE bar_id=? AND active=1').get(playerId))throw new BarError('Leave your poker table before sitting elsewhere','already_seated',409);
   const seat = BAR_SEATS.find((s) => s.id === seatId);
   if (!seat) throw new BarError("no such seat", "seat_not_found", 404);
 

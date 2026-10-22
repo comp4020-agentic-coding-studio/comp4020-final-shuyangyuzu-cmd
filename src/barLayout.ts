@@ -132,9 +132,9 @@ const CORE_FURNITURE: readonly Furniture[] = [
     y: 9,
     w: 2,
     h: 2,
-    label: "Texas Hold'em Online — not yet open",
+    label: "Texas Hold'em Online",
     gameType: "texas",
-    available: false,
+    available: true,
     tableMode: "online",
   },
   {
@@ -181,9 +181,9 @@ const CORE_FURNITURE: readonly Furniture[] = [
     y: 14,
     w: 2,
     h: 2,
-    label: "Texas Hold'em Offline — not yet open",
+    label: "Texas Hold'em Offline",
     gameType: "texas",
-    available: false,
+    available: true,
     tableMode: "npc",
   },
   {
