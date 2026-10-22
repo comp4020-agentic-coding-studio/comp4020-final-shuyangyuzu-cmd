@@ -15,6 +15,22 @@ function getRoom(db:Database.Database,id:string):Row {
 }
 function state(r:Row):PokerState{return JSON.parse(r.state_json);}
 function save(db:Database.Database,r:Row,s:PokerState,actor:string|null,action:string,subject?:string):void {
+  // Zero chips while all-in is legitimate. Only a completely settled
+  // hand can eliminate a human, after main/side pots and refunds.
+  if(s.phase==='showdown'){
+    for(const p of s.players){
+      if(p.id.startsWith('npc:')||p.stack!==0||membership(db,p.id)?.room_id!==r.id)continue;
+      p.leaving=true;
+      db.prepare('UPDATE poker_members SET active=0 WHERE room_id=? AND bar_id=?').run(r.id,p.id);
+      db.prepare('INSERT OR REPLACE INTO poker_notices VALUES(?,?,?,?,?)').run(p.id,randomUUID(),r.id,s.hand,s.result);
+      logAction(db,{action:'poker_bankrupt',outcome:'ok',verified:false,actor:null,room:{code:r.id},detail:{playerId:p.id.slice(0,8),hand:s.hand}});
+    }
+    const remaining=db.prepare('SELECT bar_id FROM poker_members WHERE room_id=? AND active=1 ORDER BY seat').all(r.id) as {bar_id:string}[];
+    if(!remaining.length){
+      db.prepare('UPDATE poker_rooms SET closed=1 WHERE id=?').run(r.id);
+      db.prepare("UPDATE poker_invites SET status='closed' WHERE room_id=? AND status='pending'").run(r.id);
+    }else if(!remaining.some(p=>p.bar_id===r.host))r.host=remaining[0].bar_id;
+  }
   db.prepare('UPDATE poker_rooms SET state_json=?,host=?,version=version+1 WHERE id=?').run(JSON.stringify(s),r.host,r.id);
   for(const p of s.players)if(!p.id.startsWith('npc:'))db.prepare('INSERT INTO poker_wallets VALUES(?,?,?) ON CONFLICT(room_id,bar_id) DO UPDATE SET stack=excluded.stack').run(r.id,p.id,p.stack);
   db.prepare('INSERT INTO poker_events(room_id,version,actor,action,at) VALUES(?,?,?,?,?)').run(r.id,r.version+1,actor,action,Date.now());
@@ -22,6 +38,7 @@ function save(db:Database.Database,r:Row,s:PokerState,actor:string|null,action:s
 }
 function membership(db:Database.Database,id:string){return db.prepare('SELECT room_id,seat FROM poker_members WHERE bar_id=? AND active=1').get(id) as {room_id:string;seat:number}|undefined;}
 function ensureFree(db:Database.Database,id:string,roomId?:string):void {
+  if(db.prepare('SELECT 1 FROM poker_notices WHERE bar_id=?').get(id))throw new RoomError('Acknowledge your out-of-chips message before joining another poker table','bankruptcy_pending',409);
   const seat=membership(db,id);
   if(seat&&seat.room_id!==roomId)throw new RoomError('Leave your current poker table first','already_seated',409);
   if(getActiveSeat(db,id))throw new RoomError('Exit your current Vegas game before joining poker','already_seated',409);
@@ -32,7 +49,10 @@ function seated(db:Database.Database,r:Row,id:string):void {
 }
 function addHuman(db:Database.Database,r:Row,s:PokerState,id:string,preferred?:number):void {
   ensureFree(db,id,r.id);
-  const existing=s.players.find(p=>p.id===id);
+  let existing=s.players.find(p=>p.id===id);
+  if(existing?.stack===0&&(s.phase==='waiting'||s.phase==='showdown')){
+    s.players=s.players.filter(p=>p.id!==id);existing=undefined;
+  }
   if(existing){existing.leaving=false;}
   else {
     const seats=new Set(s.players.filter(p=>!p.leaving||s.phase!=='waiting'&&s.phase!=='showdown').map(p=>p.seat));
@@ -40,7 +60,7 @@ function addHuman(db:Database.Database,r:Row,s:PokerState,id:string,preferred?:n
     if(seat===undefined)throw new RoomError('This table has five occupied seats; try after the current hand','table_full',409);
     const profile=db.prepare('SELECT nickname FROM bar_players WHERE id=?').get(id) as {nickname:string};
     const wallet=db.prepare('SELECT stack FROM poker_wallets WHERE room_id=? AND bar_id=?').get(r.id,id) as {stack:number}|undefined;
-    s.players.push(newPokerPlayer(id,profile.nickname,seat,wallet?.stack??500));
+    s.players.push(newPokerPlayer(id,profile.nickname,seat,wallet?.stack===0?500:wallet?.stack??500));
   }
   const p=s.players.find(p=>p.id===id)!;
   db.prepare('INSERT INTO poker_members VALUES(?,?,?,1) ON CONFLICT(room_id,bar_id) DO UPDATE SET active=1,seat=excluded.seat').run(r.id,id,p.seat);
@@ -76,6 +96,7 @@ export function leavePoker(db:Database.Database,id:string,secret:string):void {
 }
 export function actPoker(db:Database.Database,id:string,secret:string,roomId:string,version:number,type:string,to?:number):void {
   auth(db,id,secret);
+  if(membership(db,id)?.room_id===roomId)reconcileBankruptcy(db,roomId);
   transact(db,()=>{
     const r=getRoom(db,roomId);seated(db,r,id);if(version!==r.version)throw new RoomError('The table changed. Try your action again','stale_state',409);
     const s=state(r);
@@ -84,9 +105,6 @@ export function actPoker(db:Database.Database,id:string,secret:string,roomId:str
         if(r.host!==id)throw Error('Only the host can deal the next hand');
         for(const p of s.players)if(p.id.startsWith('npc:')&&p.stack===0)p.stack=500;
         startPokerHand(s);
-      }else if(type==='rebuy'){
-        const p=s.players.find(p=>p.id===id)!;
-        if(p.stack!==0||s.phase!=='waiting'&&s.phase!=='showdown')throw Error('Rebuy is available between hands with an empty stack');p.stack=500;
       }else pokerAction(s,id,type,to);
     }catch(e){throw new RoomError((e as Error).message,'illegal_poker_action',409);}
     save(db,r,s,id,type);
@@ -103,9 +121,28 @@ export function pokerView(db:Database.Database,id:string,roomId:string){
 export function pokerMe(db:Database.Database,id:string,secret:string){
   auth(db,id,secret);barHeartbeat(db,id,secret);
   db.prepare('INSERT INTO poker_presence VALUES(?,?) ON CONFLICT(bar_id) DO UPDATE SET seen=excluded.seen').run(id,Date.now());
-  const m=membership(db,id);
+  let m=membership(db,id);
+  if(m){reconcileBankruptcy(db,m.room_id);m=membership(db,id);}
   const invites=db.prepare(`SELECT i.id,i.room_id AS roomId,b.nickname AS sender,i.expires FROM poker_invites i JOIN bar_players b ON b.id=i.sender JOIN poker_rooms r ON r.id=i.room_id WHERE i.target=? AND i.status='pending' AND i.expires>? AND r.closed=0 ORDER BY i.expires DESC LIMIT 5`).all(id,Date.now());
-  return {room:m?pokerView(db,id,m.room_id):null,invites};
+  const notice=db.prepare('SELECT notice_id AS id,room_id AS roomId,hand,result FROM poker_notices WHERE bar_id=?').get(id) as {id:string;roomId:string;hand:number;result:string}|undefined;
+  return {room:m?pokerView(db,id,m.room_id):null,invites,departure:notice?{...notice,reason:'bankrupt' as const}:null};
+}
+export function acknowledgePokerExit(db:Database.Database,id:string,secret:string,noticeId:string):void {
+  auth(db,id,secret);
+  transact(db,()=>{
+    const notice=db.prepare('SELECT room_id FROM poker_notices WHERE bar_id=? AND notice_id=?').get(id,noticeId) as {room_id:string}|undefined;
+    if(!notice)return;
+    db.prepare('DELETE FROM poker_notices WHERE bar_id=? AND notice_id=?').run(id,noticeId);
+    logAction(db,{action:'poker_bankruptcy_ack',outcome:'ok',verified:true,actor:{kind:'bar',id},room:{code:notice.room_id}});
+  });
+}
+// Covers old deployments/restarts which already have a settled zero-stack
+// player. Reads/ticks converge through the same atomic save as actions.
+function reconcileBankruptcy(db:Database.Database,roomId:string):void {
+  const r=getRoom(db,roomId),s=state(r);
+  if(s.phase==='showdown'&&s.players.some(p=>!p.id.startsWith('npc:')&&p.stack===0&&membership(db,p.id)?.room_id===r.id)){
+    transact(db,()=>save(db,r,s,null,'bankruptcy_reconcile'));
+  }
 }
 export function searchPokerFriends(db:Database.Database,id:string,secret:string,query:string){
   auth(db,id,secret);if(query.length<1||query.length>40)return [];
@@ -140,6 +177,7 @@ export function tickPoker(db:Database.Database):void {
   const now=Date.now();
   const rows=db.prepare('SELECT * FROM poker_rooms WHERE closed=0').all() as Row[];
   for(const row of rows){
+    reconcileBankruptcy(db,row.id);
     const members=db.prepare('SELECT m.bar_id,p.seen FROM poker_members m LEFT JOIN poker_presence p ON p.bar_id=m.bar_id WHERE m.room_id=? AND m.active=1').all(row.id) as {bar_id:string;seen:number|null}[];
     for(const m of members)if(!m.seen||now-m.seen>DISCONNECT_GRACE_MS){
       // Stored session is used only for this server-owned expiry action.

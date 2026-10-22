@@ -40,6 +40,31 @@ export function createPokerUI({el,navigate}) {
   let session=null,room=null,lastVersion=null,mounted=false,polling=false,error='',query='',results=[],raiseTo='',lastInvite='',generation=0;
   const banner=el('aside',{class:'poker-invite',hidden:true});document.body.append(banner);
   const resume=el('aside',{class:'poker-resume',hidden:true});document.body.append(resume);
+  let bankruptcyDialog=null,bankruptcyId='',bankruptcyOwner='';
+  function dismissBankruptcy(){bankruptcyDialog?.close();bankruptcyDialog?.remove();bankruptcyDialog=null;bankruptcyId='';bankruptcyOwner='';}
+  function showBankruptcy(notice,owner){
+    if(bankruptcyId===notice.id&&bankruptcyOwner===owner)return;
+    dismissBankruptcy();bankruptcyId=notice.id;bankruptcyOwner=owner;
+    const errorLine=el('p',{class:'error',role:'status'});
+    const dialog=el('dialog',{class:'rules-dialog poker-bankruptcy','aria-labelledby':'poker-bankruptcy-title'},[
+      el('h2',{id:'poker-bankruptcy-title'},'Out of chips'),
+      el('p',{},'Your chips have run out. This hand has been settled and you have automatically left the table.'),
+      el('p',{},`Hand ${notice.hand} · ${notice.result||'Settlement complete'}`),
+      el('p',{class:'note'},'Click below to return to the bar. You can choose another table when you are ready.'),errorLine,
+      el('button',{onclick:async e=>{
+        const button=e.currentTarget;button.disabled=true;
+        if(saved()?.playerId!==owner){dismissBankruptcy();return;}
+        try{
+          await api('ack-exit',{noticeId:notice.id});
+          if(saved()?.playerId!==owner){dismissBankruptcy();return;}
+          generation++;mounted=false;room=null;lastVersion=null;error='';
+          document.body.classList.remove('table-mode');dismissBankruptcy();navigate('/');
+        }catch(err){errorLine.textContent=err.message;button.disabled=false;}
+      }},'Return to the bar'),
+    ]);
+    dialog.addEventListener('cancel',e=>e.preventDefault());
+    document.body.append(dialog);bankruptcyDialog=dialog;dialog.showModal();
+  }
   function saved(){try{return JSON.parse(localStorage.getItem('vegas:bar:session')||'null');}catch{return null;}}
   async function api(action,body={}){
     const identity=saved();if(!identity)throw Error('Enter the tavern and choose a character first');
@@ -52,11 +77,22 @@ export function createPokerUI({el,navigate}) {
     else banner.replaceChildren(el('p',{role:'status'},error),el('button',{onclick:()=>{error='';banner.hidden=true;}},'Close'));
   }}
   async function poll(){
-    if(polling)return;session=saved();if(!session)return;
+    if(polling)return;session=saved();
+    if(bankruptcyDialog&&session?.playerId!==bankruptcyOwner)dismissBankruptcy();
+    if(!session)return;
     const id=session.playerId,current=generation;polling=true;
     try{
       const data=await api('me');if(saved()?.playerId!==id||current!==generation)return;
       room=data.room;
+      if(data.departure){
+        banner.hidden=true;resume.hidden=true;lastInvite='';
+        if(mounted&&!room){
+          const root=document.getElementById('app');
+          root?.replaceChildren(el('main',{class:'poker-page'},[el('h1',{},'Texas Hold’em'),el('p',{},'Your hand is complete. You have left the table with 0 chips.')]));
+        }
+        showBankruptcy(data.departure,id);return;
+      }
+      if(bankruptcyDialog)dismissBankruptcy();
       if(mounted&&!room)error='You are no longer seated. Return to the bar to join a table.';
       if(mounted&&(room?.version!==lastVersion||!room)){lastVersion=room?.version;draw();}
       const invite=data.invites[0];
@@ -88,7 +124,6 @@ export function createPokerUI({el,navigate}) {
       }
     }
     if(between&&room.host===session.playerId)buttons.push(el('button',{disabled:room.players.filter(p=>!p.leaving&&(p.stack>0||p.npc)).length<2,onclick:()=>perform('deal')},room.hand?'Deal next hand':'Start game'));
-    if(between&&me?.stack===0)buttons.push(el('button',{onclick:()=>perform('rebuy')},'Rebuy 500 play chips'));
     const controls=el('section',{class:'poker-controls'},[el('p',{},turn?'Your turn':between?(room.hand?'Review the result. The host deals the next hand.':'Invite a friend. At least two funded players are needed to start.'):`Waiting for ${room.players.find(p=>p.id===room.actor)?.nickname||'the table'}`),...buttons]);
     const invitePanel=[];
     if(room.mode==='online'){
@@ -99,7 +134,7 @@ export function createPokerUI({el,navigate}) {
         el('ul',{},results.map(p=>el('li',{},[`${p.nickname} · ${p.id.slice(0,6)} `,el('button',{onclick:async()=>{try{await api('invite',{roomId:room.id,target:p.id});error=`Invitation sent to ${p.nickname}`;draw();}catch(e){notify(e);}}},'Invite')]))),
       ]));
     }
-    const rules=el('details',{class:'poker-rules'},[el('summary',{},'📜 How to play'),el('p',{},'No-limit Texas Hold’em · 2–5 players · 500 play chips · blinds 1/2. Two private cards, five community cards; make the best five-card hand. Fold, check, call, bet or raise. All-in players can win only pots they contributed to; equal hands split the pot. Dealer and blinds rotate each hand. New arrivals wait for the next deal. Leaving folds your hand, except an all-in remains eligible. 45-second turn limit: check if free, otherwise fold on timeout. Disconnects reserve your seat for three minutes; Leave table exits immediately. No real-money stakes.'),el('a',{href:'https://www.pokerstars.com/poker/games/texas-holdem/',target:'_blank',rel:'noopener'},'Hold’em rules reference')]);
+    const rules=el('details',{class:'poker-rules'},[el('summary',{},'📜 How to play'),el('p',{},'No-limit Texas Hold’em · 2–5 players · 500 play chips · blinds 1/2. Two private cards, five community cards; make the best five-card hand. Fold, check, call, bet or raise. All-in players can win only pots they contributed to; equal hands split the pot. Dealer and blinds rotate each hand. New arrivals wait for the next deal. Leaving folds your hand, except an all-in remains eligible. 45-second turn limit: check if free, otherwise fold on timeout. Disconnects reserve your seat for three minutes; Leave table exits immediately. If you have zero chips after settlement, you automatically leave the table. A popup explains the result; click Return to the bar to continue. An all-in is never removed before payouts. There is no in-place rebuy. No real-money stakes.'),el('a',{href:'https://www.pokerstars.com/poker/games/texas-holdem/',target:'_blank',rel:'noopener'},'Hold’em rules reference')]);
     root.replaceChildren(el('main',{class:'poker-page'},[
       el('header',{class:'poker-header'},[el('h1',{},'Texas Hold’em'),el('span',{},`${room.mode==='offline'?'Offline · NPC opponents':'Online · invitation table'} · Hand ${room.hand}`),el('button',{onclick:async()=>{try{await api('leave');generation++;room=null;navigate('/');}catch(e){notify(e);}}},'Leave table')]),
       rules,el('p',{class:'error',role:'status'},error),

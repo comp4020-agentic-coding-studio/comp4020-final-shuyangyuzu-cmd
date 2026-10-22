@@ -7,5 +7,6 @@ export function migratePoker(db:Database.Database):void {
     CREATE TABLE IF NOT EXISTS poker_wallets(room_id TEXT NOT NULL,bar_id TEXT NOT NULL,stack INTEGER NOT NULL,PRIMARY KEY(room_id,bar_id));
     CREATE TABLE IF NOT EXISTS poker_presence(bar_id TEXT PRIMARY KEY,seen INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS poker_invites(id TEXT PRIMARY KEY,room_id TEXT NOT NULL,sender TEXT NOT NULL,target TEXT NOT NULL,expires INTEGER NOT NULL,status TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS poker_events(id INTEGER PRIMARY KEY,room_id TEXT NOT NULL,version INTEGER NOT NULL,actor TEXT,action TEXT NOT NULL,at INTEGER NOT NULL);`);
+    CREATE TABLE IF NOT EXISTS poker_events(id INTEGER PRIMARY KEY,room_id TEXT NOT NULL,version INTEGER NOT NULL,actor TEXT,action TEXT NOT NULL,at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS poker_notices(bar_id TEXT PRIMARY KEY,notice_id TEXT NOT NULL,room_id TEXT NOT NULL,hand INTEGER NOT NULL,result TEXT NOT NULL);`);
 }

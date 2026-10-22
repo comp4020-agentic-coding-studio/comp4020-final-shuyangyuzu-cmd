@@ -119,8 +119,11 @@ it('joins during a hand without receiving cards until the next deal; stale actio
 it('preserves the bankroll on leave/rejoin and transfers host without resetting the hand',()=>{
   const a=patron('Alice'),b=patron('Bob'),r=poker.openPoker(db,a.playerId,a.sessionSecret,'online');inviteJoin(a,b,r);
   let v=poker.pokerView(db,a.playerId,r);poker.actPoker(db,a.playerId,a.sessionSecret,r,v.version,'deal');
-  v=poker.pokerView(db,a.playerId,r);const stack=v.players.find(p=>p.id===a.playerId)!.stack;
-  poker.leavePoker(db,a.playerId,a.sessionSecret);expect(poker.pokerView(db,b.playerId,r).host).toBe(b.playerId);
+  poker.leavePoker(db,a.playerId,a.sessionSecret);
+  const afterLeave=poker.pokerView(db,b.playerId,r);expect(afterLeave.host).toBe(b.playerId);
+  // Leaving can legitimately return an uncalled blind. Preserve the
+  // actual settled stack, rather than a pre-fold/pre-refund amount.
+  const stack=afterLeave.players.find(p=>p.id===a.playerId)!.stack;
   inviteJoin(b,a,r);expect(poker.pokerView(db,a.playerId,r).players.find(p=>p.id===a.playerId)!.stack).toBe(stack);
 });
 
@@ -156,14 +159,15 @@ it('drives all Offline NPC turns legally, conserves chips and releases a disconn
   const a=patron('Human'),r=poker.openPoker(db,a.playerId,a.sessionSecret,'offline');
   let steps=0;
   while(steps++<150){
-    const v=poker.pokerView(db,a.playerId,r);if(v.phase==='showdown')break;
+    const v=poker.pokerMe(db,a.playerId,a.sessionSecret).room;if(!v||v.phase==='showdown')break;
     if(v.actor===a.playerId){const me=v.players.find(p=>p.id===a.playerId)!;poker.actPoker(db,a.playerId,a.sessionSecret,r,v.version,v.currentBet>me.bet?'call':'check');}
     else {
       const raw=JSON.parse((db.prepare('SELECT state_json FROM poker_rooms WHERE id=?').get(r) as {state_json:string}).state_json);raw.actedAt=0;
       db.prepare('UPDATE poker_rooms SET state_json=? WHERE id=?').run(JSON.stringify(raw),r);poker.tickPoker(db);
     }
   }
-  const settled=poker.pokerView(db,a.playerId,r);expect(settled.phase).toBe('showdown');expect(settled.players.reduce((sum,p)=>sum+p.stack,0)).toBe(2500);
+  const settled=JSON.parse((db.prepare('SELECT state_json FROM poker_rooms WHERE id=?').get(r) as {state_json:string}).state_json) as PokerState;
+  expect(settled.phase).toBe('showdown');expect(settled.players.reduce((sum,p)=>sum+p.stack,0)).toBe(2500);
   db.prepare('UPDATE poker_presence SET seen=0 WHERE bar_id=?').run(a.playerId);poker.tickPoker(db);
   expect(poker.pokerMe(db,a.playerId,a.sessionSecret).room).toBeNull();
 });

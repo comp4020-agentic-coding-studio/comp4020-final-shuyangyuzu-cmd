@@ -30,10 +30,16 @@ it('plays invitation-only poker over HTTP, hides cards, waits mid-hand arrivals 
     for(let n=0;state.phase!=='showdown'&&n<10;n++){
       const actor=sessions.find(s=>s.playerId===state.actor)!;
       expect((await post('/api/poker/act',{...actor,roomId,version:state.version,type:'allin'})).status).toBe(200);
-      state=(await me(a)).room;
+      state=(await Promise.all(sessions.map(me))).map(s=>s.room).find(Boolean);
     }
     expect(state.phase).toBe('showdown');expect(state.board).toHaveLength(5);expect(state.players.reduce((sum:number,p:any)=>sum+p.stack,0)).toBe(1500);
     expect((await post('/api/poker/leave',a)).status).toBe(200);
-    expect((await me(b)).room.host).toBe(b.playerId);
+    const seated=(await Promise.all(sessions.map(me))).map(s=>s.room).filter(Boolean);
+    expect(seated.length).toBeGreaterThan(0);
+    const host=seated[0].host;
+    expect(seated.every(s=>s.host===host)).toBe(true);
+    expect(host).not.toBe(a.playerId);
+    const eliminated=(await Promise.all(sessions.map(me))).filter(s=>s.departure);
+    expect(eliminated.every(s=>s.room===null&&s.departure.reason==='bankrupt')).toBe(true);
   } finally {for(const s of sessions)await post('/api/poker/leave',s);}
 },15000);

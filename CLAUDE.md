@@ -985,3 +985,17 @@ Poker seat rotation is visual only. Keep authoritative seat numbers,
 dealer and turn order unchanged. Draw only the cards actually supplied by
 the private snapshot; placing cards visibly on felt does not authorize
 revealing opponents' hands before showdown.
+
+### Poker bankruptcy (Codex, 2026-10-23)
+
+A human with zero chips after final settlement automatically leaves the
+table. All-in zero is not bankruptcy: finish every main/side pot, split
+and refund first. Release membership and transfer host/close the room in
+the same transaction as settlement and the private persistent notice.
+Show Out of chips with the hand result. Only its Return to the bar click
+acknowledges the notice and navigates; refresh/restart must not lose it.
+Acknowledgement is authenticated and notice-id scoped, so an old click
+cannot clear another player's or newer notice. No in-place rebuy. A
+deliberate later re-entry can start a fresh free 500-chip buy-in when the
+prior stack was zero. NPC refill stays a declared house setting. This
+does not apply to Vegas winnings (which legitimately start at zero).

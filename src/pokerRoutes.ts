@@ -13,6 +13,7 @@ export function registerPoker(app:Hono,db:Database.Database):void {
       case 'me':return c.json(poker.pokerMe(db,id,secret));
       case 'open':return c.json({roomId:poker.openPoker(db,id,secret,String(b.mode),['red','blue','green','yellow','purple'].indexOf(b.seat))});
       case 'leave':poker.leavePoker(db,id,secret);return c.json({ok:true});
+      case 'ack-exit':poker.acknowledgePokerExit(db,id,secret,String(b.noticeId));return c.json({ok:true});
       case 'act':poker.actPoker(db,id,secret,String(b.roomId),Number(b.version),String(b.type),Number(b.to));return c.json({ok:true});
       case 'search':return c.json({players:poker.searchPokerFriends(db,id,secret,String(b.query??''))});
       case 'invite':poker.invitePoker(db,id,secret,String(b.roomId),String(b.target));return c.json({ok:true});
