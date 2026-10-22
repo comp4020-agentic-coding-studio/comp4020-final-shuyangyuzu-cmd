@@ -482,7 +482,6 @@ export function createVoiceCall({ el }) {
   function onStateUpdate(state) {
     if (!applySummary(state)) return;
     if (ownStatus === 'joined' && (!latestVoiceCall.active || latestVoiceCall.callId !== callId || !isActiveParticipant(session.playerId))) resetMembership();
-    if (incomingInvite && (!latestVoiceCall.active || latestVoiceCall.callId !== incomingInvite.callId)) incomingInvite = null;
     reconcilePeerMesh();
   }
 

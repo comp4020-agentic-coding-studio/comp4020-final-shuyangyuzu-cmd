@@ -112,6 +112,12 @@ it('ignores a delayed ended event for a previous call',async()=>{
   expect(t.tracks[0].stop).not.toHaveBeenCalled();
 });
 
+it('preserves a new private invitation while the previous public snapshot is redrawn',async()=>{
+  const t=setup();await flush();t.invite();
+  t.client.onStateUpdate({voiceCall:{active:false,callId:null,participants:[]}});
+  expect(t.client.incomingInviteModal()?.textContent).toContain('Bob started a voice call');
+});
+
 it('retains an authorized offer that arrives before the join HTTP response',async()=>{
   const t=setup();await flush();const pending=deferred<any>(),original=t.transport.getMockImplementation()!;
   t.transport.mockImplementation(async(url,init)=>url.endsWith('/start')?pending.promise:original(url,init));
