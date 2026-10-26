@@ -11,6 +11,7 @@ import { logAction, markIdentityVerified, transact } from "./actionLog.ts";
 import { BAR_SEATS, defaultSpawn, FURNITURE, GRID_COLS, GRID_ROWS, isValidStep, isWalkingFloor } from "./barLayout.ts";
 import { isConnected } from "./presence.ts";
 import { effectivePosition } from "./position.ts";
+import { currentStamina, initStamina, recordHeartbeat as recordStaminaHeartbeat } from "./stamina.ts";
 
 // A separate, larger palette from the Vegas table's 4 (PLAN.md decision:
 // the bar isn't capped at 4 patrons). Keep in sync with public/app.js's
@@ -28,6 +29,15 @@ export type BarColor = (typeof BAR_COLORS)[number];
 // it has no table coupling at all.
 
 function recordBarHeartbeat(db: Database.Database, playerId: string, now = new Date()): void {
+  // Stamina's own gap-detection reads the OLD last_seen_at, so it must
+  // run before this INSERT/UPDATE overwrites it (src/stamina.ts's
+  // recordHeartbeat doc comment explains why this can't be a lazy read
+  // done later) — this function is the one choke point every bar-
+  // identity action already funnels through (join, rejoin, heartbeat,
+  // move, sit, stand, say, appearance, and the menu routes), so wiring
+  // it in exactly once here covers every real path with no per-call-site
+  // opt-in required.
+  recordStaminaHeartbeat(db, playerId, now);
   db.prepare(
     `INSERT INTO bar_presence (player_id, last_seen_at) VALUES (?, ?)
      ON CONFLICT(player_id) DO UPDATE SET last_seen_at = excluded.last_seen_at`,
@@ -178,6 +188,7 @@ export function joinBar(db: Database.Database, nickname: string, color: BarColor
     ).run(id, trimmed, color, skin, x, y, now);
     db.prepare(`INSERT INTO bar_sessions (player_id, session_secret) VALUES (?, ?)`).run(id, sessionSecret);
     recordBarHeartbeat(db, id, new Date(now));
+    initStamina(db, id, new Date(now));
     logAction(db, {
       action: "join_bar",
       outcome: "ok",
@@ -533,6 +544,13 @@ export interface PublicBarPlayer {
    * draws whatever's here and stops the moment a fresh snapshot omits it
    * (CLAUDE.md's "Public tavern speech" section). */
   speech: string | null;
+  /** Server-computed, read-only (CLAUDE.md's "Stamina" section) — never
+   * settable through this or any other request body; only src/orders.ts's
+   * consume action and src/stamina.ts's own decay math ever change the
+   * underlying value. Reported for every online player the same way
+   * position/seatId already are, even though the client only ever
+   * renders the viewer's own value. */
+  stamina: number;
 }
 
 export interface PublicGameTable {
@@ -600,6 +618,7 @@ export function getPublicBarState(db: Database.Database): PublicBarState {
         y: pos.y,
         seatId: seatedBy.get(p.id) ?? null,
         speech: speechBy.get(p.id) ?? null,
+        stamina: currentStamina(db, p.id, now),
       };
     }),
   };

@@ -10,6 +10,7 @@ import { installTransactionLogging } from "./actionLog.ts";
 import { migratePoker } from './pokerSchema.ts';
 import { findFreeTile } from "./bar.ts";
 import { BAR_SEATS, GAME_TABLES, defaultSpawn, isWalkingFloor } from "./barLayout.ts";
+import { initStamina } from "./stamina.ts";
 import type { RoomState } from "./types.ts";
 
 export function openDb(path: string): Database.Database {
@@ -28,6 +29,16 @@ export function openDb(path: string): Database.Database {
   migratePoker(db);
   seedBarFurniture(db);
   seedBarSeats(db);
+  // Any bar identity that existed before this feature shipped needs its
+  // own stamina row backfilled — joinBar is the only other writer of a
+  // first row, and an identity that joined before bar_stamina existed
+  // never went through it. initStamina is itself a no-op (ON CONFLICT DO
+  // NOTHING) for any identity that already has one, so this is safe to
+  // run on every startup, not just the first one after this feature's
+  // own deploy.
+  for (const p of db.prepare("SELECT id FROM bar_players").all() as Array<{ id: string }>) {
+    initStamina(db, p.id);
+  }
   // Furniture can move on deploy. Keep seated patrons on their updated
   // chair (seedBarSeats above); relocate only obstructed floor positions
   // — each one to its own free tile (product-direction-update: a layout
@@ -236,6 +247,46 @@ function migrate(db: Database.Database): void {
       joined_at TEXT,
       PRIMARY KEY (call_id, player_id)
     );
+
+    -- Server-computed, lazily-recomputed stamina (src/stamina.ts) — a
+    -- frequently-changing numeric stat, deliberately its own table rather
+    -- than a bar_players column, for the same reason bar_presence and
+    -- table_departures already are: it has no business inside a row that
+    -- otherwise holds only permanent profile fields. One row per bar
+    -- identity (never per-tab, which is what makes "several tabs, one
+    -- stamina" true for free). online_since is null while this identity
+    -- currently has no live presence; see stamina.ts's own header for the
+    -- full recompute contract.
+    CREATE TABLE IF NOT EXISTS bar_stamina (
+      player_id TEXT PRIMARY KEY REFERENCES bar_players(id),
+      value REAL NOT NULL,
+      last_computed_at TEXT NOT NULL,
+      online_since TEXT
+    );
+
+    -- Front-of-house menu consumption (src/orders.ts). Replaces the
+    -- earlier single-active-order design (see src/orders.ts's own header
+    -- for why): a patron may hold one meal and one drink at a time, each
+    -- its own row, each consumed independently and exactly once.
+    CREATE TABLE IF NOT EXISTS held_items (
+      id TEXT PRIMARY KEY,
+      player_id TEXT NOT NULL REFERENCES bar_players(id),
+      kind TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      variant TEXT,
+      state TEXT NOT NULL,
+      idempotency_key TEXT UNIQUE,
+      created_at TEXT NOT NULL,
+      consumed_at TEXT
+    );
+    -- At most one HELD row per (player, kind) at a time — the same
+    -- partial-unique-index backstop poker_members.poker_one_seat already
+    -- uses for an identical "one active X per Y" rule. The real check
+    -- still happens inside the same transaction as the insert (src/
+    -- orders.ts), same as everywhere else in this codebase; this index
+    -- is the backstop against a race the application check alone can't
+    -- rule out.
+    CREATE UNIQUE INDEX IF NOT EXISTS held_items_one_per_kind ON held_items(player_id, kind) WHERE state = 'held';
   `);
 
   // Added after the first deploy. "CREATE TABLE IF NOT EXISTS" above is a
