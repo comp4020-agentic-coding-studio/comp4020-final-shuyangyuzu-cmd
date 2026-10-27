@@ -18,6 +18,7 @@ export function registerPoker(app:Hono,db:Database.Database):void {
       case 'search':return c.json({players:poker.searchPokerFriends(db,id,secret,String(b.query??''))});
       case 'invite':poker.invitePoker(db,id,secret,String(b.roomId),String(b.target));return c.json({ok:true});
       case 'respond':return c.json({roomId:poker.respondPoker(db,id,secret,String(b.inviteId),b.join===true)});
+      case 'away':poker.setPokerAway(db,id,secret,b.away===true);return c.json({ok:true});
       default:return c.json({message:'Unknown poker action'},404);
     }
   });

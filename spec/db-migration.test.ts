@@ -192,6 +192,34 @@ it("adds bar_seats and table_departures to a database that predates them, and se
   reopened.close();
 });
 
+// Phase 7 (poker away badge): poker_members already exists on any
+// already-deployed volume via migratePoker's own CREATE TABLE IF NOT
+// EXISTS — adding `away` to that statement changes only a fresh
+// database's shape, exactly the same bug class closed_at's own test
+// above guards against, now for a table outside src/db.ts's own
+// `migrate` function (pokerSchema.ts's migratePoker, called separately).
+it("adds the poker away column to an already-existing poker_members table, preserving existing rows", () => {
+  const path = join(dir, "vegas.db");
+  const old = new Database(path);
+  old.exec(`
+    CREATE TABLE poker_rooms(id TEXT PRIMARY KEY,mode TEXT NOT NULL,table_id TEXT NOT NULL,host TEXT NOT NULL,state_json TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 0,closed INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE poker_members(room_id TEXT NOT NULL,bar_id TEXT NOT NULL,seat INTEGER NOT NULL,active INTEGER NOT NULL DEFAULT 1,PRIMARY KEY(room_id,bar_id));
+    INSERT INTO poker_rooms VALUES('old-room','online','texas-1','old-host','{}',0,0);
+    INSERT INTO poker_members VALUES('old-room','old-bar-id',0,1);
+  `);
+  old.close();
+
+  const migrated = openDb(path);
+  try {
+    const columns = (migrated.prepare("PRAGMA table_info(poker_members)").all() as Array<{ name: string }>).map((c) => c.name);
+    expect(columns).toContain("away");
+    // The pre-existing row survives the migration, with the new column
+    // defaulting to 0 (not away) rather than erroring or being dropped.
+    expect(migrated.prepare("SELECT room_id, bar_id, seat, active, away FROM poker_members WHERE bar_id = 'old-bar-id'").get())
+      .toEqual({ room_id: "old-room", bar_id: "old-bar-id", seat: 0, active: 1, away: 0 });
+  } finally { migrated.close(); }
+});
+
 it("preserves a table's current_room_id across a reopen rather than resetting the seed", () => {
   const path = join(dir, "vegas.db");
   createPreBarSchema(path);

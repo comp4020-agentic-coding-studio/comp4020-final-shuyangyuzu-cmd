@@ -43,3 +43,73 @@ it('plays invitation-only poker over HTTP, hides cards, waits mid-hand arrivals 
     expect(eliminated.every(s=>s.room===null&&s.departure.reason==='bankrupt')).toBe(true);
   } finally {for(const s of sessions)await post('/api/poker/leave',s);}
 },15000);
+
+// Phase 7: away is a pure display flag (CLAUDE.md) — never a real
+// standby concept, unlike Vegas's awayMode. Checked here at the HTTP
+// level since pokerView's own away lookup only runs inside a real room.
+it('poker away is a display-only badge, visible to every seated player, with no effect on turn-taking',async()=>{
+  const a=(await post('/api/bar/join',{nickname:'Poker Away Alice',color:'teal'})).body;
+  const b=(await post('/api/bar/join',{nickname:'Poker Away Bob',color:'orange'})).body;
+  const opened=await post('/api/poker/open',{...a,mode:'online'});expect(opened.status).toBe(200);const roomId=opened.body.roomId;
+  const me=async(s:typeof a)=>(await post('/api/poker/me',s)).body;
+  try{
+    await me(b);
+    expect((await post('/api/poker/invite',{...a,roomId,target:b.playerId})).status).toBe(200);
+    const invitation=(await me(b)).invites[0];
+    expect((await post('/api/poker/respond',{...b,inviteId:invitation.id,join:true})).status).toBe(200);
+
+    let state=(await me(a)).room;
+    expect(state.players.find((p:any)=>p.id===a.playerId).away).toBe(false);
+
+    expect((await post('/api/poker/away',{...a,away:true})).status).toBe(200);
+    state=(await me(a)).room;
+    expect(state.players.find((p:any)=>p.id===a.playerId).away).toBe(true);
+    // Visible to every seated player, not just the one who set it.
+    const bView=(await me(b)).room;
+    expect(bView.players.find((p:any)=>p.id===a.playerId).away).toBe(true);
+    // Never affects who may actually act — the marked-away player still
+    // deals/acts normally through the ordinary endpoints.
+    expect((await post('/api/poker/act',{...a,roomId,version:state.version,type:'deal'})).status).toBe(200);
+
+    expect((await post('/api/poker/away',{...a,away:false})).status).toBe(200);
+    state=(await me(a)).room;
+    expect(state.players.find((p:any)=>p.id===a.playerId).away).toBe(false);
+  } finally {await post('/api/poker/leave',a);await post('/api/poker/leave',b);}
+});
+
+// A display-only change must never race a real in-flight action over
+// the same optimistic-concurrency counter (CLAUDE.md's existing rule
+// for Vegas's own rev/version split, applied identically here). Uses an
+// online, two-player room specifically because it stays in 'waiting'
+// until the host deals — unlike offline mode, nothing else is ticking
+// in the background to independently advance version, so this isolates
+// the one thing under test: does the toggle itself bump it.
+it("toggling the away flag never bumps poker_rooms.version, so it can't race a concurrent real action",async()=>{
+  const a=(await post('/api/bar/join',{nickname:'Poker Away Version A',color:'teal'})).body;
+  const b=(await post('/api/bar/join',{nickname:'Poker Away Version B',color:'orange'})).body;
+  const opened=await post('/api/poker/open',{...a,mode:'online'});expect(opened.status).toBe(200);const roomId=opened.body.roomId;
+  const me=async(s:typeof a)=>(await post('/api/poker/me',s)).body;
+  try{
+    await me(b);
+    expect((await post('/api/poker/invite',{...a,roomId,target:b.playerId})).status).toBe(200);
+    const invitation=(await me(b)).invites[0];
+    expect((await post('/api/poker/respond',{...b,inviteId:invitation.id,join:true})).status).toBe(200);
+
+    const before=(await me(a)).room;
+    expect(before.phase).toBe('waiting'); // nothing else advances version while waiting
+    expect((await post('/api/poker/away',{...a,away:true})).status).toBe(200);
+    const after=(await me(a)).room;
+    expect(after.version).toBe(before.version);
+    expect(after.players.find((p:any)=>p.id===a.playerId).away).toBe(true);
+    // The version an in-flight action already captured is still valid —
+    // a real action against the pre-toggle version must still succeed,
+    // not be rejected as stale by the toggle that happened in between.
+    expect((await post('/api/poker/act',{...a,roomId,version:before.version,type:'deal'})).status).toBe(200);
+  } finally {await post('/api/poker/leave',a);await post('/api/poker/leave',b);}
+});
+
+it('refuses setting the away flag for an identity not seated at any poker table',async()=>{
+  const nobody=(await post('/api/bar/join',{nickname:'Poker Away Nobody',color:'pink'})).body;
+  const res=await post('/api/poker/away',{...nobody,away:true});
+  expect(res.status).toBe(403);
+});

@@ -17,7 +17,12 @@ export function renderPokerTable(el,room,viewerId) {
       el('div',{class:'poker-chair','aria-hidden':'true'},p?[el('div',{class:'poker-avatar'},[el('i',{class:'avatar-head'}),el('i',{class:'avatar-shirt'}),el('i',{class:'avatar-legs'})])]:[]),
       el('div',{class:'poker-seat-label'},[
         el('strong',{title:p?.nickname??'Empty seat'},p?`${p.nickname}${p.id===viewerId?' · You':p.npc?' · NPC':''}`:'Empty seat'),
-        ...(p?[el('span',{class:'poker-stack'},`${p.stack} chips`),el('small',{},[p.seat===room.dealer?'D · Dealer':'',p.waiting?'Next hand':'',p.leaving?'Left':'',p.folded?'Folded':'',!p.stack&&!p.waiting?(between?'Out of chips':'All in'):'',p.handName??''].filter(Boolean).join(' · '))]:[]),
+        ...(p?[el('span',{class:'poker-stack'},`${p.stack} chips`),el('small',{},[p.seat===room.dealer?'D · Dealer':'',p.waiting?'Next hand':'',p.leaving?'Left':'',p.folded?'Folded':'',!p.stack&&!p.waiting?(between?'Out of chips':'All in'):'',
+          // Display-only this round (CLAUDE.md): no automated standby
+          // play exists underneath this badge — the existing 45-second
+          // action timeout and disconnect-triggered fold/removal are
+          // completely unaffected by it.
+          p.away?'Away':'',p.handName??''].filter(Boolean).join(' · '))]:[]),
       ]),
     ]));
     if(p&&!p.waiting&&room.hand>0)seats.push(el('div',{class:`poker-hand-zone${north?' poker-hand-north':''}${p.folded?' folded':''}`,style:at(north?18:24),'aria-label':`${p.nickname}'s cards and bet`},[
@@ -37,7 +42,15 @@ export function renderPokerTable(el,room,viewerId) {
 }
 
 export function createPokerUI({el,navigate}) {
-  let session=null,room=null,lastVersion=null,mounted=false,polling=false,error='',query='',results=[],raiseTo='',lastInvite='',generation=0;
+  let session=null,room=null,lastVersion=null,lastAwaySignature='',mounted=false,polling=false,error='',query='',results=[],raiseTo='',lastInvite='',generation=0;
+  // away (phase 7) is a display-only flag that deliberately never bumps
+  // poker_rooms.version (src/poker.ts's own comment on setPokerAway
+  // explains why: version is also actPoker's optimistic-concurrency
+  // counter, and a presence/display change must never race a real
+  // in-flight action over it). Polling must still notice it changed and
+  // redraw — this signature is the independent redraw trigger for
+  // exactly that one field, parallel to version for everything else.
+  const awaySignature=r=>r?r.players.map(p=>`${p.id}:${p.away?1:0}`).join(','):'';
   const banner=el('aside',{class:'poker-invite',hidden:true});document.body.append(banner);
   const resume=el('aside',{class:'poker-resume',hidden:true});document.body.append(resume);
   let bankruptcyDialog=null,bankruptcyId='',bankruptcyOwner='';
@@ -94,7 +107,8 @@ export function createPokerUI({el,navigate}) {
       }
       if(bankruptcyDialog)dismissBankruptcy();
       if(mounted&&!room)error='You are no longer seated. Return to the bar to join a table.';
-      if(mounted&&(room?.version!==lastVersion||!room)){lastVersion=room?.version;draw();}
+      const nextAwaySignature=awaySignature(room);
+      if(mounted&&(room?.version!==lastVersion||nextAwaySignature!==lastAwaySignature||!room)){lastVersion=room?.version;lastAwaySignature=nextAwaySignature;draw();}
       const invite=data.invites[0];
       if(invite&&invite.id!==lastInvite){
         lastInvite=invite.id;banner.hidden=false;
@@ -136,7 +150,12 @@ export function createPokerUI({el,navigate}) {
     }
     const rules=el('details',{class:'poker-rules'},[el('summary',{},'📜 How to play'),el('p',{},'No-limit Texas Hold’em · 2–5 players · 500 play chips · blinds 1/2. Two private cards, five community cards; make the best five-card hand. Fold, check, call, bet or raise. All-in players can win only pots they contributed to; equal hands split the pot. Dealer and blinds rotate each hand. New arrivals wait for the next deal. Leaving folds your hand, except an all-in remains eligible. 45-second turn limit: check if free, otherwise fold on timeout. Disconnects reserve your seat for three minutes; Leave table exits immediately. If you have zero chips after settlement, you automatically leave the table. A popup explains the result; click Return to the bar to continue. An all-in is never removed before payouts. There is no in-place rebuy. No real-money stakes.'),el('a',{href:'https://www.pokerstars.com/poker/games/texas-holdem/',target:'_blank',rel:'noopener'},'Hold’em rules reference')]);
     root.replaceChildren(el('main',{class:'poker-page'},[
-      el('header',{class:'poker-header'},[el('h1',{},'Texas Hold’em'),el('span',{},`${room.mode==='offline'?'Offline · NPC opponents':'Online · invitation table'} · Hand ${room.hand}`),el('button',{onclick:async()=>{try{await api('leave');generation++;room=null;navigate('/');}catch(e){notify(e);}}},'Leave table')]),
+      el('header',{class:'poker-header'},[el('h1',{},'Texas Hold’em'),el('span',{},`${room.mode==='offline'?'Offline · NPC opponents':'Online · invitation table'} · Hand ${room.hand}`),
+        // Display-only badge toggle (CLAUDE.md) — online tables only,
+        // where another seated human can actually see it; no automated
+        // standby play exists underneath it, unlike Vegas's awayMode.
+        ...(room.mode==='online'&&me?[el('button',{onclick:async()=>{try{await api('away',{away:!me.away});await poll();}catch(e){notify(e);}}},me.away?"I'm back":"I'm away")]:[]),
+        el('button',{onclick:async()=>{try{await api('leave');generation++;room=null;navigate('/');}catch(e){notify(e);}}},'Leave table')]),
       rules,el('p',{class:'error',role:'status'},error),
       renderPokerTable(el,room,session.playerId),
       el('p',{class:'poker-result',role:'status'},room.result),controls,...invitePanel,

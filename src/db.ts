@@ -367,7 +367,7 @@ function seedBarSeats(db: Database.Database): void {
   }
 }
 
-function addColumnIfMissing(db: Database.Database, table: string, column: string, type: string): void {
+export function addColumnIfMissing(db: Database.Database, table: string, column: string, type: string): void {
   const existing = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
   if (existing.some((c) => c.name === column)) return;
   db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);

@@ -63,7 +63,7 @@ function addHuman(db:Database.Database,r:Row,s:PokerState,id:string,preferred?:n
     s.players.push(newPokerPlayer(id,profile.nickname,seat,wallet?.stack===0?500:wallet?.stack??500));
   }
   const p=s.players.find(p=>p.id===id)!;
-  db.prepare('INSERT INTO poker_members VALUES(?,?,?,1) ON CONFLICT(room_id,bar_id) DO UPDATE SET active=1,seat=excluded.seat').run(r.id,id,p.seat);
+  db.prepare('INSERT INTO poker_members(room_id,bar_id,seat,active) VALUES(?,?,?,1) ON CONFLICT(room_id,bar_id) DO UPDATE SET active=1,seat=excluded.seat').run(r.id,id,p.seat);
   db.prepare('INSERT INTO poker_presence VALUES(?,?) ON CONFLICT(bar_id) DO UPDATE SET seen=excluded.seen').run(id,Date.now());
 }
 export function openPoker(db:Database.Database,id:string,secret:string,mode:string,preferred?:number):string {
@@ -112,11 +112,43 @@ export function actPoker(db:Database.Database,id:string,secret:string,roomId:str
 }
 export function pokerView(db:Database.Database,id:string,roomId:string){
   const r=getRoom(db,roomId);seated(db,r,id);const s=state(r);
+  // Display-only (phase 7, CLAUDE.md): away is a pure badge for other
+  // seated players, not a real standby concept — tickPoker's own
+  // 45-second action timeout and the disconnect-triggered fold/removal
+  // at DISCONNECT_GRACE_MS are completely unaffected by it, unlike
+  // Vegas's awayMode which actually redirects turn-taking.
+  const awaySeats=new Set((db.prepare('SELECT bar_id FROM poker_members WHERE room_id=? AND active=1 AND away=1').all(r.id) as {bar_id:string}[]).map(x=>x.bar_id));
   return {id:r.id,mode:r.mode,host:r.host,version:r.version,hand:s.hand,dealer:s.dealer,actor:s.actor,phase:s.phase,board:s.board,currentBet:s.currentBet,minRaise:s.minRaise,pot:s.players.reduce((n,p)=>n+p.committed,0),result:s.result,payouts:s.payouts,
-    players:s.players.map(p=>({id:p.id,nickname:p.nickname,seat:p.seat,stack:p.stack,bet:p.bet,folded:p.folded,waiting:p.waiting,leaving:p.leaving,npc:p.id.startsWith('npc:'),
+    players:s.players.map(p=>({id:p.id,nickname:p.nickname,seat:p.seat,stack:p.stack,bet:p.bet,folded:p.folded,waiting:p.waiting,leaving:p.leaving,npc:p.id.startsWith('npc:'),away:awaySeats.has(p.id),
       hole:p.id===id||s.phase==='showdown'&&!p.folded&&!p.waiting&&s.board.length===5?p.hole:[],
       handName:s.phase==='showdown'&&!p.folded&&!p.waiting&&s.board.length===5?handNames[bestHand([...p.hole,...s.board])[0]]:null,
       canRaise:p.actedAt===null||s.currentBet-p.actedAt>=s.minRaise}))};
+}
+/** Sets/clears this caller's own display-only away flag — ownership
+ * checked the same way every other poker action already checks it
+ * (membership + seated), never another player's row. A no-op resume (an
+ * ordinary return to the table) clears it, mirroring how Vegas's own
+ * away-choice is cleared only by an explicit action, never a passive
+ * signal — but here there is no reversible standby to undo, just a
+ * display flag. */
+export function setPokerAway(db:Database.Database,id:string,secret:string,away:boolean):void {
+  auth(db,id,secret);
+  transact(db,()=>{
+    const m=membership(db,id);
+    if(!m)throw new RoomError('You are not seated at a poker table','not_seated',403);
+    db.prepare('UPDATE poker_members SET away=? WHERE room_id=? AND bar_id=?').run(away?1:0,m.room_id,id);
+    // Deliberately does NOT bump poker_rooms.version: that column is also
+    // actPoker's own optimistic-concurrency counter (its stale_state
+    // check), and a presence/display-only change must never race a real
+    // in-flight action over the same counter — CLAUDE.md already
+    // documents this exact mistake for Vegas's own rev/seq vs `version`
+    // split. The client instead redraws on its own away-flag signature,
+    // independent of version (public/poker.js's draw() gate) — the same
+    // shape as Vegas keeping a presence-only rev separate from version,
+    // just without a dedicated server-side counter since polling (not
+    // SSE) means there's no stale-arrival ordering problem to solve here.
+    logAction(db,{action:'poker_away',outcome:'ok',verified:true,actor:{kind:'bar',id},room:{code:m.room_id},detail:{away}});
+  });
 }
 export function pokerMe(db:Database.Database,id:string,secret:string){
   auth(db,id,secret);barHeartbeat(db,id,secret);

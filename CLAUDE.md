@@ -1073,3 +1073,39 @@ update this endpoint exists to deliver (found via direct browser
 verification: the UI never flipped back from "Away" after resuming).
 Fixed by routing `/resume`'s response through `publishRoomState`, the
 same as every other mutating room action already does.
+
+## Poker's away badge: display-only, never bumps the optimistic-concurrency counter (2026-10-27)
+
+`poker_members.away INTEGER NOT NULL DEFAULT 0` (additive migration —
+`addColumnIfMissing`, since `poker_members` already exists on any
+deployed volume via its own `CREATE TABLE IF NOT EXISTS`; CLAUDE.md's
+migration rule applies here exactly as it did for `rooms.closed_at`) is
+set by `POST /api/poker/away` for the caller's own seat only
+(`membership`/`seated`'s existing ownership check, same as every other
+poker action), surfaced in `pokerView`'s per-player `away` field, and
+shown as an "Away" badge in the existing `.poker-seat-label`'s own
+join-string (`public/poker.js`). This is a pure display flag, unlike
+Vegas's `awayMode` above: nothing about `tickPoker`'s own 45-second
+action timeout or the disconnect-triggered fold/removal at
+`DISCONNECT_GRACE_MS` changes because a seat is marked away, and no
+automated standby play exists underneath it. Shown only for `mode ===
+'online'` tables (never offline/solo NPC games, where there's no other
+human to show a badge to).
+
+**`setPokerAway` deliberately never bumps `poker_rooms.version`** — a
+real bug this phase caught in itself, via direct browser verification
+rather than assumed from the unit tests alone. `version` is also
+`actPoker`'s own optimistic-concurrency counter (its `stale_state`
+check), and a presence/display-only change must never race a real
+in-flight action over the same counter — the identical mistake this
+file's own Vegas `rev`-vs-`version` section above already documents, now
+caught for poker specifically. The first version of this phase bumped
+`version` anyway "to make the client redraw," which would have made an
+unrelated fold/call/raise spuriously rejected as stale by a bystander's
+away toggle. The actual fix: the client's own poll loop (`public/
+poker.js`) computes a small `awaySignature` (every seated player's id
+plus away flag, joined) as a second, independent redraw trigger
+alongside `room.version` — polling, not SSE, is poker's own transport,
+so there's no stale-arrival-ordering problem a dedicated server-side
+counter would need to solve here, only "did anything change since the
+last draw," which the signature answers on its own.
