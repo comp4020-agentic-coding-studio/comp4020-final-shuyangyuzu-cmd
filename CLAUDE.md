@@ -1023,3 +1023,53 @@ cannot clear another player's or newer notice. No in-place rebuy. A
 deliberate later re-entry can start a fresh free 500-chip buy-in when the
 prior stack was zero. NPC refill stays a declared house setting. This
 does not apply to Vegas winnings (which legitimately start at zero).
+
+## Temporary NPC standby: a reversible away-choice, distinct from permanent handoff (2026-10-27)
+
+Vegas online rooms only — never a solo/offline NPC game (`state.solo`),
+and refused outright once a seat has already been permanently handed off
+(`controller === "npc"`; a stale page can't use this to "take back" such
+a seat). `Player.awayMode: "npc" | "self" | null` (`src/types.ts`) is a
+player-chosen, reversible status, entirely separate from `controller`'s
+own one-way flip: `POST /api/rooms/:code/depart-choice` sets it and
+performs the same `room_departures` insert `/depart` already does, in
+one transaction (`src/rooms.ts`'s `departChoice`) — this endpoint *is*
+the "I'm stepping away" action, not a second thing a client must
+separately remember to call. Only `resumeActiveTable`/`resumeGame`
+clears it, in the same transaction as the departure rows, never a
+passive heartbeat/rejoin (the same "explicit action only" rule the
+three-minute departure clock itself already established).
+
+`awayMode === "npc"` makes the scheduler (`scheduleNpcTurnIfNeeded`) and
+the engine (`npcRoll`/`npcPlace`) treat this seat exactly like a
+permanently-handed-off one for taking its turns — `controller !== "npc"
+&& awayMode !== "npc"` is the actual gate everywhere a permanent-handoff
+check used to stand alone — while `controller` itself never changes, so
+a `self`/`null` resume hands control straight back with nothing to
+reverse. `npcRoll`/`npcPlace` re-check `awayMode` fresh at execution
+time, inside their own transaction, the same way they already re-check
+`controller` — this is what makes a "resume control" click that races an
+already-scheduled, not-yet-delivered NPC turn win: by the time the
+delayed call actually runs, it sees the cleared value and declines.
+`awayMode === "self"` changes nothing about who may act (the ordinary
+`roll`/`place` endpoints only ever check `controller`) — it exists
+purely to drive the public away-choice display.
+
+The three-minute away-from-table clock is completely unaffected by which
+mode was chosen, or whether one was chosen at all: both reuse the exact
+same `table_departures`/`room_departures` row and the exact same
+expiry sweep already in production, which still ends in the identical
+permanent `handoffToNpc` regardless. A true disconnect (no explicit
+choice made) cannot show this dialog at all — there's no client left to
+show it to — so the existing default (no `awayMode`, seat idles until
+the grace sweep hands it off) is preserved unchanged as that fallback.
+
+**A real bug this phase caught in itself**: `POST /api/rooms/:code/resume`
+mutates `rooms.state_json` now (clearing a resumed seat's `awayMode`),
+but the route previously returned a plain, non-bumping `currentRoomState`
+read — the client's own `shouldApplyLiveUpdate` staleness gate then
+correctly discarded the stale-looking `rev`, silently losing the exact
+update this endpoint exists to deliver (found via direct browser
+verification: the UI never flipped back from "Away" after resuming).
+Fixed by routing `/resume`'s response through `publishRoomState`, the
+same as every other mutating room action already does.

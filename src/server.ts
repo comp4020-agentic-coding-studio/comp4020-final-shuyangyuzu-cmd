@@ -202,7 +202,11 @@ function scheduleNpcTurnIfNeeded(code: string): void {
   if (state.closed) return;
   if (state.phase !== "awaiting_roll" && state.phase !== "awaiting_placement") return;
   const current = state.players.find((p) => p.id === state.currentPlayerId);
-  if (!current || current.controller !== "npc") return;
+  // A permanent handoff (controller === "npc") OR the reversible
+  // "temporary NPC standby" away-choice (CLAUDE.md) both mean this
+  // seat's turn is taken automatically — awayMode === "self" or null
+  // changes nothing here, matching the design doc's own gate exactly.
+  if (!current || (current.controller !== "npc" && current.awayMode !== "npc")) return;
 
   npcTurnInFlight.add(code);
   setTimeout(() => {
@@ -500,9 +504,33 @@ app.post('/api/rooms/:code/depart',async(c)=>{
   publishRoomState(code,rooms.getPublicState(db,code));
   return c.json({ok:true});
 });
+
+// The reversible "temporary NPC standby vs self control" away-choice
+// (CLAUDE.md) — this endpoint *is* the "I'm stepping away" action
+// (rooms.departChoice also performs the departure-clock insert in the
+// same transaction), not a second thing the client must separately call
+// alongside /depart.
+app.post('/api/rooms/:code/depart-choice',async(c)=>{
+  const body=(await c.req.json().catch(()=>({}))) as AuthedBody & { mode?: unknown };
+  const code=c.req.param('code');
+  const mode=body.mode==='npc'||body.mode==='self'?body.mode:'';
+  rooms.departChoice(db,code,playerId(body),sessionSecret(body),mode);
+  const next=rooms.getPublicState(db,code);
+  publishRoomState(code,next);
+  return c.json(next);
+});
 app.post('/api/rooms/:code/resume',async(c)=>{
   const body=(await c.req.json()) as AuthedBody;
-  rooms.resumeGame(db,c.req.param('code'),playerId(body),sessionSecret(body));return c.json(currentRoomState(c.req.param('code')));
+  const code=c.req.param('code');
+  rooms.resumeGame(db,code,playerId(body),sessionSecret(body));
+  // resumeGame can now mutate state_json itself (clearing a resumed
+  // seat's awayMode, not just the separate departure-timestamp tables) —
+  // a plain currentRoomState() read never bumps rev, so a resume that
+  // cleared awayMode would return a stale-looking rev the client's own
+  // shouldApplyLiveUpdate then correctly discards as not-newer, silently
+  // losing the very update this endpoint exists to deliver. Push it
+  // through publishRoomState like every other mutating room action does.
+  return c.json(publishRoomState(code,rooms.getPublicState(db,code)));
 });
 
 app.post("/api/rooms/:code/disband", async (c) => {

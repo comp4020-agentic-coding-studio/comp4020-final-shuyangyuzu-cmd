@@ -281,6 +281,7 @@ export function createRoom(db: Database.Database, nickname: string, color: Color
     ready: false,
     joinedAt: now,
     controller: "human",
+    awayMode: null,
   };
 
   transact(db, () => {
@@ -352,6 +353,7 @@ export function createSoloNpcGame(db: Database.Database, nickname: string, color
     ready: true,
     joinedAt: now,
     controller: "human",
+    awayMode: null,
   };
   COLORS.filter((c) => c !== color)
     .slice(0, npcCount)
@@ -367,6 +369,7 @@ export function createSoloNpcGame(db: Database.Database, nickname: string, color
         ready: true,
         joinedAt: now,
         controller: "npc",
+        awayMode: null,
       };
     });
 
@@ -459,6 +462,7 @@ export function joinRoom(db: Database.Database, code: string, nickname: string, 
       ready: false,
       joinedAt: now,
       controller: "human",
+      awayMode: null,
     };
 
     db.prepare(`UPDATE rooms SET state_json = ?, version = version + 1 WHERE id = ? AND version = ?`).run(
@@ -605,6 +609,7 @@ export function approveJoin(
       ready: false,
       joinedAt: now,
       controller: "human",
+      awayMode: null,
     };
 
     db.prepare(`UPDATE rooms SET state_json = ?, version = version + 1 WHERE id = ? AND version = ?`).run(
@@ -835,12 +840,52 @@ export function departGame(db: Database.Database, code:string, playerId:string, 
   logAction(db,{action:'depart_game',outcome:'ok',verified:true,actor:{kind:'room',id:playerId},room:{code}});
 }
 
+/** The reversible "temporary NPC standby vs self control" choice
+ * (CLAUDE.md) — distinct from `controller`'s own one-way permanent
+ * handoff. This endpoint *is* the "I'm stepping away" action, not a
+ * second one the player must separately remember to trigger: it sets
+ * `awayMode` AND performs the same departure-clock insert `departGame`
+ * does, in the same transaction as the version-gated state write, so a
+ * crash or a concurrent request between them can't leave one without
+ * the other. Refuses outright if this seat has already been
+ * permanently handed off (`refuseIfNpcControlled`) — a stale page can't
+ * use this endpoint to "take back" a seat the permanent handoff already
+ * moved on from. */
+export function departChoice(db: Database.Database, code:string, playerId:string, sessionSecret:string, mode:string):void {
+  if(mode!=='npc'&&mode!=='self')throw new RoomError('mode must be "npc" or "self"','bad_mode',400);
+  const row=loadOpenRoom(db,code);requireSession(db,row.id,playerId,sessionSecret);
+  transact(db,()=>{
+    const fresh=db.prepare('SELECT state_json, version FROM rooms WHERE id = ?').get(row.id) as {state_json:string;version:number};
+    const state:RoomState=JSON.parse(fresh.state_json);
+    refuseIfNpcControlled(state,playerId);
+    const player=state.players[playerId];
+    if(!player)throw new RoomError('your seat has already been released','player_removed',409);
+    player.awayMode=mode;
+    db.prepare('UPDATE rooms SET state_json = ?, version = version + 1 WHERE id = ? AND version = ?').run(JSON.stringify(state),row.id,fresh.version);
+    db.prepare('INSERT OR IGNORE INTO room_departures (player_id,room_id,left_at) VALUES (?,?,?)').run(playerId,row.id,new Date().toISOString());
+    logAction(db,{action:'depart_choice',outcome:'ok',verified:true,actor:{kind:'room',id:playerId},room:{code},detail:{mode}});
+  });
+}
+
 export function resumeGame(db: Database.Database, code:string, playerId:string, sessionSecret:string):void {
   const row=loadOpenRoom(db,code);requireSession(db,row.id,playerId,sessionSecret);
   const state:RoomState=JSON.parse(row.state_json);
   if(!state.pendingRequests.some(p=>p.id===playerId)&&(!state.players[playerId]||state.players[playerId].controller==='npc'))throw new RoomError('your seat has already been released','player_removed',409);
   transact(db,()=>{
-    if(state.players[playerId])recordHeartbeat(db,row.id,playerId);
+    if(state.players[playerId]){
+      recordHeartbeat(db,row.id,playerId);
+      // Clears together with the departure rows below, in the same
+      // transaction — an actively-present, resumed seat has no
+      // meaningful awayMode left (CLAUDE.md's away-choice section). A
+      // fresh read+version-gated write, not the outer `state` captured
+      // before this transaction opened.
+      const fresh=db.prepare('SELECT state_json, version FROM rooms WHERE id = ?').get(row.id) as {state_json:string;version:number};
+      const freshState:RoomState=JSON.parse(fresh.state_json);
+      if(freshState.players[playerId]&&freshState.players[playerId].awayMode!==null){
+        freshState.players[playerId].awayMode=null;
+        db.prepare('UPDATE rooms SET state_json = ?, version = version + 1 WHERE id = ? AND version = ?').run(JSON.stringify(freshState),row.id,fresh.version);
+      }
+    }
     const room=db.prepare('DELETE FROM room_departures WHERE player_id = ?').run(playerId);
     const table=db.prepare('DELETE FROM table_departures WHERE bar_player_id IN (SELECT id FROM bar_players WHERE current_game_player_id = ?)').run(playerId);
     if(room.changes||table.changes)logAction(db,{action:'resume_game',outcome:'ok',verified:true,actor:{kind:'room',id:playerId},room:{code}});
@@ -1004,7 +1049,13 @@ export function npcRoll(db: Database.Database, code: string): boolean {
     const state: RoomState = JSON.parse(fresh.state_json);
     if (state.phase !== "awaiting_roll" || !state.currentPlayerId) return;
     const player = state.players[state.currentPlayerId];
-    if (!player || player.controller !== "npc") return;
+    // Re-checked fresh at execution time, not the state the scheduler's
+    // own earlier read captured — this is what lets a "resume control"
+    // click during the display-pause window win the race: by the time
+    // this runs, a cleared awayMode here means decline to act, exactly
+    // like the permanent-handoff re-check already declines for a seat
+    // that's moved on (CLAUDE.md's in-flight edge case).
+    if (!player || (player.controller !== "npc" && player.awayMode !== "npc")) return;
 
     let next: RoomState;
     try {
@@ -1050,7 +1101,8 @@ export function npcPlace(db: Database.Database, code: string): boolean {
     const state: RoomState = JSON.parse(fresh.state_json);
     if (state.phase !== "awaiting_placement" || !state.currentPlayerId) return;
     const player = state.players[state.currentPlayerId];
-    if (!player || player.controller !== "npc") return;
+    // Same fresh re-check as npcRoll above.
+    if (!player || (player.controller !== "npc" && player.awayMode !== "npc")) return;
     if (!state.lastRoll || state.lastRoll.playerId !== player.id) return;
 
     const value = chooseNpcPlacement(state.lastRoll.values);
@@ -1352,6 +1404,11 @@ function toPublicState(db: Database.Database, row: RoomRow, state: RoomState): P
         ready: p.ready,
         connected: isConnected(seen.get(p.id) ?? p.joinedAt, now),
         controller: p.controller,
+        // ?? null: a room whose state_json was stored before this field
+        // existed parses back with awayMode undefined, not null — the
+        // same "no explicit choice made" meaning either way, but this
+        // keeps the public payload's shape exactly matching PublicPlayer.
+        awayMode: p.awayMode ?? null,
       })),
     pendingRequests: [...state.pendingRequests].sort((a, b) => a.requestedAt.localeCompare(b.requestedAt)),
     lastRoll: state.lastRoll,

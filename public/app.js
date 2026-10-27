@@ -936,6 +936,11 @@ function renderTable(code, session, state) {
       "div",
       { class: "table" },
       [header, showPlayerListHere ? playerList : null, pendingSection, body, notes,
+        // Online rooms only (CLAUDE.md's away-choice section) — never
+        // solo/offline NPC games, and only while actually seated as a
+        // still-human-controlled player (a seat already permanently
+        // handed off has nothing reversible left to choose).
+        state.phase !== 'lobby' && !state.solo && me && me.controller !== 'npc' ? awayChoiceButton(code,session,me) : null,
         state.phase !== 'lobby' ? exitGameButton(code,session,state.solo) : null,
         el('p',{class:'note'},'Back to the bar keeps your seat for 3 minutes. Exit game leaves immediately.'),backToHomeButton(),
         // Floats above everything else but is a small corner toast, not a
@@ -946,6 +951,39 @@ function renderTable(code, session, state) {
       ),
     ),
   );
+}
+
+// The reversible "temporary NPC standby vs self control" away-choice
+// (CLAUDE.md) — distinct from Exit game's permanent, one-way handoff.
+// Online rooms only; shows the current choice (if any) and lets it be
+// changed or cleared without leaving the table view. Cloned from
+// exitGameButton's own confirm-dialog shape.
+function awayChoiceButton(code,session,me){
+  const label=me.awayMode==='npc'?'Away (computer playing)':me.awayMode==='self'?'Away (you\'ll still play)':'Step away';
+  return el('button',{class:'secondary',onclick:()=>{
+    const error=el('p',{class:'error',role:'status'});
+    const choose=(mode)=>el('button',{class:me.awayMode===mode?'danger':'secondary',onclick:async e=>{
+      e.currentTarget.disabled=true;
+      try{applyIncoming(await api(`/rooms/${code}/depart-choice`,{...session,mode}));}
+      catch(err){error.textContent=err.message;e.currentTarget.disabled=false;return;}
+      dialog.close();
+    }},mode==='npc'?'Let a computer play my turns':'I\'ll keep playing myself');
+    const resumeBtn=me.awayMode?el('button',{class:'secondary',onclick:async e=>{
+      e.currentTarget.disabled=true;
+      try{await api(`/rooms/${code}/resume`,session);applyIncoming(await api(`/rooms/${code}/rejoin`,session));}
+      catch(err){error.textContent=err.message;e.currentTarget.disabled=false;return;}
+      dialog.close();
+    }},'I\'m back — resume as normal'):null;
+    const dialog=el('dialog',{class:'rules-dialog','aria-label':'Step away from the table'},[
+      el('h2',{},'Step away from the table?'),
+      el('p',{},'Your seat reserves for up to three minutes either way — after that, a computer takes over for good. Choosing this now is reversible until then.'),
+      choose('npc'),choose('self'),
+      resumeBtn,
+      error,
+      el('button',{class:'secondary',onclick:()=>dialog.close()},'Cancel'),
+    ].filter(Boolean));
+    dialog.addEventListener('close',()=>dialog.remove(),{once:true});document.body.appendChild(dialog);dialog.showModal();
+  }},label);
 }
 
 function exitGameButton(code,session,solo){

@@ -30,6 +30,17 @@ export interface Player {
    * leave/exit states) — never deleted, never reclaimed by the original
    * human. Defaults "human" everywhere a Player is constructed. */
   controller: "human" | "npc";
+  /** Reversible, player-chosen "I'm stepping away" state — distinct from
+   * `controller`, which is the existing one-way permanent handoff.
+   * `null` while actively present; set only via depart-choice, cleared
+   * only via resumeActiveTable/resumeGame (CLAUDE.md's "temporary NPC
+   * standby" section). "npc" additionally makes the scheduler take this
+   * seat's turns while `controller` is still "human"; "self" changes
+   * nothing about who may act, only the public display. Meaningless
+   * (left as whatever it was) once `controller` itself flips to "npc" —
+   * the three-minute away-from-table clock is unaffected either way and
+   * still ends in the same permanent handoff. */
+  awayMode: "npc" | "self" | null;
 }
 
 export interface Casino {
@@ -110,6 +121,7 @@ export interface PublicPlayer {
    * stored, so it's never stale (CLAUDE.md). */
   connected: boolean;
   controller: "human" | "npc";
+  awayMode: "npc" | "self" | null;
 }
 
 export interface PublicCasino {
