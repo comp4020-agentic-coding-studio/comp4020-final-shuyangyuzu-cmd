@@ -16,6 +16,8 @@ import { ChatError } from "./chat.ts";
 import { dbPathFromEnv, openDb } from "./db.ts";
 import * as live from "./live.ts";
 import { renderReadme } from "./markdown.ts";
+import * as orders from "./orders.ts";
+import { OrderError } from "./orders.ts";
 import { RoomError } from "./rooms.ts";
 import * as rooms from "./rooms.ts";
 import { TableError } from "./tables.ts";
@@ -289,7 +291,7 @@ async function claimedRejectionActor(c: Context): Promise<{ kind: "bar" | "room"
 }
 
 app.onError(async (err, c) => {
-  if (err instanceof RoomError || err instanceof BarError || err instanceof TableError || err instanceof ChatError) {
+  if (err instanceof RoomError || err instanceof BarError || err instanceof TableError || err instanceof ChatError || err instanceof OrderError) {
     const status = err.status as 400 | 403 | 404 | 409 | 410 | 413 | 429;
     const actor = await claimedRejectionActor(c);
     // `wasIdentityVerified()` is real evidence, not an inference from the
@@ -932,6 +934,60 @@ app.post("/api/bar/chat/:threadId/send", async (c) => {
   live.publishToPlayer(sender, payload);
   live.publishToPlayer(other, payload);
   return c.json(message, 201);
+});
+
+// ---- Front-of-house menu: Meals/Drinks (src/orders.ts) ----
+// Game-internal consumption only — no payment, no chips, no Vegas
+// balance. Separate from the Mixology book (CLAUDE.md): that tool plans
+// real recipes for a real party; this orders and eats/drinks a fictional
+// in-game menu item to restore stamina.
+
+app.get("/api/orders/menu", (c) => c.json({ menu: orders.MENU }));
+
+app.get("/api/orders/preview", (c) => {
+  const itemId = c.req.query("itemId") ?? "";
+  const variant = c.req.query("variant") ?? null;
+  return c.json(orders.previewOrder(itemId, variant));
+});
+
+app.get("/api/orders/held", (c) => {
+  const pId = c.req.query("playerId") ?? "";
+  const secret = c.req.query("sessionSecret") ?? "";
+  bar.requireBarSession(db, pId, secret);
+  return c.json({ items: orders.getHeldItems(db, pId) });
+});
+
+app.post("/api/orders/place", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody & {
+    itemId?: unknown;
+    variant?: unknown;
+    idempotencyKey?: unknown;
+  };
+  const result = orders.placeOrder(
+    db,
+    barPlayerId(body),
+    barSessionSecret(body),
+    typeof body.itemId === "string" ? body.itemId : "",
+    typeof body.variant === "string" ? body.variant : null,
+    typeof body.idempotencyKey === "string" ? body.idempotencyKey : "",
+  );
+  return c.json(result, 201);
+});
+
+app.post("/api/orders/consume", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody & { heldItemId?: unknown };
+  const result = orders.consumeHeldItem(
+    db,
+    barPlayerId(body),
+    barSessionSecret(body),
+    typeof body.heldItemId === "string" ? body.heldItemId : "",
+  );
+  // Stamina just changed — push a fresh snapshot the same way every
+  // other bar mutation already does, so the HUD's stamina chip and the
+  // character panel update live for this identity's other open tabs too.
+  const snap = barSnapshot(live.bumpBarSeq());
+  live.publishBar(snap);
+  return c.json(result);
 });
 
 // ---- Real-time push (Crit 9) — see CLAUDE.md for what this transport is

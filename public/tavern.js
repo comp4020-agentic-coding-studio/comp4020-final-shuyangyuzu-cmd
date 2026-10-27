@@ -25,8 +25,9 @@ export function bindDirectionHold(button, { onPress, onRelease, onTap }) {
     win.removeEventListener('blur', release); button.ownerDocument.removeEventListener('visibilitychange', hidden);
   };
 }
-export function createTavern({ el, render, navigate, buildClassicPanel, saveSession, shouldApplyLiveUpdate, createMixology }) {
+export function createTavern({ el, render, navigate, buildClassicPanel, saveSession, shouldApplyLiveUpdate, createMixology, createOrders }) {
   const mixology=createMixology({el});
+  const orders=createOrders({el});
   const colors = { red:'#c85e59', blue:'#6485bc', green:'#629e86', yellow:'#ddba65', purple:'#997cb5', teal:'#66b5b0', orange:'#cf8858', pink:'#cd88a3' };
   const skins = { fair:'#f3d7b6', warm:'#dcb58a', tan:'#ba875f', brown:'#906044', deep:'#614437' };
   let dispose = () => {};
@@ -143,7 +144,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     ]);
     const hud=el('header',{class:'world-hud'},[
       el('div',{class:'world-brand'},[el('span',{class:'brand-mark'},'◆'),el('div',{},[el('strong',{},'Las Vegas'),el('small',{},'A little place to be together')])]),
-      el('div',{class:'hud-actions'},[online,standBtn,staminaButton,el('button',{class:'hud-button','aria-label':'Open mixology book',onclick:()=>openMixology()},'Mixology book'),el('button',{class:'hud-button',onclick:()=>{path=[];chooseCharacter();}},'Your character'),el('button',{class:'hud-button',onclick:()=>openGames()},'Join by code')]),
+      el('div',{class:'hud-actions'},[online,standBtn,staminaButton,el('button',{class:'hud-button','aria-label':'Open mixology book',onclick:()=>openMixology()},'Mixology book'),el('button',{class:'hud-button','aria-label':'Open meals and drinks menu',onclick:()=>openOrders()},'Meals/Drinks'),el('button',{class:'hud-button',onclick:()=>{path=[];chooseCharacter();}},'Your character'),el('button',{class:'hud-button',onclick:()=>openGames()},'Join by code')]),
     ]);
     const directions=el('div',{class:'world-dpad','aria-label':'Movement controls'});
     for(const [label,dx,dy] of [['↑',0,-1],['←',-1,0],['↓',0,1],['→',1,0]]) {
@@ -161,6 +162,17 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       if(!mine||overlay.childElementCount)return;
       path=[];destination=null;keys.clear();heldDirection=null;pendingSitSeat=null;approachTarget=null;
       mixology.open(overlay);
+    }
+    // The front-of-house Meals/Drinks menu (src/orders.ts) — a separate
+    // modal from the Mixology book: that tool plans real recipes with no
+    // server state at all, this one actually orders and eats/drinks a
+    // fictional menu item against this identity's own authenticated
+    // session to restore stamina. Same "opening stops held movement"
+    // contract as every other overlay dialog in this file.
+    function openOrders(){
+      if(!mine||overlay.childElementCount)return;
+      path=[];destination=null;keys.clear();heldDirection=null;pendingSitSeat=null;approachTarget=null;
+      orders.open(overlay,session);
     }
     let layout;
     try { layout=await read('/layout'); } catch(e) {toast.textContent=e.message;return;}

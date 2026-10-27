@@ -22,6 +22,7 @@ function expectedVersion(): string {
   hash.update(readFileSync("public/voiceCall.js"));
   hash.update(readFileSync("public/poker.js"));
   hash.update(readFileSync("public/mixology.js"));
+  hash.update(readFileSync("public/orders.js"));
   hash.update(readFileSync("public/favicon.svg"));
   return hash.digest("hex").slice(0, 10);
 }
@@ -57,6 +58,12 @@ it('serves the versioned mixology book module used by the counter',async()=>{
   const res=await fetch(new URL(`/mixology.js?v=${expectedVersion()}`,baseUrl));
   expect(res.status).toBe(200);expect(await res.text()).toBe(readFileSync('public/mixology.js','utf8'));
   expect(readFileSync('public/app.js','utf8')).toContain('./mixology.js?v=${assetVersion}');
+});
+
+it('serves the versioned front-of-house menu module used by the counter',async()=>{
+  const res=await fetch(new URL(`/orders.js?v=${expectedVersion()}`,baseUrl));
+  expect(res.status).toBe(200);expect(await res.text()).toBe(readFileSync('public/orders.js','utf8'));
+  expect(readFileSync('public/app.js','utf8')).toContain('./orders.js?v=${assetVersion}');
 });
 
 it("every response carries Cache-Control: no-cache, not just the static assets", async () => {
