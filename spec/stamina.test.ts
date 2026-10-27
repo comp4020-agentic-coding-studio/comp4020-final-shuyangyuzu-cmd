@@ -71,7 +71,13 @@ describe("recomputeStamina: pure decay math over a known-continuous interval", (
     const start = T0();
     const p = joinBar(db, "A", "red", "warm");
     const value = recomputeStamina(db, p.playerId, hoursAfter(start, 3));
-    expect(value).toBeCloseTo(STAMINA_INITIAL - STAMINA_DECAY_PER_HOUR * 3, 5);
+    // toBeCloseTo precision 2 (not 5): joinBar's own internal `new
+    // Date()` runs a few real milliseconds before `start` above is read,
+    // which is itself a real (negligible) decay interval at this rate —
+    // precision 5 demands sub-millisecond exactness and was flaky for
+    // exactly that reason (same real-jitter cause as the precision-2
+    // check already used two tests up).
+    expect(value).toBeCloseTo(STAMINA_INITIAL - STAMINA_DECAY_PER_HOUR * 3, 2);
     expect(value).toBeLessThan(20);
     expect(value).toBeGreaterThan(15);
   });
@@ -89,7 +95,13 @@ describe("recomputeStamina: pure decay math over a known-continuous interval", (
     const r1 = recomputeStamina(db, p.playerId, target);
     const r2 = recomputeStamina(db, p.playerId, target); // second "tab" reading/heartbeating at the same instant
     const r3 = recomputeStamina(db, p.playerId, target);
-    expect(r1).toBeCloseTo(STAMINA_INITIAL - STAMINA_DECAY_PER_HOUR, 5);
+    // r1 vs the nominal hour-of-decay figure: precision 2, same real
+    // join-jitter reasoning as above. r2/r3 vs r1 stay at precision 5
+    // (really exact) — both are recomputeStamina called again at the
+    // identical `target` instant already stored as r1's own
+    // last_computed_at, so their own elapsed interval is exactly zero,
+    // with no further real-clock reading involved.
+    expect(r1).toBeCloseTo(STAMINA_INITIAL - STAMINA_DECAY_PER_HOUR, 2);
     expect(r2).toBeCloseTo(r1, 5); // no further decay — zero elapsed time between r1 and r2
     expect(r3).toBeCloseTo(r1, 5);
   });
@@ -108,7 +120,9 @@ describe("recordHeartbeat: gap detection charges decay only up to the last known
       p.playerId,
     );
     recordHeartbeat(db, p.playerId, next);
-    expect(rawValue(p.playerId)).toBeCloseTo(STAMINA_INITIAL - STAMINA_DECAY_PER_HOUR, 5);
+    // Precision 2, same real join-jitter reasoning as above: this is a
+    // decay interval measured from joinBar's own internal timestamp.
+    expect(rawValue(p.playerId)).toBeCloseTo(STAMINA_INITIAL - STAMINA_DECAY_PER_HOUR, 2);
   });
 
   it("a heartbeat arriving long after the previous one (past PRESENCE_STALE_MS) charges decay only up to the stale last-seen instant, never through the gap", () => {
@@ -125,7 +139,10 @@ describe("recordHeartbeat: gap detection charges decay only up to the last known
     );
     recordHeartbeat(db, p.playerId, afterOneHour);
     const afterOneHourOnline = rawValue(p.playerId);
-    expect(afterOneHourOnline).toBeCloseTo(STAMINA_INITIAL - STAMINA_DECAY_PER_HOUR, 5);
+    // Precision 2 here too (same join-jitter reasoning); afterGap below
+    // compares against this already-stored value, not against a fresh
+    // real-time computation, so it correctly stays at precision 5.
+    expect(afterOneHourOnline).toBeCloseTo(STAMINA_INITIAL - STAMINA_DECAY_PER_HOUR, 2);
 
     // bar_presence.last_seen_at is left at afterOneHour (stale) — a
     // reconnect heartbeat finally arrives 49 hours later. The gap

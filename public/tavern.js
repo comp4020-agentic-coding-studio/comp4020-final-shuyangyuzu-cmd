@@ -154,6 +154,72 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     if(!active)return;
     const tile=64, worldW=layout.gridCols*tile,worldH=layout.gridRows*tile;
     const fixtures=layout.furniture;
+    // A real-time Canberra/Sydney clock, mounted above the counter. Must
+    // be drawn per-frame in animate() below, in screen space, never baked
+    // into the static `floor` canvas further down — that canvas is
+    // painted once at load and never updates, so a clock face baked into
+    // it would freeze at load time. Intl.DateTimeFormat with an explicit
+    // IANA zone resolves AEST/AEDT and the actual transition dates
+    // correctly using the runtime's own tzdata — no hand-coded UTC
+    // offset or DST rule of this app's own, which would silently go
+    // wrong on the next transition.
+    const counterFixture=fixtures.find(f=>f.kind==='counter');
+    const clockTimeFmt=new Intl.DateTimeFormat('en-AU',{timeZone:'Australia/Sydney',hour:'2-digit',minute:'2-digit',hour12:false});
+    const clockAngleFmt=new Intl.DateTimeFormat('en-AU',{timeZone:'Australia/Sydney',hour:'numeric',minute:'numeric',second:'numeric',hour12:false});
+    function drawClock(now){
+      if(!counterFixture)return;
+      // Mounted on the near wall strip directly above the counter (the
+      // `wallX/wallY/wallW` band drawn in the static floor layer below,
+      // which is itself derived from the real `back-bar` cabinet_wall
+      // fixture — NOT the far brick wall at the top of the map, which an
+      // earlier version of this placement mistakenly targeted after
+      // misreading CORE_FURNITURE's pre-offset coordinates in the source
+      // file instead of the actual, `+10,+6`-shifted values FURNITURE
+      // exports and the server actually serves via GET /api/bar/layout.
+      // That mistake put the clock nowhere near the counter at all (world
+      // y=56, inside the distant top wall) — found only by querying the
+      // live layout directly and comparing real numbers, not by trusting
+      // a source-file read or a screenshot. Placed just past the
+      // counter's own right edge, clear of its last candle sconce
+      // (ends ~x+872) and the "Las Vegas" sign (centred, well to the
+      // left) on one side, and the nearest hanging shelf unit on the
+      // wall strip itself on the other — every one of those checked by
+      // real coordinate arithmetic against the fixtures this function
+      // already has in scope, the same way the plant/rug placements
+      // elsewhere in this file were verified.
+      const worldX=(counterFixture.x+counterFixture.w)*tile+40, worldY=counterFixture.y*tile-68;
+      const x=worldX-camera.x, y=worldY-camera.y;
+      if(x<-60||x>vw+60||y<-60||y>vh+60)return; // off-screen — skip the work
+      const parts=Object.fromEntries(clockAngleFmt.formatToParts(now).filter(p=>p.type!=='literal').map(p=>[p.type,Number(p.value)]));
+      const hour=parts.hour%12, minute=parts.minute, second=parts.second;
+      const r=22;
+      ctx.save();
+      ctx.translate(x,y);
+      ctx.fillStyle='#2e211d';ctx.beginPath();ctx.arc(0,0,r+6,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#e4bf7e';ctx.beginPath();ctx.arc(0,0,r+3,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#f5ecd9';ctx.beginPath();ctx.arc(0,0,r,0,Math.PI*2);ctx.fill();
+      ctx.strokeStyle='#352b2d';ctx.lineWidth=1;
+      for(let i=0;i<12;i++){
+        const a=i*Math.PI/6;
+        ctx.beginPath();ctx.moveTo(Math.sin(a)*(r-3),-Math.cos(a)*(r-3));ctx.lineTo(Math.sin(a)*(r-6),-Math.cos(a)*(r-6));ctx.stroke();
+      }
+      const hourAngle=(hour+minute/60)*Math.PI/6, minuteAngle=(minute+second/60)*Math.PI/30;
+      ctx.lineCap='round';
+      ctx.strokeStyle='#352b2d';ctx.lineWidth=2.5;
+      ctx.beginPath();ctx.moveTo(0,0);ctx.lineTo(Math.sin(hourAngle)*(r*0.5),-Math.cos(hourAngle)*(r*0.5));ctx.stroke();
+      ctx.strokeStyle='#5a4a3f';ctx.lineWidth=1.6;
+      ctx.beginPath();ctx.moveTo(0,0);ctx.lineTo(Math.sin(minuteAngle)*(r*0.78),-Math.cos(minuteAngle)*(r*0.78));ctx.stroke();
+      ctx.fillStyle='#352b2d';ctx.beginPath();ctx.arc(0,0,2,0,Math.PI*2);ctx.fill();
+      ctx.restore();
+      // A small digital readout below the analog face, specifically for
+      // legibility at the 390px mobile breakpoint where the analog hands
+      // alone would be too small to read at a glance.
+      const label=clockTimeFmt.format(now);
+      ctx.font='bold 11px monospace';ctx.textAlign='center';
+      const width=ctx.measureText(label).width+14;
+      ctx.fillStyle='#292635dc';ctx.fillRect(x-width/2,y+r+9,width,15);
+      ctx.fillStyle='#f5e7d2';ctx.fillText(label,x,y+r+20);
+    }
     const seatTargets=[];
     for(const s of layout.seats||[]){
       const f=fixtures.find(f=>f.id===s.furnitureId);
@@ -882,6 +948,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       const target=mine||{x:20,y:12};const desiredX=Math.max(0,Math.min(Math.max(0,worldW-vw),(target.x+.5)*tile-vw/2)),desiredY=Math.max(0,Math.min(Math.max(0,worldH-vh),(target.y+.5)*tile-vh/2));
       if(!cameraInitialized){camera={x:desiredX,y:desiredY};cameraInitialized=true;}else{camera.x+=(desiredX-camera.x)*.12;camera.y+=(desiredY-camera.y)*.12;}
       ctx.clearRect(0,0,vw,vh);ctx.imageSmoothingEnabled=false;ctx.drawImage(floor,-Math.round(camera.x),-Math.round(camera.y));
+      drawClock(new Date());
       for(const s of seatTargets){
         const x=((s.displayX??s.x+.5)-.5)*tile-camera.x,y=((s.displayY??s.y+.5)-.5)*tile-camera.y;
         s.button.style.display=mine&&x+tile>0&&y+tile>0&&x<vw&&y<vh?'block':'none';
