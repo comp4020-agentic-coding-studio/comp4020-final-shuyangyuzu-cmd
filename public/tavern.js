@@ -58,7 +58,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
   }
   async function mount() {
     dispose(); document.body.classList.add('world-mode');
-    let active=true, session=null, state={players:[],tables:[]}, mine=null, camera={x:0,y:0}, path=[], moving=false, frame=0;
+    let active=true, session=null, state={players:[],tables:[]}, mine=null, camera={x:0,y:0}, path=[], moving=false, frame=0, lowStaminaNotified=false;
     // This identity's own currently-bound table seat, if any —
     // {tableId, roomCode} or null, re-validated server-side on every
     // join/rejoin/appearance response (src/tables.ts's getActiveSeat),
@@ -128,9 +128,22 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       try{const resp=await post('/stand',session);applyIncoming(resp);toast.textContent='Standing — click a chair to sit down.';}catch(e){toast.textContent=e.message||'Could not stand up';}
     }},'Stand up');
     standBtn.style.display='none';
+    // Compact, read-only stamina readout beside "Your character" — a
+    // server-computed status display, never a form field: there is no
+    // input here, only a bar fill and a percentage rendered straight
+    // from mine.stamina (reconcile() below), the same public field
+    // every other per-player HUD element already reads. Clicking it
+    // opens the same character panel "Your character" does (CLAUDE.md:
+    // one combined entry point, not a second place to look), where the
+    // full bar plus a short restore-amount note lives.
+    const staminaFill=el('span',{class:'stamina-fill'});
+    const staminaLabel=el('span',{class:'stamina-pct'},'—');
+    const staminaButton=el('button',{class:'hud-button stamina-chip','aria-label':'View your stamina',onclick:()=>{path=[];chooseCharacter();}},[
+      el('span',{class:'stamina-track'},[staminaFill]),staminaLabel,
+    ]);
     const hud=el('header',{class:'world-hud'},[
       el('div',{class:'world-brand'},[el('span',{class:'brand-mark'},'◆'),el('div',{},[el('strong',{},'Las Vegas'),el('small',{},'A little place to be together')])]),
-      el('div',{class:'hud-actions'},[online,standBtn,el('button',{class:'hud-button','aria-label':'Open mixology book',onclick:()=>openMixology()},'Mixology book'),el('button',{class:'hud-button',onclick:()=>{path=[];chooseCharacter();}},'Your character'),el('button',{class:'hud-button',onclick:()=>openGames()},'Join by code')]),
+      el('div',{class:'hud-actions'},[online,standBtn,staminaButton,el('button',{class:'hud-button','aria-label':'Open mixology book',onclick:()=>openMixology()},'Mixology book'),el('button',{class:'hud-button',onclick:()=>{path=[];chooseCharacter();}},'Your character'),el('button',{class:'hud-button',onclick:()=>openGames()},'Join by code')]),
     ]);
     const directions=el('div',{class:'world-dpad','aria-label':'Movement controls'});
     for(const [label,dx,dy] of [['↑',0,-1],['←',-1,0],['↓',0,1],['→',1,0]]) {
@@ -345,6 +358,22 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       if(pendingMoveTarget&&mine)mine={...mine,x:pendingMoveTarget.x,y:pendingMoveTarget.y};
       online.textContent=`${state.players.length} here`;
       standBtn.style.display=mine?.seatId?'':'none';
+      // Server-computed, read-only — rendered straight from the public
+      // snapshot's own stamina field, never written back anywhere.
+      if(typeof mine?.stamina==='number'){
+        const pct=Math.round(mine.stamina);
+        staminaFill.style.width=`${Math.max(0,Math.min(100,pct))}%`;
+        staminaLabel.textContent=`${pct}%`;
+        staminaButton.classList.toggle('stamina-low',pct<20);
+        // A gentle, one-time nudge per low-stamina stretch — never a
+        // forced action (CLAUDE.md: stamina never blocks a roll, a bet,
+        // or walking to the counter). Resets once stamina rises back
+        // above the threshold (eating/drinking, or simply time passing
+        // differently), so a second genuine dip is nudged again rather
+        // than only ever once per whole session.
+        if(pct<20&&!lowStaminaNotified){lowStaminaNotified=true;toast.textContent='Getting low on energy — the counter has meals and drinks.';}
+        else if(pct>=20)lowStaminaNotified=false;
+      }
     }
     // The staleness rule for this channel: public/liveSync.js's
     // shouldApplyLiveUpdate, shared with app.js (see this file's own doc
@@ -585,6 +614,21 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
           el('label',{for:'patron-nickname'},'What should we call you?'),input,
           el('span',{class:'option-label'},'Clothes'),makeChoices(colors,'Clothes',v=>color=v),
           el('span',{class:'option-label'},'Skin tone'),makeChoices(skins,'Skin',v=>skin=v),
+          // Server-computed, read-only (CLAUDE.md's "Stamina" section) —
+          // no input element at all, so there is no path through this
+          // form's own submit handler (which only ever sends nickname/
+          // color/skin) that could set it. Only shown for a returning
+          // identity that already has a stamina value to report; a
+          // brand-new join hasn't been created yet at the point this
+          // dialog first renders, so there's nothing real to show.
+          ...(typeof mine?.stamina==='number'?[
+            el('span',{class:'option-label'},'Stamina'),
+            el('div',{class:'stamina-panel'},[
+              el('div',{class:'stamina-track stamina-track-large'},[el('span',{class:'stamina-fill',style:`width:${Math.max(0,Math.min(100,Math.round(mine.stamina)))}%`})]),
+              el('span',{class:'stamina-panel-pct'},`${Math.round(mine.stamina)}%`),
+              el('p',{class:'stamina-note'},'Eating a meal restores +70%, a drink +30% — both cap at 100%, with nothing stored for later.'),
+            ]),
+          ]:[]),
         ])]),error,enter,el('p',{class:'dialog-footnote'},'No account needed. Your character stays in this browser.'),
       ]);overlay.replaceChildren(form);update();input.focus();
     }

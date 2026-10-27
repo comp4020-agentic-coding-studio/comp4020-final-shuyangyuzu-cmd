@@ -339,6 +339,21 @@ body.world-mode { padding:0; overflow:hidden; background:#3e3036; }
 .online-count { background:#272531e8; color:#e6d6bd; padding:11px 15px; border-radius:12px; font-size:12px; }
 .online-count::before { content:'●'; color:#9cc9a3; margin-right:8px; }
 button.hud-button { background:#272531ed; color:#f3e2c7; border:1px solid #d9b27b40; padding:11px 16px; border-radius:12px; font-size:12px; margin:0; }
+/* Compact, read-only stamina chip beside "Your character" — a server-
+   computed status display, not a control; clicking it opens the same
+   character panel "Your character" does (CLAUDE.md's "Stamina" section:
+   one combined entry point, never a second place to look). */
+button.stamina-chip { display:flex; align-items:center; gap:7px; padding:9px 12px; }
+.stamina-track { position:relative; width:46px; height:8px; background:#1d1a22; border-radius:5px; overflow:hidden; border:1px solid #00000040; }
+.stamina-fill { position:absolute; inset:0; width:0; background:linear-gradient(90deg,#8cb87a,#c7d98f); border-radius:5px 0 0 5px; transition:width .3s ease; }
+.stamina-chip.stamina-low .stamina-fill { background:linear-gradient(90deg,#c97a52,#dba35f); }
+.stamina-pct { font-size:11px; min-width:30px; text-align:left; }
+/* The fuller panel inside the character dialog, below the clothing/skin
+   pickers — same read-only principle, just room for a one-line note. */
+.stamina-panel { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.stamina-track-large { width:140px; height:12px; }
+.stamina-panel-pct { font-size:13px; font-weight:650; color:#453b3f; }
+.stamina-note { flex-basis:100%; margin:4px 0 0; font-size:11px; color:#877568; }
 .world-toast { position:absolute; bottom:26px; left:50%; transform:translateX(-50%); max-width:calc(100% - 40px); text-align:center; color:#e8d7c1; padding:11px 22px; border:1px solid #d9b27b30; background:#272531ed; border-radius:30px; font-size:12px; pointer-events:none; }
 .world-overlay { position:absolute; inset:0; display:grid; place-items:center; pointer-events:none; padding:24px; }
 .world-overlay:has(> *) { background:#18151d65; backdrop-filter:blur(2px); pointer-events:auto; }
@@ -398,6 +413,9 @@ button.speech-send { padding:11px 18px; margin:0; }
   .brand-mark { font-size:18px; }
   .hud-actions { flex-wrap:wrap; justify-content:flex-end; gap:4px; max-width:155px; }
   .online-count,button.hud-button { padding:9px 10px; font-size:10px; }
+  .stamina-track { width:30px; height:6px; }
+  .stamina-pct { font-size:9px; min-width:22px; }
+  button.stamina-chip { padding:7px 8px; gap:5px; }
   .world-overlay { padding:16px; }
   .world-dialog { padding:24px; border-radius:16px; }
   .world-dialog h1 { font-size:29px; }
