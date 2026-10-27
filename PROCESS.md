@@ -1,5 +1,9 @@
 # Process overview — Crit 8 and Crit 9
 
+## Voice required media evidence, not only membership
+
+I tested voice with a friend on the same Wi-Fi and could not hear them. Codex's review found that a late second SSE cleanup could delete a newly reconnected signaling subscription, alongside dropped early offers, lost-offer recovery and silent playback failures. It reproduced these with direct regressions and a real-browser generated-track harness; this is different from two physical devices passing my acceptance. It also reproduced an order-key ownership defect and corrected it. The review explicitly lists unfinished menu/poker/stamina requirements instead of accepting the previous all-complete report. Details and verification boundaries are in [the dated review](docs/review-2026-10-27.md).
+
 ## From a game to a place
 
 I began by choosing a multiplayer board game that friends could learn quickly. I considered more complex games, then chose Las Vegas as a manageable starting point. My first scope was one complete round for two to four players, with invitations and recoverable browser identity. I directed Claude to ground the rules in the official rulebook rather than rely on summaries. `PLAN.md` records the rule interpretation, including tie cancellation, descending bill allocation and unclaimed bills returning to the draw pile. Scope and engineering constraints entered the repository in [960dd9c](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/commit/960dd9c).

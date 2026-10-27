@@ -1,5 +1,13 @@
 # Your harness
 
+## Voice and order review corrections — 2026-10-27
+
+Voice membership is not evidence of working audio. Check real RTCPeerConnections and incoming packet/energy statistics separately from membership tests. Handle play() rejection with a user-gesture Enable sound control and support streamless tracks. Private signals can beat the public roster: refresh and revalidate rather than silently drop them. Serialize signaling, announce receiver readiness, and resend lost offers even when readiness races a pending send. Retry while joined must reuse the microphone, not acquire a second stream. Generated test audio must remain muted unless the user requests an audible test.
+
+SSE cleanup must be idempotent and remove only its own set: abort cleanup can run again after a replacement stream subscribes. spec/subscriptionCleanup.test.ts protects voice, room and private inbox channels. Order keys must bind to the authenticated owner and original item/variant; conflicting reuse must not expose another player's result. See spec/orders.test.ts.
+
+Do not claim complete delivery while requested recipes, seated consumption, in-game stamina or poker NPC standby are absent; docs/review-2026-10-27.md records the current gaps.
+
 Rules the agent holds itself to while building this app. See `PLAN.md` for
 what's being built and why; this file is the how.
 

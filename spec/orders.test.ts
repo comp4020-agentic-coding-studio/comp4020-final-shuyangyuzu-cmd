@@ -109,6 +109,18 @@ it("a duplicate idempotency key returns the same held item, not a second one", (
   expect(getHeldItems(db, p.playerId).filter((h) => h.itemId === "soda")).toHaveLength(1);
 });
 
+it('never returns another identity’s order through a reused global idempotency key',()=>{
+  const a=joinBar(db,'A','red','warm'),b=joinBar(db,'B','blue','warm');
+  placeOrder(db,a.playerId,a.sessionSecret,'soda',null,'collision-key');
+  expect(catchError(()=>placeOrder(db,b.playerId,b.sessionSecret,'soda',null,'collision-key')).code).toBe('idempotency_conflict');
+  expect(getHeldItems(db,b.playerId)).toEqual([]);
+});
+
+it('rejects reuse of a successful key for a different item or variant',()=>{
+  const a=joinBar(db,'A','red','warm');placeOrder(db,a.playerId,a.sessionSecret,'house-steak','Rare','meal-key');
+  expect(catchError(()=>placeOrder(db,a.playerId,a.sessionSecret,'house-steak','Medium','meal-key')).code).toBe('idempotency_conflict');
+});
+
 it("consuming a meal restores +70, a drink +30, both on top of the current value", () => {
   const p = joinBar(db, "A", "red", "warm");
   const meal = placeOrder(db, p.playerId, p.sessionSecret, "grilled-trout", null, "key-meal");

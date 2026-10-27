@@ -84,9 +84,11 @@ export function subscribeRoom(code: string, send: Send): () => void {
     roomSubscribers.set(code, set);
   }
   set.add(send);
+  let removed=false;
   return () => {
+    if(removed)return;removed=true;
     set!.delete(send);
-    if (set!.size === 0) roomSubscribers.delete(code);
+    if (set!.size === 0 && roomSubscribers.get(code)===set) roomSubscribers.delete(code);
   };
 }
 
@@ -198,9 +200,11 @@ export function subscribeChatInbox(playerId: string, send: Send): () => void {
     chatInboxSubscribers.set(playerId, set);
   }
   set.add(send);
+  let removed=false;
   return () => {
+    if(removed)return;removed=true;
     set!.delete(send);
-    if (set!.size === 0) chatInboxSubscribers.delete(playerId);
+    if (set!.size === 0 && chatInboxSubscribers.get(playerId)===set) chatInboxSubscribers.delete(playerId);
   };
 }
 
@@ -258,9 +262,11 @@ export function subscribeRoomVoice(roomCode: string, playerId: string, send: Sen
     roomVoiceSubscribers.set(key, set);
   }
   set.add(send);
+  let removed=false;
   return () => {
+    if(removed)return;removed=true;
     set!.delete(send);
-    if (set!.size === 0) roomVoiceSubscribers.delete(key);
+    if (set!.size === 0 && roomVoiceSubscribers.get(key)===set) roomVoiceSubscribers.delete(key);
   };
 }
 

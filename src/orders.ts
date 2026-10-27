@@ -231,9 +231,14 @@ export function placeOrder(
 
   return transact(db, () => {
     const existingByKey = db
-      .prepare(`SELECT id, kind, item_id, variant, state FROM held_items WHERE idempotency_key = ?`)
-      .get(idempotencyKey) as HeldItemRow | undefined;
-    if (existingByKey) return toHeldItem(existingByKey);
+      .prepare(`SELECT id, player_id, kind, item_id, variant, state FROM held_items WHERE idempotency_key = ?`)
+      .get(idempotencyKey) as (HeldItemRow & {player_id:string}) | undefined;
+    if (existingByKey) {
+      if(existingByKey.player_id!==barPlayerId||existingByKey.item_id!==item.id||existingByKey.variant!==resolvedVariant){
+        throw new OrderError('That order key is already in use. Please make a new order.','idempotency_conflict',409);
+      }
+      return toHeldItem(existingByKey);
+    }
 
     const active = db
       .prepare(`SELECT 1 FROM held_items WHERE player_id = ? AND kind = ? AND state = 'held'`)

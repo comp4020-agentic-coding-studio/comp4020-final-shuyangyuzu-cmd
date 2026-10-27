@@ -39,6 +39,11 @@ export function createVoiceCall({ el }) {
   const remoteAudioEls = new Map(); // remotePlayerId -> <audio>
   const pendingCandidates = new Map(); // remotePlayerId -> RTCIceCandidateInit[]
   const reconnectAttempts = new Map(); // remotePlayerId -> count
+  const blockedAudio = new Set();
+  const peerHealth = new Map();
+  const offersInFlight = new Map();
+  const signalChains = new Map();
+  let healthTimer = null;
 
   let panelExpanded = false;
   let busy = false; // true while a start/accept/decline/leave request is in flight — suppresses double-clicks
@@ -114,9 +119,13 @@ export function createVoiceCall({ el }) {
     }
     pendingCandidates.delete(remoteId);
     reconnectAttempts.delete(remoteId);
+    blockedAudio.delete(remoteId);
+    peerHealth.delete(remoteId);
+    offersInFlight.delete(remoteId);
   }
 
   function teardownMedia() {
+    clearInterval(healthTimer); healthTimer = null;
     for (const remoteId of [...peerConnections.keys()]) closePeer(remoteId);
     if (localStream) {
       for (const track of localStream.getTracks()) track.stop();
@@ -124,6 +133,58 @@ export function createVoiceCall({ el }) {
     }
     pendingCandidates.clear();
     reconnectAttempts.clear();
+    blockedAudio.clear(); peerHealth.clear(); offersInFlight.clear(); signalChains.clear();
+  }
+
+  async function playRemote(remoteId, audio) {
+    try {
+      await audio.play();
+      if (remoteAudioEls.get(remoteId) !== audio) return;
+      blockedAudio.delete(remoteId);
+    } catch {
+      if (remoteAudioEls.get(remoteId) !== audio) return;
+      blockedAudio.add(remoteId);
+    }
+    onNeedsRedraw();
+  }
+
+  function enableSound() {
+    // Calls play synchronously inside the user's click, before any await.
+    for (const [id,audio] of remoteAudioEls) playRemote(id,audio);
+  }
+
+  function startHealthChecks() {
+    clearInterval(healthTimer);
+    healthTimer=setInterval(async()=>{
+      for(const [id,pc] of peerConnections){
+        const health=peerHealth.get(id);if(!health||!pc.getStats)continue;
+        try{
+          const report=await pc.getStats();if(peerConnections.get(id)!==pc)continue;
+          let packets=0,level=null;
+          report.forEach(s=>{
+            if(s.type==='inbound-rtp'&&(s.kind==='audio'||s.mediaType==='audio'))packets+=s.packetsReceived||0;
+            if(s.type==='media-source'&&s.kind==='audio'&&typeof s.audioLevel==='number')level=s.audioLevel;
+          });
+          if(packets>health.packets)health.receivedAt=Date.now();
+          health.packets=packets;health.micLevel=level;
+        }catch{ /* Closed links are removed by the connection handler. */ }
+      }
+      if(ownStatus==='joined')onNeedsRedraw();
+    },2000);
+    healthTimer?.unref?.();
+  }
+
+  async function announceReady(restart=false) {
+    if(ownStatus!=='joined'||!callId)return;
+    const ctx=context(),id=callId;
+    await Promise.all(latestVoiceCall.participants.filter(p=>p.playerId!==session.playerId).map(p=>
+      request(ctx,'/voice/signal',{callId:id,toPlayerId:p.playerId,signalType:'ready',data:{restart}})));
+  }
+
+  function reportConnectionError() {
+    if(ownStatus!=='joined')return;
+    lastErrorMessage='Audio connection could not be established. Reconnect audio; if it still fails on different networks, a TURN relay may be needed.';
+    onNeedsRedraw();
   }
 
   async function ensureIceServers() {
@@ -154,6 +215,7 @@ export function createVoiceCall({ el }) {
     const active = () => isCurrent(ctx) && id === callId && generation === mediaGeneration && ownStatus === 'joined' && peerConnections.get(remoteId) === pc;
     const pc = new RTCPeerConnection({ iceServers });
     peerConnections.set(remoteId, pc);
+    peerHealth.set(remoteId,{started:Date.now(),packets:0,receivedAt:null,micLevel:null});
     if (localStream) {
       for (const track of localStream.getTracks()) pc.addTrack(track, localStream);
     }
@@ -168,18 +230,22 @@ export function createVoiceCall({ el }) {
       if (!audioEl) {
         audioEl = document.createElement("audio");
         audioEl.autoplay = true;
+        audioEl.setAttribute('playsinline','');
         audioEl.style.display = "none";
         document.body.appendChild(audioEl);
         remoteAudioEls.set(remoteId, audioEl);
       }
-      audioEl.srcObject = ev.streams[0];
+      audioEl.srcObject = ev.streams?.[0] || new MediaStream([ev.track]);
+      playRemote(remoteId,audioEl);
     };
     pc.onconnectionstatechange = () => {
       if (!active()) return;
       if (pc.connectionState === "connected") {
         reconnectAttempts.set(remoteId, 0);
+        if([...peerConnections.values()].every(p=>p.connectionState==='connected'))lastErrorMessage=null;
         onNeedsRedraw();
       } else if (pc.connectionState === "failed") {
+        reportConnectionError();
         attemptIceRestart(remoteId);
       }
       if (pc.connectionState === "failed" || pc.connectionState === "connected") onNeedsRedraw();
@@ -227,17 +293,44 @@ export function createVoiceCall({ el }) {
     // lexicographically smaller playerId always offers, the other always
     // waits for that offer.
     if (session.playerId < remoteId) {
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      if (!isCurrent(ctx) || generation !== mediaGeneration) return;
-      await request(ctx, "/voice/signal", { callId: id, toPlayerId: remoteId, signalType: "offer", data: pc.localDescription });
+      await offerTo(remoteId,pc);
+    } else {
+      // The caller may have joined alone. Its later public roster update
+      // must tell the newly joined initiator that this receiver is ready.
+      await request(ctx,'/voice/signal',{callId:id,toPlayerId:remoteId,signalType:'ready',data:{restart:false}});
     }
+  }
+
+  function offerTo(remoteId,pc,restart=false) {
+    if(offersInFlight.has(remoteId))return offersInFlight.get(remoteId);
+    const ctx=context(),id=callId,generation=mediaGeneration;
+    const pending=(async()=>{
+      if(pc.connectionState==='connected'&&!restart)return;
+      if(pc.signalingState!=='have-local-offer'){
+        const offer=await pc.createOffer(restart?{iceRestart:true}:{});
+        if(!isCurrent(ctx)||generation!==mediaGeneration||peerConnections.get(remoteId)!==pc)return;
+        await pc.setLocalDescription(offer);
+      }
+      if(!isCurrent(ctx)||generation!==mediaGeneration||peerConnections.get(remoteId)!==pc)return;
+      await request(ctx,'/voice/signal',{callId:id,toPlayerId:remoteId,signalType:'offer',data:pc.localDescription});
+    })();
+    offersInFlight.set(remoteId,pending);
+    pending.finally(()=>{if(offersInFlight.get(remoteId)===pending)offersInFlight.delete(remoteId);}).catch(()=>{});
+    return pending;
+  }
+
+  function reconnectAudio() {
+    if(ownStatus!=='joined')return;
+    mediaGeneration++;lastErrorMessage=null;
+    for(const id of [...peerConnections.keys()])closePeer(id);
+    reconcilePeerMesh();announceReady(true).catch(reportConnectionError);
+    onNeedsRedraw();
   }
 
   function reconcilePeerMesh() {
     if (ownStatus !== "joined" || !callId) return;
     const others = latestVoiceCall.participants.map((p) => p.playerId).filter((id) => id !== session.playerId);
-    for (const id of others) connectToParticipant(id).catch(() => {});
+    for (const id of others) connectToParticipant(id).catch(reportConnectionError);
     for (const id of [...peerConnections.keys()]) {
       if (!others.includes(id)) closePeer(id);
     }
@@ -246,14 +339,26 @@ export function createVoiceCall({ el }) {
   async function handleSignal(msg) {
     if (ownStatus !== 'joined' || !localStream || msg.callId !== callId || !isActiveParticipant(msg.from)) return;
     const ctx = context(), generation = mediaGeneration, id = callId;
-    const active = () => isCurrent(ctx) && generation === mediaGeneration && id === callId && ownStatus === 'joined';
     const { from, signalType, data } = msg;
     let pc = peerConnections.get(from);
+    const active = () => isCurrent(ctx) && generation === mediaGeneration && id === callId && ownStatus === 'joined' && (!pc||peerConnections.get(from)===pc);
+    if(signalType==='ready'){
+      if(session.playerId<from){
+        if(!pc){await connectToParticipant(from);pc=peerConnections.get(from);}
+        const pending=offersInFlight.get(from);
+        if(pending)await pending;
+        if(pc&&active())await offerTo(from,pc,data?.restart===true);
+      }
+      return;
+    }
     if (signalType === "offer") {
       if (!pc) {
         const iceServers = await ensureIceServers();
         if (!active()) return;
         pc = createPeer(from, iceServers);
+      }
+      if(pc.remoteDescription?.sdp===data.sdp&&pc.localDescription?.type==='answer'){
+        await request(ctx,'/voice/signal',{callId:id,toPlayerId:from,signalType:'answer',data:pc.localDescription});return;
       }
       await pc.setRemoteDescription(data);
       if (!active()) return;
@@ -263,7 +368,9 @@ export function createVoiceCall({ el }) {
       if (!active()) return;
       await request(ctx, "/voice/signal", { callId: id, toPlayerId: from, signalType: "answer", data: pc.localDescription });
     } else if (signalType === "answer") {
-      if (pc) {
+      // A resent offer can produce a duplicate answer. Once stable,
+      // applying it again throws even though audio is already connected.
+      if (pc && pc.signalingState === 'have-local-offer') {
         await pc.setRemoteDescription(data);
         await flushPendingCandidates(from, pc);
       }
@@ -280,6 +387,18 @@ export function createVoiceCall({ el }) {
         pendingCandidates.set(from, queue);
       }
     }
+  }
+
+  function queueSignal(msg) {
+    const ctx=context(),generation=mediaGeneration;
+    const previous=signalChains.get(msg.from)||Promise.resolve();
+    const next=previous.catch(()=>{}).then(async()=>{
+      if(!isCurrent(ctx)||generation!==mediaGeneration)return;
+      if(ownStatus==='joined'&&msg.callId===callId&&!isActiveParticipant(msg.from))await refreshOwnView();
+      if(isCurrent(ctx)&&generation===mediaGeneration)await handleSignal(msg);
+    });
+    signalChains.set(msg.from,next);
+    next.catch(reportConnectionError).finally(()=>{if(signalChains.get(msg.from)===next)signalChains.delete(msg.from);});
   }
 
   function connectPrivateChannel() {
@@ -303,7 +422,7 @@ export function createVoiceCall({ el }) {
         // response arrives. Keep it only during this explicit mic join.
         if (busy && localStream && ownStatus !== 'joined') {
           if (joiningSignals.length < 128) joiningSignals.push(msg);
-        } else handleSignal(msg).catch(() => {});
+        } else queueSignal(msg);
       } else if (msg.type === "removed_from_call" || msg.type === "call_ended") {
         if (msg.callId === callId) {
           resetMembership();
@@ -320,7 +439,7 @@ export function createVoiceCall({ el }) {
     // trusted to have delivered everything" rule CLAUDE.md states for the
     // room/bar channels).
     es.onopen = () => {
-      if (isCurrent(ctx) && eventSource === es) refreshOwnView().catch(() => {});
+      if (isCurrent(ctx) && eventSource === es) refreshOwnView().then(()=>announceReady()).catch(reportConnectionError);
     };
     eventSource = es;
   }
@@ -382,6 +501,7 @@ export function createVoiceCall({ el }) {
       ownStatus = 'joined';
       incomingInvite = null;
       membershipRevision++;
+      startHealthChecks();
       reconcilePeerMesh();
       const queued = joiningSignals;
       joiningSignals = [];
@@ -389,6 +509,7 @@ export function createVoiceCall({ el }) {
         if (!active()) return;
         await handleSignal(msg).catch(() => {});
       }
+      await announceReady().catch(reportConnectionError);
     } catch (err) {
       if (!active()) return;
       teardownMedia();
@@ -510,6 +631,13 @@ export function createVoiceCall({ el }) {
     );
     items.push(icon);
 
+    if(ownStatus==='joined'){
+      const others=vc.participants.filter(p=>p.playerId!==session.playerId);
+      const connected=others.filter(p=>peerConnections.get(p.playerId)?.connectionState==='connected').length;
+      items.push(el('span',{class:'voice-link-summary',role:'status'},others.length?`Audio: ${connected}/${others.length} connected`:'Waiting for someone to join'));
+      if(blockedAudio.size)items.push(el('button',{class:'secondary',onclick:enableSound},'Enable sound'));
+    }
+
     if (panelExpanded && ownStatus === "joined") {
       const list = el(
         "ul",
@@ -519,6 +647,7 @@ export function createVoiceCall({ el }) {
             el("span", { class: `swatch ${p.color}` }),
             `${p.nickname}${p.playerId === session.playerId ? " (you)" : ""}`,
             p.muted ? el("span", { class: "voice-muted-tag" }, " 🔇") : null,
+            p.playerId!==session.playerId?el('small',{},peerConnections.get(p.playerId)?.connectionState==='connected'?(blockedAudio.has(p.playerId)?'Playback blocked':peerHealth.get(p.playerId)?.receivedAt&&Date.now()-peerHealth.get(p.playerId).receivedAt<6000?'Receiving audio':'Connected · waiting for audio'):'Connecting audio…'):null,
           ].filter(Boolean)),
         ),
       );
@@ -528,14 +657,20 @@ export function createVoiceCall({ el }) {
         isMutedLocally() ? "Unmute" : "Mute",
       );
       const hangupBtn = el("button", { type: "button", class: "danger", onclick: hangUp }, "Hang up");
-      items.push(el("div", { class: "voice-call-panel" }, [list, el("div", { class: "voice-call-actions" }, [muteBtn, hangupBtn])]));
+      const relay=(iceServersCache?.servers||[]).some(s=>[].concat(s.urls).some(u=>/^turns?:/.test(u)));
+      const health=[...peerHealth.values()].find(h=>h.micLevel!==null);
+      items.push(el("div", { class: "voice-call-panel" }, [list,
+        el('p',{class:'voice-network-note'},relay?'Relay available when needed':'Direct connection only · some networks need a TURN relay'),
+        ...(health?[el('p',{class:'voice-network-note'},isMutedLocally()?'Microphone muted':health.micLevel>.005?'Microphone: sound detected':'Microphone: quiet')]:[]),
+        el('button',{class:'secondary',onclick:reconnectAudio},'Reconnect audio'),
+        el("div", { class: "voice-call-actions" }, [muteBtn, hangupBtn])]));
     }
 
     if (lastErrorMessage) {
       items.push(
         el("div", { class: "voice-call-error", role: "status" }, [
           lastErrorMessage,
-          el("button", { type: "button", class: "secondary", onclick: () => { lastErrorMessage = null; startOrJoinCall(); } }, "Retry"),
+          el("button", { type: "button", class: "secondary", onclick: () => { lastErrorMessage = null; ownStatus==='joined'?reconnectAudio():startOrJoinCall(); } }, "Retry"),
         ]),
       );
     }

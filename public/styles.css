@@ -500,6 +500,7 @@ body.table-mode { --bg:#50372a; --panel:#49372f; --fg:#f5e7ca; --muted:#d0b997; 
 .voice-call-widget { position:relative; display:flex; flex-direction:column; align-items:flex-start; }
 .voice-call-icon { position:relative; display:flex; align-items:center; gap:6px; padding:7px 10px; margin:0; font-size:20px; line-height:1; background:#392c26; color:#f4dfb7; border:1px solid #bc985a80; border-radius:8px; }
 .voice-call-count { font:600 12px monospace; color:#e4bb79; }
+.voice-link-summary{font-size:11px;color:#d8c7ad;margin-top:4px}.voice-network-note{font-size:11px;color:#d8c7ad;margin:0}.voice-call-participants li{flex-wrap:wrap}.voice-call-participants small{flex-basis:100%;font-size:11px;color:#c2b69f}
 .voice-call-panel { position:absolute; top:100%; left:0; z-index:5; margin-top:6px; min-width:200px; max-width:min(280px,calc(100vw - 32px)); padding:12px; display:flex; flex-direction:column; gap:10px; background:#2e2219; border:1px solid #bc985a80; border-radius:10px; box-shadow:0 12px 30px #0007; }
 .voice-call-participants { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:6px; font-size:13px; color:#f1e2c2; }
 .voice-call-participants li { display:flex; align-items:center; gap:6px; }
