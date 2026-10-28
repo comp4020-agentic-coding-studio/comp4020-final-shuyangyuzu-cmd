@@ -25,9 +25,8 @@ export function bindDirectionHold(button, { onPress, onRelease, onTap }) {
     win.removeEventListener('blur', release); button.ownerDocument.removeEventListener('visibilitychange', hidden);
   };
 }
-export function createTavern({ el, render, navigate, buildClassicPanel, saveSession, shouldApplyLiveUpdate, createMixology, createOrders }) {
-  const mixology=createMixology({el});
-  const orders=createOrders({el});
+export function createTavern({ el, render, navigate, buildClassicPanel, saveSession, shouldApplyLiveUpdate, createMenuBook, mixologyModule, ordersApi }) {
+  const menuBook=createMenuBook({el,mixologyModule,ordersApi});
   const colors = { red:'#c85e59', blue:'#6485bc', green:'#629e86', yellow:'#ddba65', purple:'#997cb5', teal:'#66b5b0', orange:'#cf8858', pink:'#cd88a3' };
   const skins = { fair:'#f3d7b6', warm:'#dcb58a', tan:'#ba875f', brown:'#906044', deep:'#614437' };
   let dispose = () => {};
@@ -144,7 +143,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     ]);
     const hud=el('header',{class:'world-hud'},[
       el('div',{class:'world-brand'},[el('span',{class:'brand-mark'},'◆'),el('div',{},[el('strong',{},'Las Vegas'),el('small',{},'A little place to be together')])]),
-      el('div',{class:'hud-actions'},[online,standBtn,staminaButton,el('button',{class:'hud-button','aria-label':'Open mixology book',onclick:()=>openMixology()},'Mixology book'),el('button',{class:'hud-button','aria-label':'Open meals and drinks menu',onclick:()=>openOrders()},'Meals/Drinks'),el('button',{class:'hud-button',onclick:()=>{path=[];chooseCharacter();}},'Your character'),el('button',{class:'hud-button',onclick:()=>openGames()},'Join by code')]),
+      el('div',{class:'hud-actions'},[online,standBtn,staminaButton,el('button',{class:'hud-button',onclick:()=>{path=[];chooseCharacter();}},'Your character'),el('button',{class:'hud-button',onclick:()=>openGames()},'Join by code')]),
     ]);
     const directions=el('div',{class:'world-dpad','aria-label':'Movement controls'});
     for(const [label,dx,dy] of [['↑',0,-1],['←',-1,0],['↓',0,1],['→',1,0]]) {
@@ -158,21 +157,16 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     const seatLayer=el('div',{class:'seat-layer'});
     const scene=el('div',{class:'tavern-world'},[canvas,seatLayer,hud,toast,directions]); render(scene);
     const overlay=el('div',{class:'world-overlay'});scene.appendChild(overlay);
-    function openMixology(){
+    // The counter's own physical menu book (public/menuBook.js) — one
+    // in-scene entry point replacing the old "Mixology book"/"Meals/
+    // Drinks" HUD buttons entirely (CLAUDE.md). Its cover offers all
+    // three destinations (the Mixology book, Meals, Drinks); opening it
+    // stops held movement the same way every other overlay dialog here
+    // already does.
+    function openMenuBook(){
       if(!mine||overlay.childElementCount)return;
       path=[];destination=null;keys.clear();heldDirection=null;pendingSitSeat=null;approachTarget=null;
-      mixology.open(overlay);
-    }
-    // The front-of-house Meals/Drinks menu (src/orders.ts) — a separate
-    // modal from the Mixology book: that tool plans real recipes with no
-    // server state at all, this one actually orders and eats/drinks a
-    // fictional menu item against this identity's own authenticated
-    // session to restore stamina. Same "opening stops held movement"
-    // contract as every other overlay dialog in this file.
-    function openOrders(){
-      if(!mine||overlay.childElementCount)return;
-      path=[];destination=null;keys.clear();heldDirection=null;pendingSitSeat=null;approachTarget=null;
-      orders.open(overlay,session);
+      menuBook.open(overlay,session);
     }
     let layout;
     try { layout=await read('/layout'); } catch(e) {toast.textContent=e.message;return;}
@@ -189,6 +183,17 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     // offset or DST rule of this app's own, which would silently go
     // wrong on the next transition.
     const counterFixture=fixtures.find(f=>f.kind==='counter');
+    // The menu book sits on the counter's own top surface (CLAUDE.md:
+    // "draw a clearly recognisable menu book on the front counter"),
+    // placed 3 tiles in from the counter's right edge — clear of the
+    // clock (mounted on the wall strip above, not the counter surface
+    // itself: see drawClock's own placement reasoning just below) and
+    // of the evenly-spaced bottle-shelf decoration drawn above the
+    // counter in the fixtures loop further down, which only occupies
+    // y-24..y-2 (above the counter's own tile row), never the surface
+    // band (y+5..y+h-10) this book is drawn on.
+    const bookWorldX=counterFixture?((counterFixture.x+counterFixture.w-3)*tile+tile/2):0;
+    const bookWorldY=counterFixture?(counterFixture.y*tile+34):0;
     const clockTimeFmt=new Intl.DateTimeFormat('en-AU',{timeZone:'Australia/Sydney',hour:'2-digit',minute:'2-digit',hour12:false});
     const clockAngleFmt=new Intl.DateTimeFormat('en-AU',{timeZone:'Australia/Sydney',hour:'numeric',minute:'numeric',second:'numeric',hour12:false});
     function drawClock(now){
@@ -279,6 +284,23 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       }});
       seatLayer.appendChild(button);seatTargets.push({...s,button});
     }
+    // The menu book's own clickable hotspot — a real DOM button layered
+    // over the canvas, following the exact same "separate hitbox tracks
+    // drawn art every frame, never routed through the canvas's own
+    // click-to-tile handler" pattern every seat-target button above
+    // already uses (CLAUDE.md: "the hit area must track the map's own
+    // pan/zoom and never be a floating control independent of it"). No
+    // hover-only text label sits over the book at rest — `data-hint`
+    // only renders on `:hover`/`:focus-visible` (seat-target's own CSS,
+    // reused here unmodified), and `title` gives the same text to a
+    // touch/keyboard user who can't hover. Reachable by Tab (a real
+    // `<button>`) and by a plain tap on mobile (CLAUDE.md: "must not
+    // require hover to be discoverable").
+    const menuBookButton=el('button',{class:'seat-target menu-book-target','aria-label':'Open the counter’s book','data-hint':'Open the book','title':'Open the book',onclick:()=>{
+      if(!mine||overlay.childElementCount)return;
+      openMenuBook();
+    }});
+    seatLayer.appendChild(menuBookButton);
     const ctx=canvas.getContext('2d');
     let vw=window.innerWidth,vh=window.innerHeight;
     const resize=()=>{vw=window.innerWidth;vh=window.innerHeight;const dpr=Math.min(devicePixelRatio||1,2);canvas.width=vw*dpr;canvas.height=vh*dpr;canvas.style.width=vw+'px';canvas.style.height=vh+'px';ctx.setTransform(dpr,0,0,dpr,0,0);};resize();
@@ -704,7 +726,14 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       // dialog/message instead.
       if(f&&f.blocksMovement!==false){
         if(f.kind==='game_table'){if(!f.available)toast.textContent=`${f.label}`;else if(f.tableMode==='npc')openNpcTableDialog(f);else openTableDialog(f);}
-        else if(f.kind==='counter')openMixology();
+        else if(f.kind==='counter'){
+          // The book itself is the one click target for the menu
+          // (CLAUDE.md: "the book is the click target, not a separate
+          // floating button") — clicking the rest of the counter's long
+          // surface is just a gentle pointer toward it, never a second
+          // way to open the menu.
+          toast.textContent='The book on the counter opens the menu.';
+        }
         else if(f.kind==='stool'||f.kind==='dining_table'){
           // Phase 2: a real seat — pick the nearest free one belonging to
           // this fixture (its own x/y distance to where this patron is
@@ -810,6 +839,51 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       rug(minX*tile-margin,minY*tile-margin,(maxX-minX)*tile+margin*2,(maxY-minY)*tile+margin*2);
     }
     function plant(x,y){box(fc,x-13,y-19,26,22,'#b67b58');box(fc,x-15,y-23,30,8,'#d29a6e');for(const [dx,dy] of [[-12,-42],[2,-49],[-4,-61],[14,-38]]){box(fc,x+dx-7,y+dy,14,25,'#527c5a');box(fc,x+dx-3,y+dy,4,19,'#7ca472');}}
+    // A closed book lying flat on the counter — the menu's own in-scene
+    // entry point (CLAUDE.md: a recognisable book on the counter, not a
+    // floating HUD button). Drawn here, in the static floor layer
+    // (baked once, same as the counter itself), with warm-brown leather
+    // covers and visible cream page edges so it reads clearly against
+    // the counter's own wood tones without needing a label to explain
+    // itself. (x,y) is the book's own centre; the interactive hotspot
+    // that makes it clickable is a separate DOM button positioned over
+    // this same art every frame, exactly like every seat-target button
+    // in this file already is — never re-registered on the canvas's own
+    // click handler, which only resolves grid tiles, not book-shaped art.
+    function drawMenuBookArt(c,x,y){
+      // An open book lying flat, viewed top-down: two cream pages split by
+      // a dark gutter, a thin leather cover border, faint text-line rules,
+      // and a hanging ribbon bookmark for a colour accent that reads at a
+      // glance — the earlier closed-book-on-an-easel silhouette tested as
+      // a picture frame, not a book, once zoomed (caught by direct
+      // screenshot review, not just "the art exists").
+      const w=40,h=30;
+      c.save();c.translate(Math.round(x),Math.round(y));
+      c.fillStyle='#00000035';c.beginPath();c.ellipse(1,h/2+2,w/2+3,6,0,0,Math.PI*2);c.fill();
+      // Leather cover border, visible all around the pages.
+      box(c,-w/2,-h/2,w,h,'#5a3824');
+      // Two open pages, cream, inset from the cover with a dark centre gutter.
+      const pagePad=3,gutter=2.5;
+      const pageW=(w-pagePad*2-gutter)/2;
+      box(c,-w/2+pagePad,-h/2+pagePad,pageW,h-pagePad*2,'#f6ecd4');
+      box(c,gutter/2,-h/2+pagePad,pageW,h-pagePad*2,'#f6ecd4');
+      box(c,-gutter/2,-h/2+pagePad,gutter,h-pagePad*2,'#8a6a4a');
+      // Faint text-line rules on each page.
+      c.fillStyle='#cbb98f';
+      for(let i=0;i<4;i++){
+        const ly=-h/2+pagePad+6+i*5;
+        box(c,-w/2+pagePad+3,ly,pageW-6,1.4,'#cbb98f');
+        box(c,gutter/2+3,ly,pageW-6,1.4,'#cbb98f');
+      }
+      // A small warm-gold ribbon bookmark hanging over the top edge — the
+      // one spot of saturated colour that makes the shape pop against the
+      // counter's own browns at a glance, on the page side (not the
+      // gutter) so it doesn't read as a spine decoration instead.
+      box(c,pageW*0.35,-h/2-3,4,h*0.55,'#c23b3b');
+      box(c,pageW*0.35,h*0.05,4,5,'#8a2525');
+      c.restore();
+    }
+    const bookHotspotHalfW=26,bookHotspotHalfH=20;
     // The original room is dressed as a room, rather than bare shapes on
     // endless floor. Empty surrounding world space can host later extensions.
     const wallX=8*tile,wallY=5*tile,wallW=24*tile;
@@ -846,6 +920,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         for(let i=12;i<w;i+=64){box(fc,x+i,y+29,46,25,'#815636');box(fc,x+i+2,y+30,42,2,'#cf9c5e');}
         for(let i=32;i<w;i+=80){box(fc,x+i,y-24,9,22,'#729f80');box(fc,x+i+2,y-29,5,6,'#d8b873');box(fc,x+i+14,y-15,7,13,'#ddc6a0');}
         fc.font='bold 17px monospace';fc.textAlign='center';fc.fillStyle='#e4bf7e';fc.fillText('Las Vegas',x+w/2,y-43);
+        drawMenuBookArt(fc,bookWorldX,bookWorldY);
       }else if(f.kind==='stool'){
         // Drawn below from the same seat tile the player can click.
       }else if(f.kind==='restroom'){
@@ -1010,6 +1085,12 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         s.button.style.display=mine&&x+tile>0&&y+tile>0&&x<vw&&y<vh?'block':'none';
         s.button.style.transform=`translate(${Math.round(x)}px,${Math.round(y)}px)`;
       }
+      if(counterFixture){
+        const bx=bookWorldX-bookHotspotHalfW-camera.x, by=bookWorldY-bookHotspotHalfH-camera.y;
+        menuBookButton.style.width=`${bookHotspotHalfW*2}px`;menuBookButton.style.height=`${bookHotspotHalfH*2}px`;
+        menuBookButton.style.display=mine&&bx+bookHotspotHalfW*2>0&&by+bookHotspotHalfH*2>0&&bx<vw&&by<vh?'block':'none';
+        menuBookButton.style.transform=`translate(${Math.round(bx)}px,${Math.round(by)}px)`;
+      }
       const seatedPatrons=new Set();
       for(const s of layout.gameChairs||[]){
         const t=state.tables.find(t=>t.id===s.tableId);
@@ -1060,5 +1141,5 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     if(session){try{const resp=await post('/rejoin',session);applyIncoming(resp);activeSeat=resp.activeSeat??null;if(active){if(enteredThisPage)begin();else chooseCharacter();}}catch(e){if(e.status===403){session=null;localStorage.removeItem(sessionKey);chooseCharacter();}else toast.textContent='Unable to reconnect. Reload to retry.';}}
     else chooseCharacter();
   }
-  return {mount,stop:()=>{mixology.close();dispose();}};
+  return {mount,stop:()=>{menuBook.close();dispose();}};
 }

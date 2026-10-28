@@ -13,8 +13,9 @@
 
 const assetVersion = new URL(document.querySelector('script[type="module"]').src).searchParams.get('v');
 const { createTavern } = await import(`./tavern.js?v=${assetVersion}`);
-const { createMixology } = await import(`./mixology.js?v=${assetVersion}`);
-const { createOrders } = await import(`./orders.js?v=${assetVersion}`);
+const mixologyModule = await import(`./mixology.js?v=${assetVersion}`);
+const ordersApi = await import(`./orders.js?v=${assetVersion}`);
+const { createMenuBook } = await import(`./menuBook.js?v=${assetVersion}`);
 // The one client-side staleness-gate implementation, shared with
 // tavern.js (passed through to it below) rather than each view keeping
 // its own hand-written copy — see public/liveSync.js's own doc comment
@@ -1230,5 +1231,5 @@ function hexBoard(code, session, state, isMyTurn) {
 
 // ---- Boot -------------------------------------------------------------
 
-const tavern = createTavern({ el, render, navigate, buildClassicPanel, saveSession, shouldApplyLiveUpdate, createMixology, createOrders });
+const tavern = createTavern({ el, render, navigate, buildClassicPanel, saveSession, shouldApplyLiveUpdate, createMenuBook, mixologyModule, ordersApi });
 route();

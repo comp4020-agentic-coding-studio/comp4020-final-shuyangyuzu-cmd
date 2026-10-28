@@ -2,8 +2,8 @@
 // data, linked individually to their sources. No remote recipe API is used.
 export const INGREDIENTS = {
   rum:['White rum','Spirits & aperitifs'],tequila:['Tequila','Spirits & aperitifs'],gin:['Gin','Spirits & aperitifs'],vodka:['Vodka','Spirits & aperitifs'],
-  tripleSec:['Triple sec','Spirits & aperitifs'],campari:['Campari','Spirits & aperitifs'],vermouth:['Sweet red vermouth','Spirits & aperitifs'],aperol:['Aperol','Spirits & aperitifs'],prosecco:['Prosecco','Spirits & aperitifs'],
-  lime:['Fresh lime juice','Fruit & mixers'],soda:['Soda water','Fruit & mixers'],cola:['Cola','Fruit & mixers'],gingerBeer:['Alcohol-free ginger beer','Fruit & mixers'],coconut:['Coconut water','Fruit & mixers'],cranberry:['Cranberry juice','Fruit & mixers'],strawberries:['Sliced strawberries','Fruit & mixers'],
+  tripleSec:['Triple sec','Spirits & aperitifs'],campari:['Campari','Spirits & aperitifs'],vermouth:['Sweet red vermouth','Spirits & aperitifs'],aperol:['Aperol','Spirits & aperitifs'],prosecco:['Prosecco','Spirits & aperitifs'],bourbon:['Bourbon whiskey','Spirits & aperitifs'],
+  lime:['Fresh lime juice','Fruit & mixers'],soda:['Soda water','Fruit & mixers'],cola:['Cola','Fruit & mixers'],gingerBeer:['Alcohol-free ginger beer','Fruit & mixers'],coconut:['Coconut water','Fruit & mixers'],cranberry:['Cranberry juice','Fruit & mixers'],strawberries:['Sliced strawberries','Fruit & mixers'],lemon:['Fresh lemon juice','Fruit & mixers'],
   sugar:['White sugar','Bar basics'],syrup:['Simple syrup','Bar basics'],mint:['Fresh mint','Bar basics'],honey:['Honey','Bar basics'],
 };
 /** @typedef {{id:string,amount:number,unit:string,estimated:boolean}} IngredientMeasure */
@@ -35,6 +35,13 @@ export const RECIPES = [
     ingredients:[item('lime',7.5),item('syrup',15),item('cranberry',80),item('coconut',90)],steps:['Stir the lime, syrup and cranberry juice together.','Add ice, then pour in the coconut water.']},
   {id:'cornhusker',name:'Cornhusker Crush',alcoholFree:true,flavour:'Strawberry · mint · fresh',glass:'highball',tone:'#d59394',equipment:'Blender, glasses',serves:2,source:unl('Two-glass source recipe; cup = 240 ml and tablespoon = 15 ml for planning.'),garnish:'Optional berries, mint or lime',
     ingredients:[item('coconut',120),item('strawberries',1,'cup'),item('mint',12,'leaf'),item('lime',30),item('honey',15),item('soda',240)],steps:['Blend everything except the soda until smooth.','Divide over ice and add the soda last.']},
+  // The Counter's own menu (src/orders.ts) lists this same drink as its
+  // "Whiskey Sour" — that menu page reuses this exact recipe rather than
+  // keeping a second, independently-written copy (CLAUDE.md: the two
+  // must never disagree about the same drink).
+  {id:'whiskey-sour',name:'Whiskey Sour',alcoholFree:false,flavour:'Citrus · bourbon · balanced',glass:'rocks',tone:'#e3b873',equipment:'Shaker, strainer, rocks or coupe glass',serves:1,source:iba('whiskey-sour'),garnish:'Half an orange slice and a maraschino cherry',
+    ingredients:[item('bourbon',45),item('lemon',25),item('syrup',20)],
+    steps:['Shake all ingredients with ice until well chilled.','Strain into a chilled coupe glass, or over fresh ice in a rocks glass.']},
 ];
 const STORE='vegas:mixology:v1';
 const plural={sprig:'sprigs',leaf:'leaves','bar spoon':'bar spoons',cup:'cups'};
@@ -158,17 +165,43 @@ export function createMixology({el}){
       }},'Copy shopping list'),el('button',{onclick:()=>switchView('discover')},'Add another drink')]),message,fallback);
     updateTotals();
   }
-  function open(container){
-    if(dialog)return;
+  // Builds the nav+main+status chrome shared by both the book's own
+  // standalone dialog (open, below — unchanged, still what every
+  // existing mixology.test.ts assertion exercises) and the Meals/Drinks
+  // physical-book shell (public/menuBook.js's "The Mixology Book" page),
+  // which embeds this same instance's content directly into its own
+  // page frame rather than reimplementing pantry/party-list logic a
+  // second time (CLAUDE.md: fold the existing tool into the book's own
+  // navigation, don't replace it with a static page).
+  function buildChrome(){
     if(!state){try{state=restoreMixology(localStorage.getItem(STORE));}catch{state=restoreMixology(null);unavailable=true;}}
-    previousFocus=document.activeElement;view='discover';detail=null;
+    view='discover';detail=null;
     navButtons={};main=el('div',{class:'mix-main'});status=el('p',{class:'mix-storage'});
     const navigation=el('nav',{'aria-label':'Mixology sections'});
     for(const [id,label] of [['discover','Discover'],['pantry','My pantry'],['party','Party list']]){const b=el('button',{onclick:()=>switchView(id)},label);navButtons[id]=b;navigation.append(b);}
+    render();
+    return navigation;
+  }
+  function open(container){
+    if(dialog)return;
+    previousFocus=document.activeElement;
+    const navigation=buildChrome();
     dialog=el('dialog',{class:'mixology-book','aria-labelledby':'mixology-title'},[
       el('header',{class:'mix-header'},[el('div',{},[el('p',{class:'mix-eyebrow'},'LAS VEGAS · THE COUNTER'),el('h1',{id:'mixology-title'},'The mixology book')]),el('button',{class:'mix-close','aria-label':'Close mixology book',onclick:close},'×')]),navigation,main,status,
     ]);
-    const book=dialog;book.addEventListener('close',()=>{if(dialog===book)close();});container.append(dialog);render();dialog.showModal();
+    const book=dialog;book.addEventListener('close',()=>{if(dialog===book)close();});container.append(dialog);dialog.showModal();
   }
-  return {open,close};
+  // Embeds the same pantry/discover/party-list tool directly into a
+  // host container (no dialog, no showModal) — used by the Meals/Drinks
+  // book's own "The Mixology Book" page. Returns the root node to mount
+  // and a teardown (there is no close() semantics to run here: the host
+  // book's own page-close already stops held movement, same as any
+  // other overlay — this only needs to stop being referenced).
+  function embed(container){
+    const navigation=buildChrome();
+    const root=el('div',{class:'mix-embed'},[navigation,main,status]);
+    container.append(root);
+    return {root,teardown(){}};
+  }
+  return {open,close,embed};
 }

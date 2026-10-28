@@ -30,6 +30,7 @@ function computeVersion(): string {
   hash.update(readFileSync("public/poker.js"));
   hash.update(readFileSync("public/mixology.js"));
   hash.update(readFileSync("public/orders.js"));
+  hash.update(readFileSync("public/menuBook.js"));
   hash.update(readFileSync("public/favicon.svg"));
   return hash.digest("hex").slice(0, 10);
 }

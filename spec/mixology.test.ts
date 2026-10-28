@@ -6,7 +6,7 @@ let dom:JSDOM|undefined;
 afterEach(()=>{dom?.window.close();dom=undefined;vi.unstubAllGlobals();});
 const flush=async()=>{for(let i=0;i<3;i++)await new Promise(r=>setImmediate(r));};
 it('ships sourced recipes with valid ingredient references and positive quantities',()=>{
-  expect(new Set(RECIPES.map(r=>r.id)).size).toBe(11);expect(RECIPES.filter(r=>r.alcoholFree)).toHaveLength(3);
+  expect(new Set(RECIPES.map(r=>r.id)).size).toBe(12);expect(RECIPES.filter(r=>r.alcoholFree)).toHaveLength(3);
   for(const r of RECIPES){expect(r.source.url).toMatch(/^https:\/\//);expect(r.steps.length).toBeGreaterThan(0);for(const i of r.ingredients){expect(Object.hasOwn(INGREDIENTS,i.id)).toBe(true);expect(i.amount).toBeGreaterThan(0);}}
 });
 it('scales a two-glass source recipe correctly and rejects invalid batch sizes',()=>{
