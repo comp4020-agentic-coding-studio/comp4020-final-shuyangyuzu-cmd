@@ -598,9 +598,13 @@ body.table-mode { --bg:#50372a; --panel:#49372f; --fg:#f5e7ca; --muted:#d0b997; 
    in-scene entry point replacing the old "Mixology book"/"Meals/Drinks"
    HUD buttons. A real two-page spread (not a dialog card with a header
    bar): dark leather cover frame, a spine gutter between cream pages,
-   bookmark tabs down the side for the three chapters plus "Holding",
-   and page corners/Prev-Next that trigger an actual 3D hinge flip
-   (public/menuBook.js's .book-leaf elements) rather than a crossfade. */
+   bookmark tabs down the side for the three chapters plus "Holding".
+   Turning a page is a real click on that page's own outer-25% edge
+   (never a transparent overlay — see the edge-click comment below),
+   with the bottom Prev/Next row and keyboard arrows as auxiliary
+   entries into the identical flip logic; every entry triggers an
+   actual 3D hinge flip (public/menuBook.js's .book-leaf elements)
+   rather than a crossfade. */
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .menu-book-target{width:52px;height:40px}
 .world-overlay:has(>.book-dialog){background:transparent;backdrop-filter:none}
@@ -672,12 +676,19 @@ body.table-mode { --bg:#50372a; --panel:#49372f; --fg:#f5e7ca; --muted:#d0b997; 
 .book-nav{display:flex;align-items:center;justify-content:center;gap:16px;flex:none;padding:10px 0 2px}
 .menu-page-number{font-size:12px;color:#796649}
 
-.book-corner{position:absolute;top:0;bottom:0;width:46px;background:transparent;border:none;cursor:pointer;z-index:5}
-.book-corner::after{content:'';position:absolute;top:50%;width:28px;height:28px;margin-top:-14px;border-radius:50%;background:#00000018;opacity:0;transition:opacity .15s ease}
-.book-corner:hover::after{opacity:1}
-.book-corner--prev{left:0}.book-corner--prev::after{left:8px}
-.book-corner--next{right:0}.book-corner--next::after{right:8px}
-.book-corner[hidden]{display:none}
+/* Edge-click page turning lives directly on each real page's own outer
+   25% — never a transparent div layered over the content (the old
+   .book-corner strips were exactly that, and are gone). The only visual
+   trace is a soft directional glow hugging that page's own outer edge,
+   drawn as a ::before so it never intercepts a click of its own
+   (pointer-events:none) and never blocks the real content beneath it;
+   public/menuBook.js toggles these two classes from real pointer
+   coordinates checked against the hovered page's own getBoundingClientRect
+   width, and sets the hand/resize cursor directly on .book-pages itself. */
+.book-page{position:relative}
+.book-page--edge-prev::before,.book-page--edge-next::before{content:'';position:absolute;top:0;bottom:0;width:25%;pointer-events:none;opacity:.55;transition:opacity .12s ease}
+.book-page--edge-prev::before{left:0;background:linear-gradient(90deg,#00000014,transparent)}
+.book-page--edge-next::before{right:0;background:linear-gradient(270deg,#00000014,transparent)}
 
 /* The flipping leaf: a two-sided card absolutely positioned over the
    slot it starts on, hinged at its own spine-side edge, rotating a full
@@ -717,7 +728,6 @@ body.table-mode { --bg:#50372a; --panel:#49372f; --fg:#f5e7ca; --muted:#d0b997; 
   .book-bookmark{font-size:8.5px;padding:6px 5px;letter-spacing:0;line-height:1.2}
   .book-pages{border-width:9px}
   .book-slot{padding:18px 16px 44px}
-  .book-corner{width:34px}
   .book-title{font-size:28px!important}
   .book-page h2{font-size:22px}
   .menu-img,.menu-img-fallback{aspect-ratio:16/9}

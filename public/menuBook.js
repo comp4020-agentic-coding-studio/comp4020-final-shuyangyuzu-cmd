@@ -54,7 +54,18 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
   let mixologyMount = null;
 
   let book = null, pagesEl = null, bookmarksEl = null, navEl = null, srTitle = null;
-  let cornerPrev = null, cornerNext = null;
+  // Paid at most once per page load (not once per open()): the one-time
+  // compositor/JIT cost this guards against is tied to the browser
+  // process's own internal state, not to any one dialog instance — a
+  // closed-and-reopened book on the same page never re-pays it. See
+  // warmUpFlipOnce() below for the measured reasoning.
+  let hasWarmedFlip = false;
+  // The in-progress pointerdown that a click on the pages area might be
+  // the end of — used by onPagesClick to tell a real tap/click apart
+  // from a text-selection drag or a touch scroll that merely ends over
+  // the pages (CLAUDE.md: "selecting text, scrolling or a touch swipe
+  // must never misfire a page turn").
+  let edgePointerDown = null;
 
   const reduceMotion = typeof matchMedia === 'function' ? matchMedia('(prefers-reduced-motion: reduce)') : { matches: false, addEventListener(){}, removeEventListener(){} };
   const spreadQuery = typeof matchMedia === 'function' ? matchMedia('(min-width: 821px)') : { matches: true, addEventListener(){}, removeEventListener(){} };
@@ -473,8 +484,7 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
     if (!paginated) {
       navEl.replaceChildren();
       navEl.hidden = true;
-      cornerPrev.hidden = true;
-      cornerNext.hidden = true;
+      clearEdgeHover();
       return;
     }
     const { total, current, hasPrev, hasNext } = pagerInfo();
@@ -489,8 +499,12 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
         el('button', { onclick: () => sequentialFlip('next'), disabled: !hasNext, 'aria-label': 'Next page' }, 'Next ▶'),
       );
     }
-    cornerPrev.hidden = !hasPrev;
-    cornerNext.hidden = !hasNext;
+    // A stale hover highlight from before the page/chapter changed (e.g.
+    // a bookmark jump while the pointer sat over what used to be an edge
+    // zone) must not survive into the new content — the next pointermove
+    // will light up the correct zone again if the pointer is still over
+    // one.
+    clearEdgeHover();
   }
 
   function onKeydown(e) {
@@ -501,12 +515,166 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
     else if (e.key === 'ArrowLeft') sequentialFlip('prev');
   }
 
+  // ---- Edge-click page turning: the outer 25% of each real page's own
+  // width, never a transparent overlay sitting over the content. ----
+  //
+  // Reads the event straight off whatever real page element the click
+  // landed on (e.target.closest('.book-page')) and measures that one
+  // page's own rendered width via getBoundingClientRect() — not the
+  // whole dialog's or the whole spread's width, since a left/right page
+  // can differ in actual width from window margins/scrollbars, and the
+  // requirement is specifically "25% of that page's own width." Desktop
+  // two-up: only the LEFT page's own left 25% turns Prev, only the RIGHT
+  // page's own right 25% turns Next — the two pages' inner 75% (and the
+  // spine between them) do nothing here. Mobile single page: left 25%
+  // is Prev, right 25% is Next, on that one visible page.
+  //
+  // Because this reads real click coordinates against a real element
+  // already in the normal content flow, every interactive element inside
+  // that same 25% band (a Details button that happens to sit near a
+  // page's outer edge, a bookmark tab, the close/cover-link buttons, a
+  // link) is hit-tested by the browser's own normal event dispatch
+  // first — e.target is already that control, not the page wrapper — so
+  // this handler only ever fires for a click that landed on page
+  // background/text, never one that landed on a real control. No
+  // transparent click-catching div is layered over the page content at
+  // any point (CLAUDE.md: "use the existing event on the page, never a
+  // transparent overlay blocking the original content").
+  const EDGE_FRACTION = 0.25;
+
+  function edgeZoneForClick(target, clientX) {
+    const page = target.closest?.('.book-page');
+    if (!page) return null;
+    const slot = page.closest('.book-slot--left, .book-slot--right, .book-leaf-spread .book-slot, .book-page.book-wide');
+    if (!slot || slot.classList?.contains('book-wide')) return null; // the embedded Mixology Book chapter never turns via edge-click
+    const rect = slot.getBoundingClientRect();
+    if (rect.width <= 0) return null;
+    const fromLeftEdge = clientX - rect.left;
+    const fromRightEdge = rect.right - clientX;
+    const singleSlot = perPage() === 1;
+    const isLeftSlot = slot.classList.contains('book-slot--left') || singleSlot;
+    const isRightSlot = slot.classList.contains('book-slot--right');
+    // Single visible page (mobile, or any one-page stage): its own left
+    // 25% is Prev, its own right 25% is Next.
+    if (singleSlot || (!isLeftSlot && !isRightSlot)) {
+      if (fromLeftEdge <= rect.width * EDGE_FRACTION) return 'prev';
+      if (fromRightEdge <= rect.width * EDGE_FRACTION) return 'next';
+      return null;
+    }
+    // Desktop two-up: only the left page's own left edge turns Prev,
+    // only the right page's own right edge turns Next — the spine-side
+    // inner edge of either page is never a turn zone (that's the
+    // direction the OTHER page already covers).
+    if (isLeftSlot && fromLeftEdge <= rect.width * EDGE_FRACTION) return 'prev';
+    if (isRightSlot && fromRightEdge <= rect.width * EDGE_FRACTION) return 'next';
+    return null;
+  }
+
+  // A plain `click` alone can't tell a real tap from the click that
+  // naturally fires at the end of a text-selection drag or a touch
+  // scroll gesture that happened to end over the pages area — both
+  // still dispatch `click` on most browsers. Tracking where the
+  // corresponding `pointerdown` landed (and bailing if the pointer
+  // moved more than a few pixels, the same "was this a drag" signal a
+  // native scrollable area already uses) is what keeps a selection-drag
+  // or a scroll-swipe from ever being misread as an edge tap.
+  const EDGE_DRAG_SLOP = 6;
+
+  function onPagesPointerDown(e) {
+    edgePointerDown = { x: e.clientX, y: e.clientY };
+  }
+
+  // A real control inside the outer 25% band (a Details button that
+  // happens to sit near a page's bottom-left corner, a source link, a
+  // variant radio/label) must win outright — this is checked by walking
+  // up from the actual click target, not by the page-level zone math,
+  // so it holds regardless of exactly where a given page lays out its
+  // own controls.
+  function isInteractiveTarget(target) {
+    return !!target.closest?.('button, a, input, select, textarea, label, [role="button"]');
+  }
+
+  function onPagesClick(e) {
+    if (isFlipping || isInteractiveTarget(e.target)) return;
+    const down = edgePointerDown;
+    edgePointerDown = null;
+    if (down && (Math.abs(e.clientX - down.x) > EDGE_DRAG_SLOP || Math.abs(e.clientY - down.y) > EDGE_DRAG_SLOP)) return;
+    // A non-empty text selection means this click is the tail end of a
+    // selection drag (or a double/triple-click that just selected a
+    // word/line) — never a page-turn gesture.
+    const sel = typeof window.getSelection === 'function' ? window.getSelection() : null;
+    if (sel && !sel.isCollapsed) return;
+    const zone = edgeZoneForClick(e.target, e.clientX);
+    if (zone) sequentialFlip(zone);
+  }
+
+  // Hover feedback for the edge zones: a directional cursor plus a slim,
+  // real page-turn-coded CSS class on that one page's own corner — never
+  // a persistent, large colour block, and never a separate element laid
+  // over the content (the highlight is a ::before on the page itself,
+  // `pointer-events: none`, purely decorative). Cleared on pointerleave
+  // and whenever the hovered zone changes, so at most one corner is ever
+  // lit at a time.
+  let hoveredEdgeEl = null;
+  function clearEdgeHover() {
+    if (hoveredEdgeEl) { hoveredEdgeEl.classList.remove('book-page--edge-prev', 'book-page--edge-next'); hoveredEdgeEl = null; }
+    pagesEl.style.cursor = '';
+  }
+  function onPagesPointerMove(e) {
+    if (isFlipping || isInteractiveTarget(e.target)) { clearEdgeHover(); return; }
+    const page = e.target.closest?.('.book-page');
+    const zone = edgeZoneForClick(e.target, e.clientX);
+    const canTurn = zone === 'next' ? pagerInfo().hasNext : zone === 'prev' ? pagerInfo().hasPrev : false;
+    if (!zone || !canTurn || !page) { clearEdgeHover(); return; }
+    if (hoveredEdgeEl && hoveredEdgeEl !== page) clearEdgeHover();
+    hoveredEdgeEl = page;
+    page.classList.toggle('book-page--edge-prev', zone === 'prev');
+    page.classList.toggle('book-page--edge-next', zone === 'next');
+    pagesEl.style.cursor = zone === 'prev' ? 'w-resize' : 'e-resize';
+  }
+  function onPagesPointerLeave() { clearEdgeHover(); }
+
   function close() {
     if (!dialog) return;
     const old = dialog; dialog = null;
     document.removeEventListener('keydown', onKeydown);
+    pagesEl?.removeEventListener('pointerdown', onPagesPointerDown);
+    pagesEl?.removeEventListener('click', onPagesClick);
+    pagesEl?.removeEventListener('pointermove', onPagesPointerMove);
+    pagesEl?.removeEventListener('pointerleave', onPagesPointerLeave);
+    edgePointerDown = null; hoveredEdgeEl = null;
     old.close(); old.remove();
     if (previousFocus?.isConnected) previousFocus.focus();
+  }
+
+  // Pays, at most once per page load, a one-time cost that direct
+  // measurement (CDP tracing + rAF frame-delta sampling, both with and
+  // without first-time images, an image-free warm-up, and a real-content
+  // dry-run leaf) traced specifically to the very first .book-leaf
+  // animation the browser process ever runs — not image decode (an
+  // image-free first flip into "Holding" janks identically; pre-decoding
+  // the actual menu images beforehand changes nothing) and not the
+  // background tavern canvas (freezing its own draw calls during the
+  // flip changes nothing either, confirmed by disabling them directly).
+  // A real, full-size, real-content leaf — built the exact same way
+  // sequentialFlip's own leaf is — rotates once at effectively-zero
+  // opacity immediately after the book first opens, off the critical
+  // path of any real user-triggered flip; every flip afterward, in this
+  // same page load, measures clean (no dropped frame) because the
+  // compositor layer and the JIT'd flip code are already warm.
+  function warmUpFlipOnce() {
+    if (hasWarmedFlip || reduceMotion.matches) return;
+    hasWarmedFlip = true;
+    const rect = pagesEl.getBoundingClientRect();
+    const parentRect = pagesEl.parentElement.getBoundingClientRect();
+    const frontClone = pagesEl.cloneNode(true);
+    const backClone = pagesEl.cloneNode(true);
+    const leaf = el('div', { class: 'book-leaf book-leaf--forward book-leaf--full', style: `position:absolute;top:${rect.top - parentRect.top}px;left:${rect.left - parentRect.left}px;width:${rect.width}px;height:${rect.height}px;opacity:0.001;--flip-ms:${FLIP_MS}ms` }, [
+      el('div', { class: 'book-leaf-face book-leaf-front' }, [frontClone]),
+      el('div', { class: 'book-leaf-face book-leaf-back' }, [backClone]),
+    ]);
+    pagesEl.parentElement.appendChild(leaf);
+    leaf.addEventListener('animationend', () => leaf.remove(), { once: true });
   }
 
   async function open(container, activeSession) {
@@ -528,11 +696,13 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
       el('button', { class: 'book-bookmark', 'data-bookmark': 'drink', onclick: () => goToChapter('drink') }, 'Drinks'),
       el('button', { class: 'book-bookmark book-bookmark--holding', 'data-bookmark': 'held', onclick: () => goHeld() }, 'Holding'),
     ]);
-    pagesEl = el('div', { class: 'book-pages' });
-    cornerPrev = el('button', { class: 'book-corner book-corner--prev', 'aria-label': 'Previous page', onclick: () => sequentialFlip('prev') });
-    cornerNext = el('button', { class: 'book-corner book-corner--next', 'aria-label': 'Next page', onclick: () => sequentialFlip('next') });
+    pagesEl = el('div', {
+      class: 'book-pages',
+      onpointerdown: onPagesPointerDown, onclick: onPagesClick,
+      onpointermove: onPagesPointerMove, onpointerleave: onPagesPointerLeave,
+    });
     navEl = el('div', { class: 'book-nav' });
-    const pagesWrap = el('div', { class: 'book-pages-wrap' }, [pagesEl, cornerPrev, cornerNext, bookmarksEl]);
+    const pagesWrap = el('div', { class: 'book-pages-wrap' }, [pagesEl, bookmarksEl]);
     book = el('div', { class: 'book' }, [closeBtn, coverLink, pagesWrap, navEl]);
     dialog = el('dialog', { class: 'book-dialog', 'aria-labelledby': 'menu-book-title' }, [srTitle, book]);
     const openedDialog = dialog;
@@ -545,6 +715,7 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
       dialog.classList.add('menu-book-opening');
       setTimeout(() => dialog?.classList.remove('menu-book-opening'), 260);
     }
+    warmUpFlipOnce();
   }
 
   return { open, close };
