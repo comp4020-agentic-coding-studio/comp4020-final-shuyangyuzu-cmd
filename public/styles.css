@@ -708,8 +708,8 @@ body.table-mode { --bg:#50372a; --panel:#49372f; --fg:#f5e7ca; --muted:#d0b997; 
 .book-leaf .book-slot{width:100%;height:100%;box-sizing:border-box;overflow:hidden;flex:none}
 .book-leaf-face>.book-page{padding:26px 30px;box-sizing:border-box}
 .book-leaf-back{transform:rotateY(180deg)}
-.book-leaf--forward{transform-origin:left center;animation:book-flip-forward var(--flip-ms,600ms) cubic-bezier(.4,.1,.2,1) forwards}
-.book-leaf--backward{transform-origin:right center;animation:book-flip-backward var(--flip-ms,600ms) cubic-bezier(.4,.1,.2,1) forwards}
+.book-leaf--forward{transform-origin:left center;animation:book-flip-forward var(--flip-ms,360ms) linear forwards}
+.book-leaf--backward{transform-origin:right center;animation:book-flip-backward var(--flip-ms,360ms) linear forwards}
 .book-leaf--full{box-shadow:0 20px 60px #000000a0}
 @keyframes book-flip-forward{from{transform:translateX(0) rotateY(0)}to{transform:translateX(var(--flip-land-x,0px)) rotateY(-180deg)}}
 @keyframes book-flip-backward{from{transform:translateX(0) rotateY(0)}to{transform:translateX(var(--flip-land-x,0px)) rotateY(180deg)}}

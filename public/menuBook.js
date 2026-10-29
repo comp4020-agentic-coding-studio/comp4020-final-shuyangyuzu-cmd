@@ -67,7 +67,8 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
   const onLayoutChange = () => { if (dialog && !isFlipping) setSlotsInstant(buildPagesContent()); };
   spreadQuery.addEventListener?.('change', onLayoutChange);
 
-  const FLIP_MS = 600;
+  // A short constant-speed turn avoids the old long ease-out landing tail.
+  const FLIP_MS = 360;
 
   function itemsOfKind(kind) { return (menu || []).filter((m) => m.kind === kind); }
   function heldOfKind(kind) { return held.find((h) => h.kind === kind && h.state === 'held'); }
