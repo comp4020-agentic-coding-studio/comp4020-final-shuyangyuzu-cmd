@@ -16,6 +16,7 @@ import type Database from "better-sqlite3";
 import { logAction, transact } from "./actionLog.ts";
 import { requireBarSession } from "./bar.ts";
 import { GAME_TABLES } from "./barLayout.ts";
+import { isEating } from "./eating.ts";
 import { RoomError } from "./rooms.ts";
 import * as rooms from "./rooms.ts";
 import { COLORS, type Color, type PublicState } from "./types.ts";
@@ -383,6 +384,12 @@ export function createTableRoom(
   return transact(db, () => {
     const existing = checkExistingSeat(db, barPlayerId, tableId);
     if (existing) return existing; // re-clicking the table you're already at, not a new game
+    // Mid an eating/drinking animation (CLAUDE.md's seated-eating
+    // section): no starting a new game until it naturally expires —
+    // checked only on the "actually starting something new" path, not
+    // above, so a pending-request re-click (the `existing` return just
+    // above) still works even while eating.
+    if (isEating(db, barPlayerId)) throw new TableError("finish eating or drinking first", "eating_active", 409);
 
     const row = db.prepare(`SELECT current_room_id FROM tables WHERE id = ?`).get(tableId) as
       | { current_room_id: string | null }
@@ -460,6 +467,7 @@ export function joinTableRoom(
   return transact(db, () => {
     const existing = checkExistingSeat(db, barPlayerId, tableId);
     if (existing) return existing; // re-clicking the table you're already at/pending for, not a new request
+    if (isEating(db, barPlayerId)) throw new TableError("finish eating or drinking first", "eating_active", 409);
 
     const row = db.prepare(`SELECT current_room_id FROM tables WHERE id = ?`).get(tableId) as
       | { current_room_id: string | null }
@@ -528,6 +536,7 @@ export function startNpcGame(
   return transact(db, () => {
     const existing = checkExistingSeat(db, barPlayerId, tableId);
     if (existing) return existing; // already mid-game here — hand back that same game, don't start a second
+    if (isEating(db, barPlayerId)) throw new TableError("finish eating or drinking first", "eating_active", 409);
 
     const nickname = getBarNickname(db, barPlayerId);
     let created: rooms.CreatedRoom;

@@ -1002,6 +1002,16 @@ app.post("/api/orders/place", async (c) => {
   return c.json(result, 201);
 });
 
+// Retained as the low-level consume primitive (still exactly what
+// spec/orders.test.ts exercises) but no longer the client's own eat/
+// drink entry point — public/menuBook.js's "Holding" page and its Eat/
+// Drink buttons are gone (CLAUDE.md's seated-eating section); the
+// overhead prompt now calls /api/orders/eat below instead, which is
+// seated- and lock-gated and plays the ~8s animation. This endpoint has
+// no seat or lock check of its own (matching src/orders.ts's own
+// consumeHeldItem contract, unchanged) and is kept only so a client that
+// somehow still calls it behaves exactly as it always has — not a path
+// the shipped UI uses anymore.
 app.post("/api/orders/consume", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody & { heldItemId?: unknown };
   const result = orders.consumeHeldItem(
@@ -1016,6 +1026,26 @@ app.post("/api/orders/consume", async (c) => {
   const snap = barSnapshot(live.bumpBarSeq());
   live.publishBar(snap);
   return c.json(result);
+});
+
+// The actual seated-eating entry point (CLAUDE.md's seated-eating
+// section): requires a real dining/stool seat and consumes every
+// currently-held item in one call, starting the ~8s lock. Pushes a fresh
+// bar snapshot immediately — not just for this identity's own stamina
+// chip, but because `eating`/`holding` are public fields every
+// bystander's client also needs promptly, to render the same in-
+// progress animation and clear the overhead "holding" prompt.
+app.post("/api/orders/eat", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody & { idempotencyKey?: unknown };
+  const result = orders.startEating(
+    db,
+    barPlayerId(body),
+    barSessionSecret(body),
+    typeof body.idempotencyKey === "string" ? body.idempotencyKey : "",
+  );
+  const snap = barSnapshot(live.bumpBarSeq());
+  live.publishBar(snap);
+  return c.json(result, 201);
 });
 
 // ---- Real-time push (Crit 9) — see CLAUDE.md for what this transport is
