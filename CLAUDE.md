@@ -1133,3 +1133,5 @@ last draw," which the signature answers on its own.
 Internal leaf turns use orthographic projection (perspective:none on both book ancestors). Perspective is allowed only under .menu-book-opening; reducing its strength still causes visible paper magnification and does not satisfy the user's acceptance criterion.
 
 Turning faces must preserve the destination .book-slot > .book-page hierarchy; never give the rear face a raw page with separately recreated padding. Compensate the measured spine gap in the leaf landing translation. Verify content geometry, not only the outer frame.
+
+Started Vegas rooms must also expire silent human disconnects after the shared three-minute grace, based on room presence (joinedAt fallback), not only explicit departure rows. Reuse exitGame for NPC takeover/last-human closure and binding cleanup. Never count spectators or bar presence as a seated room heartbeat; retain short reconnect grace and exclude NPCs.

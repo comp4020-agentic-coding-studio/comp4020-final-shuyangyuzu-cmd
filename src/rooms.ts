@@ -892,10 +892,23 @@ export function resumeGame(db: Database.Database, code:string, playerId:string, 
   });
 }
 
+/** Explicit departures and silent disconnections share the same exit path.
+ * A closed browser cannot be relied on to send depart. Room heartbeats,
+ * not bar presence or SSE spectators, keep a started human seat alive.
+ * Called before requests and by the existing watched-channel ticker. */
 export function expireGameDepartures(db:Database.Database,awayMs:number):string[]{
   return transact(db,()=>{
-    const due=db.prepare(`SELECT d.player_id,d.room_id,s.session_secret,r.code FROM room_departures d
-      JOIN sessions s ON s.player_id=d.player_id JOIN rooms r ON r.id=d.room_id WHERE d.left_at <= ?`).all(new Date(Date.now()-awayMs).toISOString()) as Array<{player_id:string;session_secret:string;code:string}>;
+    const cutoff=new Date(Date.now()-awayMs).toISOString();
+    const due=db.prepare(`SELECT d.player_id,s.session_secret,r.code FROM room_departures d
+      JOIN sessions s ON s.player_id=d.player_id JOIN rooms r ON r.id=d.room_id WHERE d.left_at <= ?
+      UNION
+      SELECT s.player_id,s.session_secret,r.code FROM rooms r
+      JOIN json_each(r.state_json, '$.players') p
+      JOIN sessions s ON s.room_id=r.id AND s.player_id=p.key
+      LEFT JOIN presence h ON h.room_id=r.id AND h.player_id=p.key
+      WHERE r.closed_at IS NULL AND json_extract(r.state_json,'$.phase') <> 'lobby'
+        AND COALESCE(json_extract(p.value,'$.controller'),'human') = 'human'
+        AND COALESCE(h.last_seen_at,json_extract(p.value,'$.joinedAt')) <= ?`).all(cutoff,cutoff) as Array<{player_id:string;session_secret:string;code:string}>;
     for(const d of due) exitGame(db,d.code,d.player_id,d.session_secret);
     return [...new Set(due.map(d=>d.code))];
   });
