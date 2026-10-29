@@ -166,7 +166,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     function openMenuBook(){
       if(!mine||overlay.childElementCount)return;
       path=[];destination=null;keys.clear();heldDirection=null;pendingSitSeat=null;approachTarget=null;
-      menuBook.open(overlay,session);
+      menuBook.open(overlay,session,menuBookButton.getBoundingClientRect());
     }
     let layout;
     try { layout=await read('/layout'); } catch(e) {toast.textContent=e.message;return;}

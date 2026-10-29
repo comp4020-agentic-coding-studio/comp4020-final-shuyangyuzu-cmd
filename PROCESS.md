@@ -1,5 +1,9 @@
 # Process overview — Crit 8 and Crit 9
 
+## Opening a book is different from turning a page
+
+I accepted the menu content and edge-click navigation, but still saw a zoom-and-stop effect when turning pages. I clarified that only opening the counter book should grow and unfold it. Codex separated these operations, removed the hidden warm-up, replaced whole-spread turns with single paper leaves, and corrected border/padding geometry. Local real-browser observations compare the fixed frame before and during a turn; this is agent verification, not my own acceptance or a claim of flawless frame pacing on every device. PLAN.md records checks and limitations.
+
 ## The counter becomes one book, not two buttons
 
 Codex's voice review had also flagged that the menu still had no real recipes, no link between a menu drink and its matching cocktail in the Mixology book, and that the counter presented two separate HUD buttons rather than one in-scene object. I asked Claude to fold all three tools — the Mixology book, Meals, and Drinks — into a single physical book on the counter, keep ordering/eating/drinking working exactly as before, and defer the seated-only/animation/overhead-indicator part of the original ask (Step 2) to a documented TODO rather than attempt it this round.

@@ -26,10 +26,9 @@
 //    swapped right before the leaf is removed at the end (already
 //    matching the leaf's own back face by then) — so the swap is never
 //    visible either time.
-//  - A bookmark/chapter jump (cover <-> a chapter, opening an item's
-//    detail spread, "Back") turns the *entire* two-page spread at once,
-//    as one wide leaf sized to the whole book — still a real hinge-and-
-//    faces turn, just sized to the whole spread rather than one page.
+//  - A bookmark/detail jump also turns one unframed leaf. The outer
+//    cover and spine stay fixed. Only opening the closed book may scale
+//    the whole object from its counter hotspot.
 //
 // Every cross-module reference here arrives as a constructor parameter
 // (`mixologyModule`, `ordersApi`) rather than a nested static import —
@@ -54,12 +53,8 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
   let mixologyMount = null;
 
   let book = null, pagesEl = null, bookmarksEl = null, navEl = null, srTitle = null;
-  // Paid at most once per page load (not once per open()): the one-time
-  // compositor/JIT cost this guards against is tied to the browser
-  // process's own internal state, not to any one dialog instance — a
-  // closed-and-reopened book on the same page never re-pays it. See
-  // warmUpFlipOnce() below for the measured reasoning.
-  let hasWarmedFlip = false;
+  let opening = false, openingTimer = null;
+  let openRequest = 0;
   // The in-progress pointerdown that a click on the pages area might be
   // the end of — used by onPagesClick to tell a real tap/click apart
   // from a text-selection drag or a touch scroll that merely ends over
@@ -333,6 +328,7 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
     const { pages, per, hasPrev, hasNext } = pagerInfo();
     if (direction === 'next' && !hasNext) return;
     if (direction === 'prev' && !hasPrev) return;
+    if (opening) return;
     if (isFlipping || reduceMotion.matches) {
       if (!isFlipping) { cursor = direction === 'next' ? cursor + per : cursor - per; setSlotsInstant(buildPagesContent()); }
       return;
@@ -361,6 +357,8 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
     // very first frame, so its real content can change right away.
     if (!singleSlot) {
       fromSlot.replaceChildren(direction === 'next' ? (newRight || blankPage()) : (newLeft || blankPage()));
+    } else {
+      fromSlot.replaceChildren(newLeft || blankPage());
     }
     leaf.addEventListener('animationend', () => {
       // The slot the leaf lands on only needs to be correct by the
@@ -376,27 +374,24 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
     }, { once: true });
   }
 
-  // A whole-spread turn: one leaf sized to cover the entire open book,
-  // used for chapter/bookmark jumps, opening an item's detail spread,
-  // and "Back" — a bigger turn than a single page, but still a real
-  // hinge-and-faces rotation, never a crossfade.
+  // Chapter/detail navigation turns one paper leaf too. Never rotate a
+  // clone of the entire framed spread: that magnifies a huge panel in
+  // perspective and looks like the book is reopening on every click.
   function chapterFlip(mutate, direction) {
-    if (isFlipping) return;
+    if (isFlipping || opening) return;
     if (reduceMotion.matches) { mutate(); setSlotsInstant(buildPagesContent()); return; }
-    const frontClone = pagesEl.cloneNode(true);
-    frontClone.classList.remove('book-pages--wide');
+    const slots = pagesEl.querySelectorAll(':scope > .book-slot');
+    const fromSlot = direction === 'forward' ? slots[slots.length - 1] : slots[0];
+    // The interactive Mixology chapter is one continuous sheet. Going
+    // to/from it can swap content without ever turning the outer frame.
+    if (!fromSlot) { mutate(); setSlotsInstant(buildPagesContent()); return; }
+    const frontClone = fromSlot.cloneNode(true);
     mutate();
     const newContent = buildPagesContent();
-    const backWrap = el('div', { class: 'book-leaf-spread' });
-    if (newContent.kind === 'wide') {
-      backWrap.append(newContent.nodes[0]);
-    } else {
-      const leftNode = el('div', { class: 'book-slot book-slot--left' }, newContent.nodes[0] ? [newContent.nodes[0]] : []);
-      backWrap.append(leftNode);
-      if (newContent.nodes[1] != null) backWrap.append(el('div', { class: 'book-slot book-slot--right' }, [newContent.nodes[1]]));
-    }
-
-    const leaf = buildLeaf(pagesEl, frontClone, backWrap, direction, true);
+    if (newContent.kind === 'wide') { setSlotsInstant(newContent); return; }
+    const backIndex = direction === 'forward' ? 0 : (newContent.nodes[1] ? 1 : 0);
+    const backWrap = el('div', {class: 'book-slot'}, [newContent.nodes[backIndex] || blankPage()]);
+    const leaf = buildLeaf(fromSlot, frontClone, backWrap, direction);
     isFlipping = true;
     book.classList.add('is-flipping');
     setSlotsInstant(newContent); // hidden under the leaf's matching front face
@@ -408,17 +403,18 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
     }, { once: true });
   }
 
-  function buildLeaf(sizeRefEl, frontNode, backNode, direction, fullSpread = false) {
+  function buildLeaf(sizeRefEl, frontNode, backNode, direction) {
     const rect = sizeRefEl.getBoundingClientRect();
     const parentRect = pagesEl.getBoundingClientRect();
     const front = el('div', { class: 'book-leaf-face book-leaf-front' }, [frontNode]);
     const back = el('div', { class: 'book-leaf-face book-leaf-back' }, [backNode]);
     const leaf = el('div', {
-      class: `book-leaf book-leaf--${direction}${fullSpread ? ' book-leaf--full' : ''}`,
+      class: `book-leaf book-leaf--${direction}`, 'aria-hidden': 'true', inert: '',
     }, [front, back]);
     leaf.style.position = 'absolute';
-    leaf.style.top = `${rect.top - parentRect.top}px`;
-    leaf.style.left = `${rect.left - parentRect.left}px`;
+    // Absolute children start at the padding edge, not the border edge.
+    leaf.style.top = `${rect.top - parentRect.top - pagesEl.clientTop}px`;
+    leaf.style.left = `${rect.left - parentRect.left - pagesEl.clientLeft}px`;
     leaf.style.width = `${rect.width}px`;
     leaf.style.height = `${rect.height}px`;
     leaf.style.setProperty('--flip-ms', `${FLIP_MS}ms`);
@@ -635,6 +631,8 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
   function onPagesPointerLeave() { clearEdgeHover(); }
 
   function close() {
+    openRequest++;
+    clearTimeout(openingTimer); openingTimer = null; opening = false;
     if (!dialog) return;
     const old = dialog; dialog = null;
     document.removeEventListener('keydown', onKeydown);
@@ -647,38 +645,33 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
     if (previousFocus?.isConnected) previousFocus.focus();
   }
 
-  // Pays, at most once per page load, a one-time cost that direct
-  // measurement (CDP tracing + rAF frame-delta sampling, both with and
-  // without first-time images, an image-free warm-up, and a real-content
-  // dry-run leaf) traced specifically to the very first .book-leaf
-  // animation the browser process ever runs — not image decode (an
-  // image-free first flip into "Holding" janks identically; pre-decoding
-  // the actual menu images beforehand changes nothing) and not the
-  // background tavern canvas (freezing its own draw calls during the
-  // flip changes nothing either, confirmed by disabling them directly).
-  // A real, full-size, real-content leaf — built the exact same way
-  // sequentialFlip's own leaf is — rotates once at effectively-zero
-  // opacity immediately after the book first opens, off the critical
-  // path of any real user-triggered flip; every flip afterward, in this
-  // same page load, measures clean (no dropped frame) because the
-  // compositor layer and the JIT'd flip code are already warm.
-  function warmUpFlipOnce() {
-    if (hasWarmedFlip || reduceMotion.matches) return;
-    hasWarmedFlip = true;
-    const rect = pagesEl.getBoundingClientRect();
-    const parentRect = pagesEl.parentElement.getBoundingClientRect();
-    const frontClone = pagesEl.cloneNode(true);
-    const backClone = pagesEl.cloneNode(true);
-    const leaf = el('div', { class: 'book-leaf book-leaf--forward book-leaf--full', style: `position:absolute;top:${rect.top - parentRect.top}px;left:${rect.left - parentRect.left}px;width:${rect.width}px;height:${rect.height}px;opacity:0.001;--flip-ms:${FLIP_MS}ms` }, [
-      el('div', { class: 'book-leaf-face book-leaf-front' }, [frontClone]),
-      el('div', { class: 'book-leaf-face book-leaf-back' }, [backClone]),
-    ]);
-    pagesEl.parentElement.appendChild(leaf);
-    leaf.addEventListener('animationend', () => leaf.remove(), { once: true });
+  // Opening alone may move/scale the book. Internal navigation never
+  // adds this class; there is no invisible dry-run leaf or warm-up turn.
+  function animateOpening(origin) {
+    if (reduceMotion.matches) return;
+    const rect = book.getBoundingClientRect();
+    const x = origin ? origin.left + origin.width / 2 : rect.left + rect.width / 2;
+    const y = origin ? origin.top + origin.height / 2 : rect.top + rect.height / 2;
+    book.style.setProperty('--book-from-x', `${x - rect.left - rect.width / 2}px`);
+    book.style.setProperty('--book-from-y', `${y - rect.top - rect.height / 2}px`);
+    book.style.setProperty('--book-from-scale', String(origin ? Math.max(.035, Math.min(.15, origin.width / rect.width)) : .12));
+    const opened = dialog;
+    opening = true;
+    opened.classList.add('menu-book-opening');
+    const finish = () => {
+      if (dialog !== opened) return;
+      opened.classList.remove('menu-book-opening');
+      opening = false; clearTimeout(openingTimer); openingTimer = null;
+    };
+    const onOpened = e => { if (e.target !== book) return; book.removeEventListener('animationend', onOpened); finish(); };
+    book.addEventListener('animationend', onOpened);
+    openingTimer = setTimeout(finish, 800);
   }
 
-  async function open(container, activeSession) {
+  /** @param {Pick<DOMRect, 'left' | 'top' | 'width' | 'height'> | null} [origin] */
+  async function open(container, activeSession, origin = null) {
     if (dialog) return;
+    const request = ++openRequest;
     session = activeSession ?? null;
     previousFocus = document.activeElement;
     stage = 'cover'; cursor = 0; isFlipping = false;
@@ -686,6 +679,7 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
       if (!menu) menu = await ordersApi.fetchMenu();
       await refreshHeld();
     } catch { /* menu/held best-effort; book still opens */ }
+    if (request !== openRequest || dialog) return;
 
     srTitle = el('h1', { id: 'menu-book-title', class: 'sr-only' }, 'The Counter’s Book');
     const closeBtn = el('button', { class: 'book-close', 'aria-label': 'Close the book', onclick: close }, '×');
@@ -711,11 +705,7 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
     setSlotsInstant(buildPagesContent());
     dialog.showModal();
     document.addEventListener('keydown', onKeydown);
-    if (!reduceMotion.matches) {
-      dialog.classList.add('menu-book-opening');
-      setTimeout(() => dialog?.classList.remove('menu-book-opening'), 260);
-    }
-    warmUpFlipOnce();
+    animateOpening(origin);
   }
 
   return { open, close };

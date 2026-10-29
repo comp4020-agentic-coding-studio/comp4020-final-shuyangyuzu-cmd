@@ -1,5 +1,9 @@
 # Your harness
 
+## Book motion correction — 2026-10-29 (Codex)
+
+Opening the closed menu and turning an internal page are distinct operations. Only open() may scale/translate the book from its counter hotspot and unfold the two slots. Navigation must keep the frame fixed and turn one unframed leaf, never clone/rotate the full bordered spread. Do not restore the invisible warm-up flip: it was removed following the student's visible zoom/stop feedback. Position absolute leaves relative to the padding edge (subtract clientLeft/clientTop), preserve page padding on both faces, and reveal the new underlying page at the start of mobile turns. spec/menuBookMotion.test.ts covers motion separation, geometry, reduced motion and closing during a pending open. Earlier warm-up/performance claims remain historical, not current guarantees of smoothness.
+
 ## Voice and order review corrections — 2026-10-27
 
 Voice membership is not evidence of working audio. Check real RTCPeerConnections and incoming packet/energy statistics separately from membership tests. Handle play() rejection with a user-gesture Enable sound control and support streamless tracks. Private signals can beat the public roster: refresh and revalidate rather than silently drop them. Serialize signaling, announce receiver readiness, and resend lost offers even when readiness races a pending send. Retry while joined must reuse the microphone, not acquire a second stream. Generated test audio must remain muted unless the user requests an audible test.
