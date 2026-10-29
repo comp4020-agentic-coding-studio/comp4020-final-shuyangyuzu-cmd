@@ -39,3 +39,13 @@ export async function placeOrder(session, { itemId, variant, idempotencyKey }) {
 export async function consumeHeld(session, heldItemId) {
   return post('/consume', { ...session, heldItemId });
 }
+
+// The actual seated-eating entry point (CLAUDE.md's seated-eating
+// section) — consumes every currently-held item in one call and starts
+// the server's ~8s action lock. Separate from consumeHeld above (still
+// used only by the Mixology/menu book's own low-level detail-page flow,
+// unchanged) since this one requires a real dining/stool seat and can
+// refuse with 'not_seated'/'nothing_held'/'eating_active'.
+export async function startEating(session, idempotencyKey) {
+  return post('/eat', { ...session, idempotencyKey });
+}
