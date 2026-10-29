@@ -1129,3 +1129,5 @@ alongside `room.version` — polling, not SSE, is poker's own transport,
 so there's no stale-arrival-ordering problem a dedicated server-side
 counter would need to solve here, only "did anything change since the
 last draw," which the signature answers on its own.
+
+Internal leaf turns use orthographic projection (perspective:none on both book ancestors). Perspective is allowed only under .menu-book-opening; reducing its strength still causes visible paper magnification and does not satisfy the user's acceptance criterion.

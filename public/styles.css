@@ -633,7 +633,7 @@ body.table-mode { --bg:#50372a; --panel:#49372f; --fg:#f5e7ca; --muted:#d0b997; 
    get clipped — a real bug an earlier version of this had, caught by
    screenshot review: an ingredient amount ("1 (≈52 g)") was cut off
    behind the tabs. */
-.book-pages-wrap{position:relative;flex:1;min-height:0;perspective:2400px;margin-right:92px}
+.book-pages-wrap{position:relative;flex:1;min-height:0;perspective:none;margin-right:92px}
 .book-bookmarks{position:absolute;left:100%;top:68px;z-index:15;display:flex;flex-direction:column;gap:6px;width:92px}
 .book-bookmark{background:#8a5f3b;color:#fbe9c9;border:1px solid #5c3d23;border-left:none;border-radius:0 6px 6px 0;padding:9px 12px;font-size:11px;letter-spacing:.2px;box-shadow:3px 3px 6px #0004;text-align:left;transition:background .15s ease,color .15s ease}
 .book-bookmark:hover{background:#9c6c42}
@@ -641,7 +641,9 @@ body.table-mode { --bg:#50372a; --panel:#49372f; --fg:#f5e7ca; --muted:#d0b997; 
 .book-bookmark--holding{background:#5c7148;color:#f2f7e8}
 .book-bookmark--holding.is-active{background:#f6ecd4;color:#3f5230}
 
-.book-pages{position:relative;display:flex;height:100%;background:#4a3223;border:14px solid #3a2a1c;border-radius:10px;box-shadow:0 28px 90px #0b0704cc,inset 0 0 0 2px #6d4e32;overflow:hidden;perspective:6000px}
+.book-pages{position:relative;display:flex;height:100%;background:#4a3223;border:14px solid #3a2a1c;border-radius:10px;box-shadow:0 28px 90px #0b0704cc,inset 0 0 0 2px #6d4e32;overflow:hidden;perspective:none}
+/* Perspective is opening-only: internal turns must never magnify the paper. */
+.menu-book-opening .book-pages{perspective:6000px}
 .book-pages.book-pages--wide{display:block}
 .book-slot{position:relative;flex:1 1 0;min-width:0;background:#f6ecd4;overflow-y:auto;overscroll-behavior:contain;padding:26px 30px}
 .book-slot--left{border-radius:3px 0 0 3px;box-shadow:inset -14px 0 18px -16px #0005}
