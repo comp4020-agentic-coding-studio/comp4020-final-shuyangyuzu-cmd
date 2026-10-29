@@ -43,6 +43,101 @@ Eating or drinking (`POST /api/orders/consume`) is the *only* place in this enti
 
 **Superseded by the 2026-10-29 correction above**: the client menu is no longer its own dialog opened from a separate HUD button. `public/orders.js` is now a pure server-communication module (menu/held fetch, place, consume — no DOM); `public/menuBook.js` renders the Meals/Drinks pages as part of the counter's single physical book, alongside an embedded Mixology book page. Both modules still participate in the deployed asset hash (`src/version.ts`); opening the book still stops held movement the same way every other overlay dialog in `tavern.js` already does.
 
+## Seated eating and drinking (2026-10-29/30, Claude)
+
+Eating or drinking now requires a real dining/stool seat (`bar_seats` — a
+game table's own chair is never one, by construction, so sitting at a
+Vegas/poker chair never satisfies this). Standing, a patron may order and
+carry a held item around, but `POST /api/orders/eat` refuses with
+`not_seated` (409) the instant `bar_seats.occupied_by` for that identity
+is empty — checked server-side every time, never only hidden behind a
+disabled client button. This supersedes `POST /api/orders/consume` (still
+present, still exactly what `spec/orders.test.ts` already pinned down, no
+seat/lock check of its own) as the client's actual eat/drink entry point;
+the old standalone "Holding" page and its own Eat/Drink buttons are
+removed from `public/menuBook.js` entirely.
+
+**One server action starts everything held, atomically.** `startEating`
+(`src/orders.ts`) consumes every currently-`held` item for that identity
+in one transaction (meal first, then drink, if both are held — the
+combined sequence), restores stamina for each exactly as `consumeHeldItem`
+already did, and writes one lock row (`bar_eating_actions`, `src/eating.ts`)
+with `started_at`/`ends_at` (`EATING_DURATION_MS`, 8000ms by default).
+Idempotent on a client-supplied key the same shape as `placeOrder`'s own:
+a retried start with the same key is a no-op returning the existing
+action; a different key while the lock is still active is refused
+(`eating_active`, 409). Because the reward is applied the moment the lock
+is written — not when the 8 seconds end — there is nothing "pending" for
+a crash, a refresh, or a restart to ever lose.
+
+**The lock itself is evaluated lazily, like every other grace period in
+this file** — `ends_at > now`, recomputed fresh on every read
+(`isEating`/`currentEatingAction`), no sweep, no timer, nothing that can
+get stuck. This is what makes a refresh, a dropped connection, or a
+server restart mid-animation recover correctly for free: the client's own
+`reconcile()` re-derives the cutscene's elapsed progress purely from the
+server's `startedAt`/`endsAt` on every snapshot, so a mid-window reload
+resumes the correct frame rather than restarting or losing the lock, and
+completion never depends on the client reliably sending an "I'm done"
+request (there is no such request). `isEating` is the one gate
+`bar.ts`'s `moveBar`/`sitAtSeat`/`standFromSeat`, `orders.ts`'s own
+`placeOrder`, and `tables.ts`'s `createTableRoom`/`joinTableRoom`/
+`startNpcGame` (checked once, inside the shared `checkExistingSeat`'s
+caller, not on the "already have this same seat" early-return path) all
+share — none of them re-derive their own notion of "still eating."
+
+**Public visibility, kind-only.** `PublicBarPlayer.holding` (`{meal,
+drink}` booleans) and `.eating` (`{kinds, startedAt, endsAt} | null`) ride
+the existing bar snapshot, computed directly off `held_items`/
+`bar_eating_actions` in `src/bar.ts` (not imported from `orders.ts`,
+which already imports `bar.ts` for `requireBarSession` — the reverse
+import would cycle). Every bystander sees that someone is holding or
+eating/drinking something and can render the same overhead prompt/
+bystander tag, but never which specific dish — matching the existing
+no-private-order-detail rule. The overhead prompt itself
+(`public/tavern.js`'s `eat-prompt-target`) is a single DOM button
+following this patron's own head position every frame, shown and
+clickable only for `mine`; a bystander gets a plain, non-interactive
+canvas-drawn tag instead ("Holding" / "Eating" / "Drinking" / "Eating &
+drinking"), never a second player's clickable control.
+
+**The ~8-second cutscene is pure client presentation, timed from server
+truth.** `drawEatingScene` (`public/tavern.js`) draws a third-person
+close-up — the viewer's own clothing colour/skin tone, a dining-table or
+counter/back-bar background depending on `seatKind`, a plate/fork or a
+glass with a visibly dropping liquid level depending on which kind is
+currently playing — on a dedicated full-screen canvas layered above the
+whole scene, never baked into or fighting the live map canvas's own
+transform/fillStyle state. `eatingPhaseAt(kinds, progress)` is a pure
+function splitting the server's own window evenly across one or two
+kinds and three sub-stages (lift/active/down) — independently testable,
+and the only place "how far through the animation are we" is computed.
+`prefers-reduced-motion` keeps the same poses but drops the per-frame
+wobble; the server's own duration and restore rules are identical either
+way. While `eatingUI` is set, every movement/sit/order/game-join/menu-
+book entry point in `tavern.js` is gated the same way the server already
+refuses the underlying request — not a global keyboard lock (browser
+shortcuts and leaving/closing the page remain unaffected) — and an
+existing voice call's microphone/peer state is untouched (this feature
+never calls `getUserMedia` or touches `voiceCall.js`).
+
+**A real bug this round caught in its own verification, not assumed
+correct from the code alone.** `drawEatingScene`'s own `box()` helper
+closes over its `ctx` and takes `(x, y, w, h, colour)` — but it was first
+written with the module's *other* `box(c, x, y, w, h, colour)` helper (the
+one used for the live map canvas, which does take a context) as the
+copied pattern, so every call site passed an extra leading `ctx` argument.
+That silently shifted every parameter one slot over: the real x became
+the fill colour (coerced to a stray number, defaulting to black), and the
+real height argument was dropped entirely — the cutscene displayed
+(`display:block`, correct canvas size) but drew nothing recognisable,
+confirmed only by instrumenting `fillRect` directly and reading back
+actual pixel data, not by trusting that "the overlay appeared" meant the
+art was correct. Fixed by dropping the stray argument from every call
+site; re-verified by the same pixel-level instrumentation (a real
+background colour at a real coordinate) and a real screenshot showing the
+seated figure, plate, and glass rendering as designed.
+
 ## Tavern clock
 
 A real-time Canberra/Sydney wall clock is mounted on the tavern map, drawn per-frame (never baked into the static floor layer, which paints once at load) using `Intl.DateTimeFormat` with an explicit `timeZone: 'Australia/Sydney'` — AEST/AEDT and the real transition dates come from the runtime's own IANA tzdata, never a hand-coded UTC offset. Purely client-side display: no server endpoint, no persistence, since a browser's own system clock is already correct for this and — unlike a dice roll — needs no authority. Its placement must be computed from the real, live furniture layout (`GET /api/bar/layout`'s actual returned coordinates, which apply `CORE_FURNITURE`'s own `+10,+6` export offset) rather than `src/barLayout.ts`'s pre-offset `CORE_FURNITURE` literals read in isolation — conflating the two previously placed the clock far from the counter entirely, caught only by querying the live layout directly and checking real pixel ranges against it, not by eyeballing a screenshot. A digital readout accompanies the analog face specifically for legibility at the 390px breakpoint.
