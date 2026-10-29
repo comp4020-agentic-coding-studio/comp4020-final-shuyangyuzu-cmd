@@ -348,7 +348,9 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
     const frontClone = fromSlot.cloneNode(true);
     const backContent = toSide === 'left' ? (newLeft || blankPage()) : (newRight || blankPage());
     const hingeDir = direction === 'next' ? 'forward' : 'backward';
-    const leaf = buildLeaf(fromSlot, frontClone, backContent, hingeDir);
+    const backSlot = toSlot.cloneNode(false);
+    backSlot.replaceChildren(backContent.cloneNode(true));
+    const leaf = buildLeaf(fromSlot, frontClone, backSlot, hingeDir, singleSlot ? null : toSlot);
 
     isFlipping = true;
     book.classList.add('is-flipping');
@@ -390,10 +392,12 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
     const newContent = buildPagesContent();
     if (newContent.kind === 'wide') { setSlotsInstant(newContent); return; }
     const backIndex = direction === 'forward' ? 0 : (newContent.nodes[1] ? 1 : 0);
-    const backWrap = el('div', {class: 'book-slot'}, [newContent.nodes[backIndex] || blankPage()]);
+    const landingSlot = slots.length > 1 ? (direction === 'forward' ? slots[0] : slots[slots.length - 1]) : null;
+    const backWrap = (landingSlot || fromSlot).cloneNode(false);
+    backWrap.replaceChildren(newContent.nodes[backIndex] || blankPage());
     // The real nodes move into the underlying slots below. Snapshot the
     // back first, otherwise that move leaves the turning face empty.
-    const leaf = buildLeaf(fromSlot, frontClone, backWrap.cloneNode(true), direction);
+    const leaf = buildLeaf(fromSlot, frontClone, backWrap.cloneNode(true), direction, landingSlot);
     isFlipping = true;
     book.classList.add('is-flipping');
     setSlotsInstant(newContent); // hidden under the leaf's matching front face
@@ -402,10 +406,11 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
       leaf.remove();
       isFlipping = false;
       book.classList.remove('is-flipping');
+      updateChrome();
     }, { once: true });
   }
 
-  function buildLeaf(sizeRefEl, frontNode, backNode, direction) {
+  function buildLeaf(sizeRefEl, frontNode, backNode, direction, landingSlot = null) {
     const rect = sizeRefEl.getBoundingClientRect();
     const parentRect = pagesEl.getBoundingClientRect();
     const front = el('div', { class: 'book-leaf-face book-leaf-front' }, [frontNode]);
@@ -419,6 +424,11 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
     leaf.style.left = `${rect.left - parentRect.left - pagesEl.clientLeft}px`;
     leaf.style.width = `${rect.width}px`;
     leaf.style.height = `${rect.height}px`;
+    // Preserve the actual slot hierarchy on both faces. Raw .book-page
+    // faces have different flex/padding geometry and visibly resize images.
+    const landingRect = landingSlot?.getBoundingClientRect();
+    const mirroredLeft = direction === 'forward' ? rect.left - rect.width : rect.left + rect.width;
+    leaf.style.setProperty('--flip-land-x', `${landingRect ? landingRect.left - mirroredLeft : 0}px`);
     leaf.style.setProperty('--flip-ms', `${FLIP_MS}ms`);
     return leaf;
   }

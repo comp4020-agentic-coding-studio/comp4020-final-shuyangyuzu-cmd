@@ -45,3 +45,20 @@ it('reduced motion skips both opening and paper animation without blocking navig
 it('closing during data loading prevents a late dialog from appearing',async()=>{
  const t=setup();const loading=t.client.open(t.doc.body,null);t.client.close();await loading;expect(t.doc.querySelector('dialog')).toBeNull();
 });
+
+it('sequential turns preserve the landing slot hierarchy and bridge the spine gap',async()=>{
+ const t=setup();await t.client.open(t.doc.body,null);t.endOpening();
+ (t.doc.querySelector('[data-bookmark="meal"]') as HTMLElement).click();t.finishTurn();
+ const left=t.doc.querySelector('.book-slot--left') as HTMLElement;
+ const right=t.doc.querySelector('.book-slot--right') as HTMLElement;
+ left.getBoundingClientRect=()=>({left:100,top:100,width:500,height:700} as DOMRect);
+ right.getBoundingClientRect=()=>({left:618,top:100,width:500,height:700} as DOMRect);
+ // Use the shared keyboard navigation path; the test DOM helper does not model boolean attributes.
+ t.doc.querySelector('dialog')!.dispatchEvent(new t.dom.window.KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}));
+ const leaf=t.doc.querySelector('.book-leaf') as HTMLElement;
+ expect(leaf).not.toBeNull();
+ expect(leaf.style.getPropertyValue('--flip-land-x')).toBe('-18px');
+ expect(leaf.querySelector('.book-leaf-back > .book-slot--left > .book-page')).not.toBeNull();
+ expect(leaf.querySelector('.book-leaf-back')!.textContent).toContain('Meal 2');
+ t.finishTurn();expect(left.textContent).toContain('Meal 2');
+});

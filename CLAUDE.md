@@ -1131,3 +1131,5 @@ counter would need to solve here, only "did anything change since the
 last draw," which the signature answers on its own.
 
 Internal leaf turns use orthographic projection (perspective:none on both book ancestors). Perspective is allowed only under .menu-book-opening; reducing its strength still causes visible paper magnification and does not satisfy the user's acceptance criterion.
+
+Turning faces must preserve the destination .book-slot > .book-page hierarchy; never give the rear face a raw page with separately recreated padding. Compensate the measured spine gap in the leaf landing translation. Verify content geometry, not only the outer frame.

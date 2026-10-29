@@ -711,8 +711,8 @@ body.table-mode { --bg:#50372a; --panel:#49372f; --fg:#f5e7ca; --muted:#d0b997; 
 .book-leaf--forward{transform-origin:left center;animation:book-flip-forward var(--flip-ms,600ms) cubic-bezier(.4,.1,.2,1) forwards}
 .book-leaf--backward{transform-origin:right center;animation:book-flip-backward var(--flip-ms,600ms) cubic-bezier(.4,.1,.2,1) forwards}
 .book-leaf--full{box-shadow:0 20px 60px #000000a0}
-@keyframes book-flip-forward{from{transform:rotateY(0)}to{transform:rotateY(-180deg)}}
-@keyframes book-flip-backward{from{transform:rotateY(0)}to{transform:rotateY(180deg)}}
+@keyframes book-flip-forward{from{transform:translateX(0) rotateY(0)}to{transform:translateX(var(--flip-land-x,0px)) rotateY(-180deg)}}
+@keyframes book-flip-backward{from{transform:translateX(0) rotateY(0)}to{transform:translateX(var(--flip-land-x,0px)) rotateY(180deg)}}
 .book.is-flipping .book-slot{overflow:hidden}
 .book-leaf-spread{display:flex;height:100%}
 .book-leaf-spread .book-slot{flex:1 1 0}
