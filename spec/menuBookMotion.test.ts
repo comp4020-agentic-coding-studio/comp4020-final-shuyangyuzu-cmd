@@ -28,6 +28,7 @@ it('only opening scales the frame; chapter navigation turns one unframed leaf',a
  const leaf=t.doc.querySelector('.book-leaf') as HTMLElement;
  expect(leaf).not.toBeNull();expect(leaf.style.width).toBe('500px');
  expect(leaf.querySelector('.book-pages')).toBeNull();expect(leaf.classList.contains('book-leaf--full')).toBe(false);
+ expect(leaf.querySelector('.book-leaf-back')!.textContent).toContain('Meal 0');
  expect(t.doc.querySelector('.menu-book-opening')).toBeNull();
  t.finishTurn();expect(t.doc.querySelector('.book-leaf')).toBeNull();
 });

@@ -391,7 +391,9 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
     if (newContent.kind === 'wide') { setSlotsInstant(newContent); return; }
     const backIndex = direction === 'forward' ? 0 : (newContent.nodes[1] ? 1 : 0);
     const backWrap = el('div', {class: 'book-slot'}, [newContent.nodes[backIndex] || blankPage()]);
-    const leaf = buildLeaf(fromSlot, frontClone, backWrap, direction);
+    // The real nodes move into the underlying slots below. Snapshot the
+    // back first, otherwise that move leaves the turning face empty.
+    const leaf = buildLeaf(fromSlot, frontClone, backWrap.cloneNode(true), direction);
     isFlipping = true;
     book.classList.add('is-flipping');
     setSlotsInstant(newContent); // hidden under the leaf's matching front face
