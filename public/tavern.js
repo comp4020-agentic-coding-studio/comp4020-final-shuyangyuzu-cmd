@@ -459,6 +459,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     const GAME_COLORS=['red','blue','green','yellow','purple'];
     const MAX_SEATS=GAME_COLORS.length;
     async function openTableDialog(f,preferredColor){
+      if(f.gameType==='dominoes'){window.dispatchEvent(new CustomEvent('domino-open',{detail:{mode:'online',seat:preferredColor}}));return;}
       if(f.gameType==='texas'){window.dispatchEvent(new CustomEvent('poker-open',{detail:{mode:'online',seat:preferredColor}}));return;}
       path=[];
       let tableList;
@@ -530,6 +531,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     // is a separate, simpler flow from openTableDialog above: pick a
     // colour, start immediately against 3 computer-controlled opponents.
     async function openNpcTableDialog(f,preferredColor){
+      if(f.gameType==='dominoes'){window.dispatchEvent(new CustomEvent('domino-open',{detail:{mode:'offline',seat:preferredColor}}));return;}
       if(f.gameType==='texas'){window.dispatchEvent(new CustomEvent('poker-open',{detail:{mode:'offline',seat:preferredColor}}));return;}
       path=[];
       // Total players including the human (2-MAX_SEATS), defaulting to
@@ -942,6 +944,14 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         fc.beginPath();fc.arc(cx,cy,r-14,0,Math.PI*2);fc.strokeStyle='#bcad7770';fc.lineWidth=2;fc.stroke();
         fc.fillStyle='#eadcc5';for(let i=0;i<3;i++){box(fc,cx-28+i*21,cy-21,15,21,'#eadcc5');box(fc,cx-23+i*21,cy-14,5,5,'#8a594c');}
         fc.font='bold 10px monospace';fc.textAlign='center';fc.fillStyle='#f7e6c6';fc.fillText(f.label,cx,cy+28);
+      }else if(f.kind==='game_table'&&f.gameType==='dominoes'){
+        box(fc,x-5,y+12,w+10,h,'#382a2d');box(fc,x-6,y,w+12,h,'#b78a59');box(fc,x,y+6,w,h-12,'#356451');
+        box(fc,x+8,y+h/2-1,w-16,2,'#d3b783');
+        for(let pair=0;pair<2;pair++){
+          const py=y+pair*h/2;
+          for(let i=0;i<2;i++){box(fc,x+w/2-24+i*25,py+12,20,28,'#eee3c6');box(fc,x+w/2-22+i*25,py+25,16,1,'#8e7858');box(fc,x+w/2-16+i*25,py+17,4,4,'#43392c');box(fc,x+w/2-16+i*25,py+30,4,4,'#43392c');}
+          fc.textAlign='center';fc.font='bold 9px monospace';fc.fillStyle='#f7e6c6';fc.fillText(`PAIR ${pair+1} · ALL FIVES`,x+w/2,py+53);
+        }
       }else{
         box(fc,x-5,y+12,w+10,h,'#382a2d');box(fc,x-6,y,w+12,h,'#b78a59');box(fc,x,y+6,w,h-12,f.kind==='game_table'?(f.available?'#487c69':'#665969'):'#9c6848');
         box(fc,x+6,y+12,w-12,3,'#ffffff19');

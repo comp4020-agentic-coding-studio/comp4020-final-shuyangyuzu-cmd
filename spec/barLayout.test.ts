@@ -235,8 +235,9 @@ it("every game table has exactly COLORS.length chairs, one per color, mutually e
   // the first.
   for (const t of GAME_TABLES) {
     const chairs = GAME_CHAIRS.filter((c) => c.tableId === t.id);
-    expect(chairs, `${t.id} chair count`).toHaveLength(COLORS.length);
-    expect(chairs.map((c) => c.color).sort()).toEqual([...COLORS].sort());
+    const expectedColors=t.gameType === "dominoes" ? COLORS.slice(0,4) : COLORS;
+    expect(chairs, `${t.id} chair count`).toHaveLength(expectedColors.length);
+    expect(chairs.map((c) => c.color).sort()).toEqual([...expectedColors].sort());
     const seen = new Set<string>();
     for (const c of chairs) {
       const key = `${c.x},${c.y}`;
@@ -284,16 +285,16 @@ it("the online row's own columns leave a real walkway beside every chair ring, r
   }
 });
 
-it("has nine tables in two labelled rows — 3 Vegas + 2 Hold’em playable, 4 reserved slots, all 2x2", () => {
+it("has nine tables in two labelled rows — 3 Vegas + 2 Hold’em + 2 dominoes playable, 2 reserved slots, all 2x2", () => {
   expect(GAME_TABLES).toHaveLength(9);
   expect(GAME_TABLES.filter((t) => t.gameType === "vegas")).toHaveLength(3); // 2 online + 1 NPC
-  expect(GAME_TABLES.filter((t) => t.available)).toHaveLength(5);
-  expect(GAME_TABLES.filter((t) => !t.available)).toHaveLength(4);
+  expect(GAME_TABLES.filter((t) => t.available)).toHaveLength(7);
+  expect(GAME_TABLES.filter((t) => !t.available)).toHaveLength(2);
   expect(GAME_TABLES.filter((t) => t.tableMode === "online")).toHaveLength(5);
   expect(GAME_TABLES.filter((t) => t.tableMode === "npc")).toHaveLength(4);
   // Vegas and Hold’em are playable; dominoes and blackjack remain reserved.
   for (const t of GAME_TABLES.filter((t) => t.available)) {
-    expect(["vegas","texas"]).toContain(t.gameType);
+    expect(["vegas","texas","dominoes"]).toContain(t.gameType);
   }
   for (const t of GAME_TABLES) {
     expect(t.w).toBe(2);

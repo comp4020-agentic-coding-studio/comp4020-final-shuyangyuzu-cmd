@@ -144,9 +144,9 @@ const CORE_FURNITURE: readonly Furniture[] = [
     y: 9,
     w: 2,
     h: 2,
-    label: "Dominoes Online — not yet open",
+    label: "All Fives Online",
     gameType: "dominoes",
-    available: false,
+    available: true,
     tableMode: "online",
   },
   {
@@ -193,9 +193,9 @@ const CORE_FURNITURE: readonly Furniture[] = [
     y: 14,
     w: 2,
     h: 2,
-    label: "Dominoes Offline — not yet open",
+    label: "All Fives Offline",
     gameType: "dominoes",
-    available: false,
+    available: true,
     tableMode: "npc",
   },
   {
@@ -286,7 +286,12 @@ export const GAME_CHAIRS = GAME_TABLES.flatMap((f) => f.gameType === "vegas"
     const displayY = f.y + f.h / 2 + 1.55 * Math.sin(angle);
     return { tableId: f.id, color, x: Math.floor(displayX), y: Math.floor(displayY), displayX, displayY };
   })
-  : [
+  : f.gameType === "dominoes" ? [
+    {tableId:f.id,color:'red',x:f.x-1,y:f.y},
+    {tableId:f.id,color:'blue',x:f.x+f.w,y:f.y},
+    {tableId:f.id,color:'green',x:f.x-1,y:f.y+1},
+    {tableId:f.id,color:'yellow',x:f.x+f.w,y:f.y+1},
+  ] : [
   { tableId: f.id, color: "red", x: f.x - 1, y: f.y },
   { tableId: f.id, color: "blue", x: f.x + f.w, y: f.y },
   { tableId: f.id, color: "green", x: f.x - 1, y: f.y + 1 },

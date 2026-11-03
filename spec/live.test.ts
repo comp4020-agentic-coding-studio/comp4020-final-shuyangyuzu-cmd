@@ -123,7 +123,9 @@ it("GET /api/bar/events pushes a fresh snapshot after a move, with an increasing
   // (a new, independently jittered spawn tile), not trying harder from
   // the same unlucky one, and each retry's own join is itself a
   // mutation that pushes its own event on this already-open stream.
-  const eventsPromise = readSseEvents(res, 8, 8000);
+  // Collect a bounded window: waiting for eight events depended on unrelated
+  // parallel tests producing traffic and could hang on a quiet server.
+  const eventsPromise = collectSseEvents(res, 1500);
   await new Promise((r) => setTimeout(r, 200));
 
   let moved = false;

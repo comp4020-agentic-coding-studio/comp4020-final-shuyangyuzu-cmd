@@ -26,6 +26,7 @@ import type { Color, PublicState } from "./types.ts";
 import { BUILD_VERSION, renderIndexHtml } from "./version.ts";
 import * as voice from "./voice.ts";
 import { registerPoker } from './pokerRoutes.ts';
+import { registerDomino } from './dominoRoutes.ts';
 import { getIceServers } from "./iceConfig.ts";
 
 // Every outgoing room payload carries `epoch` (SERVER_EPOCH, constant for
@@ -263,7 +264,7 @@ app.use("*", async (c, next) => {
 // shows, without asking everyone to hard-refresh.
 app.use("*", async (c, next) => {
   await next();
-  c.header("Cache-Control", c.req.path.startsWith('/api/poker/')?'private, no-store':"no-cache");
+  c.header("Cache-Control", (c.req.path.startsWith('/api/poker/')||c.req.path.startsWith('/api/domino/'))?'private, no-store':"no-cache");
 });
 
 // Best-effort claimed identity for a rejected request — read from the
@@ -290,7 +291,7 @@ async function claimedRejectionActor(c: Context): Promise<{ kind: "bar" | "room"
   const fromQuery = c.req.query("playerId");
   const id = fromBody || fromQuery;
   if (!id) return null;
-  const kind: "bar" | "room" = c.req.path.startsWith("/api/bar") || c.req.path.startsWith('/api/poker') ? "bar" : "room";
+  const kind: "bar" | "room" = c.req.path.startsWith("/api/bar") || c.req.path.startsWith('/api/poker') || c.req.path.startsWith('/api/domino') ? "bar" : "room";
   return { kind, id };
 }
 
@@ -1164,6 +1165,7 @@ setInterval(() => {
 // (serveStatic matches by pathname only), which is exactly what makes it
 // work as a cache-busting token rather than a routing concern.
 registerPoker(app,db);
+registerDomino(app,db);
 app.use("/*", serveStatic({ root: "./public" }));
 
 const port = Number(process.env.PORT ?? 8080);

@@ -1135,3 +1135,7 @@ Internal leaf turns use orthographic projection (perspective:none on both book a
 Turning faces must preserve the destination .book-slot > .book-page hierarchy; never give the rear face a raw page with separately recreated padding. Compensate the measured spine gap in the leaf landing translation. Verify content geometry, not only the outer frame.
 
 Started Vegas rooms must also expire silent human disconnects after the shared three-minute grace, based on room presence (joinedAt fallback), not only explicit departure rows. Reuse exitGame for NPC takeover/last-human closure and binding cleanup. Never count spectators or bar presence as a seated room heartbeat; retain short reconnect grace and exclude NPCs.
+
+## All Fives integration — Codex, 2026-11-04
+
+A domino fixture has four chairs, paired red/blue and green/yellow. Each pair owns an independent Online match; leaving or expiring one must not close the other. Offline matches are private NPC instances. Domino hands and stock order must never enter public bar snapshots: use the authenticated private view, which returns only the viewer's hand. Mutations require membership and the persisted version. Expire the three-minute grace before accepting a renewed heartbeat. NPC decisions use only their own hand and public ends. See ADR-dominoes.md for rules and the merge checklist with Claude's seated-eating branch. This isolated branch has not been deployed.

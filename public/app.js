@@ -25,6 +25,8 @@ const { createVoiceCall } = await import(`./voiceCall.js?v=${assetVersion}`);
 const voiceCall = createVoiceCall({ el });
 const { createPokerUI } = await import(`./poker.js?v=${assetVersion}`);
 const pokerUI = createPokerUI({el,navigate});
+const { createDominoUI } = await import(`./domino.js?v=${assetVersion}`);
+const dominoUI = createDominoUI({el,navigate});
 const COLORS = ["red", "blue", "green", "yellow", "purple"];
 const HEARTBEAT_MS = 5000; // comfortably under the server's default PRESENCE_STALE_MS (15s)
 let activeRoomCode = null;
@@ -211,6 +213,8 @@ function route() {
   }
   activeRoomCode=code;
   pokerUI.routeChanged();
+  dominoUI.routeChanged();
+  if(new URLSearchParams(location.search).has('domino')){dominoUI.mount();return;}
   if(new URLSearchParams(location.search).has('poker')){pokerUI.mount();return;}
   if (!code) {
     tavern.mount();
