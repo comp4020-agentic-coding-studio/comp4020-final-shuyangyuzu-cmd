@@ -32,6 +32,14 @@ export function bindDirectionHold(button, { onPress, onRelease, onTap }) {
 // a combined action look identical — only the window they sit inside
 // differs. Pure function of (kinds, progress 0..1), independently
 // testable without a real clock or a running animation frame.
+//
+// `localProgress` (2026-11 addition, Codex-reviewed "the plate just sits
+// there" gap) is the same 0..1 value `local` always was internally, now
+// exposed so drawEatingScene can interpolate a CONTINUOUS pick-up/eat/
+// put-down motion instead of only three discrete snapshots — `stage`
+// itself is unchanged and still exactly "lift" | "active" | "down" at the
+// same 0.25/0.75 thresholds, so nothing that only reads `.kind`/`.stage`
+// breaks.
 export function eatingPhaseAt(kinds, progress) {
   const n = kinds.length;
   if (n === 0) return null;
@@ -40,7 +48,36 @@ export function eatingPhaseAt(kinds, progress) {
   const kind = kinds[index];
   const local = clamped * n - index; // 0..1 within this kind's own share
   const stage = local < 0.25 ? 'lift' : local < 0.75 ? 'active' : 'down';
-  return { kind, stage };
+  return { kind, stage, localProgress: local };
+}
+
+// Continuous "lift it up -> consume it fully -> set it back down" curve
+// over one kind's own 0..1 local share (CLAUDE.md's seated-eating
+// correction: the plate/glass must visibly move and visibly empty, not
+// sit fixed while only a bite-counter or liquid-height snaps between a
+// couple of discrete values). LIFT_END/LOWER_START are shared between the
+// rise/fall interpolation and the consumption interpolation so the two
+// always agree: still rising/already lowering means "not yet eating/
+// drinking," fully raised means "actively consuming."
+const EAT_LIFT_END = 0.18;
+const EAT_LOWER_START = 0.82;
+
+/** 0 at the very start of this kind's share (still on the table), ramps
+ * to 1 by EAT_LIFT_END (fully raised to mouth height), holds at 1 through
+ * the active window, then ramps back to 0 after EAT_LOWER_START (back
+ * down on the table, now empty). */
+function liftFactor(local) {
+  if (local <= EAT_LIFT_END) return local / EAT_LIFT_END;
+  if (local >= EAT_LOWER_START) return 1 - (local - EAT_LOWER_START) / (1 - EAT_LOWER_START);
+  return 1;
+}
+
+/** 0 while still being lifted (nothing eaten/drunk yet), ramps linearly
+ * to 1 across the actively-held window, then holds at 1 while being
+ * lowered back down (already empty by the time it reaches the table). */
+function consumedFactor(local) {
+  const span = EAT_LOWER_START - EAT_LIFT_END;
+  return Math.max(0, Math.min(1, (local - EAT_LIFT_END) / span));
 }
 
 // The seated eating/drinking cutscene (CLAUDE.md's seated-eating
@@ -52,6 +89,23 @@ export function eatingPhaseAt(kinds, progress) {
 // function, not a method on the big closure below, since it only needs
 // its 2D context, the colour/skin hexes already in scope, and plain
 // numbers — nothing from the rest of createTavern's internal state.
+//
+// 2026-11 correction (Codex review): the plate/glass used to sit fixed in
+// one spot with only the arm/liquid-height snapping between a few
+// discrete poses — "pick up the plate, eat, put the empty plate down,
+// pick up the drink, drink it, put the glass down" wasn't actually
+// happening, just three still frames per item. Every prop that moves now
+// interpolates continuously from liftFactor/consumedFactor above: the
+// plate/glass itself visibly rises off the table to mouth height, the
+// food/liquid visibly shrinks away while it's held up there, and it
+// visibly lowers back down already empty — a real, continuous motion
+// rather than a snap between poses, matching the request's own
+// pick-up/finish/put-down wording exactly. `box(x, y, w, h, colour)` is
+// intentionally a 5-argument helper closing over this function's own
+// `ctx` — a prior round's bug was calling it with a stray leading `ctx`
+// argument copied from this file's OTHER `box(c, x, y, w, h, colour)`
+// helper (used for the live map canvas); every call site below passes
+// exactly five arguments, never six.
 function drawEatingScene(ctx, vw, vh, { color, skin, phase, seatKind, reduceMotion }) {
   const cx = vw / 2, cy = vh / 2;
   const box = (x, y, w, h, c) => { ctx.fillStyle = c; ctx.fillRect(x, y, w, h); };
@@ -80,32 +134,43 @@ function drawEatingScene(ctx, vw, vh, { color, skin, phase, seatKind, reduceMoti
   box(-s * 1.1, -s * 0.4, s * 2.2, s * 1.4, color); // torso
   box(-s * 0.7, -s * 1.9, s * 1.4, s * 1.5, skin); // head
   box(-s * 0.9, -s * 2.05, s * 1.8, s * 0.55, '#43302d'); // hair
-  const plateY = -s * 0.15;
-  const wobble = reduceMotion ? 0 : Math.sin(Date.now() / 160) * s * 0.06;
+  const tableY = -s * 0.15; // resting height on the table/counter top
+  const local = Math.max(0, Math.min(1, phase.localProgress ?? 0));
+  const lift = liftFactor(local);
+  const consumed = consumedFactor(local);
+  // A small chewing/sipping wobble only while actually, actively holding
+  // the item up near the mouth (lift close to 1) and not mid the
+  // rise/lower transit — skipped entirely under prefers-reduced-motion
+  // (CLAUDE.md: a less-motion pose is fine, a frozen illusion of eating
+  // is not required to move).
+  const activelyHeld = local > EAT_LIFT_END && local < EAT_LOWER_START;
+  const wobble = reduceMotion || !activelyHeld ? 0 : Math.sin(Date.now() / 160) * s * 0.05;
+
   if (phase.kind === 'meal') {
-    // Plate, always resting in the same spot; a growing row of "bites
-    // taken" is the visible food/eaten change the brief asks for, not
-    // just a static plate with a countdown.
+    const liftedY = tableY - s * 0.85;
+    const plateY = tableY - (tableY - liftedY) * lift + wobble;
+    // The plate itself moves — from resting on the table, up to mouth
+    // height, and back down — rather than staying fixed while only an
+    // arm/bite-count changes elsewhere.
     box(-s * 0.9, plateY, s * 1.8, s * 0.25, '#f5ecd9');
-    const bites = phase.stage === 'down' ? 3 : phase.stage === 'active' ? 2 : 0;
-    for (let i = 0; i < bites; i++) box(-s * 0.6 + i * s * 0.5, plateY + s * 0.03, s * 0.3, s * 0.12, '#8a5f3f');
-    // Forearm + fork reaching from plate to mouth — raised during
-    // lift/active, lowered again for down; a small animated wobble while
-    // actively eating gives a recognisable chewing motion (skipped
-    // entirely under prefers-reduced-motion — CLAUDE.md: a less-motion
-    // pose is fine, a frozen illusion of eating is not required to move).
-    const armUp = phase.stage !== 'down';
-    const armY = armUp ? plateY - s * 0.5 + (phase.stage === 'active' ? wobble : 0) : plateY - s * 0.05;
-    box(s * 0.6, armY, s * 0.22, s * 0.6, skin);
-    box(s * 0.6 + s * 0.04, armY - s * 0.12, s * 0.14, s * 0.14, '#cfd3d8'); // fork head
+    // The food remaining on the plate visibly shrinks away as it's eaten
+    // (a single shrinking portion, not a few discrete bite-marks) —
+    // centred on the plate, width scales from full down to nothing.
+    const foodW = s * 1.4 * (1 - consumed);
+    if (foodW > 0.5) box(-foodW / 2, plateY + s * 0.03, foodW, s * 0.12, '#8a5f3f');
+    // Forearm + fork, following the plate's own current height so the
+    // whole gesture reads as one continuous reach-up/reach-down motion.
+    box(s * 0.6, plateY - s * 0.35, s * 0.22, s * 0.55, skin);
+    box(s * 0.6 + s * 0.04, plateY - s * 0.47, s * 0.14, s * 0.14, '#cfd3d8'); // fork head
   } else {
-    // Glass, raised to mouth height while active/lift, lowered for down;
-    // the visible liquid level drops once "sipped" — the drink's own
-    // recognisable change over the plate's bites.
+    const liftedY = tableY - s * 0.85;
+    const glassY = tableY - (tableY - liftedY) * lift + wobble;
     const glassX = s * 0.72;
-    const raised = phase.stage !== 'down';
-    const glassY = raised ? plateY - s * 0.5 + (phase.stage === 'active' ? wobble : 0) : plateY;
-    const liquidH = phase.stage === 'down' ? s * 0.08 : s * 0.3;
+    // Liquid level drops continuously as the glass is held up, rather
+    // than snapping between two heights — never fully to zero, so an
+    // "empty" glass still reads as a glass rather than disappearing.
+    const fullH = s * 0.3, emptyH = s * 0.04;
+    const liquidH = fullH - (fullH - emptyH) * consumed;
     box(glassX, glassY, s * 0.28, s * 0.5, '#f5ecd988'); // glass outline/shell
     box(glassX, glassY + (s * 0.5 - liquidH), s * 0.28, liquidH, '#e4bf7e'); // remaining liquid
     box(glassX + s * 0.02, glassY - s * 0.55, s * 0.2, s * 0.55, skin); // arm holding it

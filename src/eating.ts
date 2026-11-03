@@ -117,3 +117,71 @@ export function writeEatingLock(
   ).run(playerId, JSON.stringify(kinds), idempotencyKey, startedAt, endsAt);
   return { kinds, startedAt, endsAt };
 }
+
+// ---- Durable per-request idempotency record (2026-11 correction) ----
+//
+// bar_eating_actions above is a LOCK keyed by player_id alone — it only
+// ever remembers the most recent request's own key, and it effectively
+// stops existing (for isEating's purposes) the instant ends_at passes.
+// A retried request carrying an OLDER action's own key could therefore
+// fall straight through startEating's "already eating?" check once that
+// lock naturally expired, landing in the "start something new" branch
+// instead — consuming whatever happens to be held *right now* (which, by
+// the time a slow retry lands, could be a completely different,
+// newly-ordered item) and restarting the clock. Codex reproduced this
+// directly; see spec/eating.test.ts's own regression tests.
+//
+// bar_eating_requests is a second, DURABLE table — one permanent row per
+// (player, idempotencyKey) that ever actually started a new action,
+// holding exactly the result that request produced, checked first and
+// unconditionally before the lock's own active/expired state is even
+// considered. A row here is never deleted and never time-sensitive the
+// way the lock deliberately is: a request's own key found here always
+// returns that same original result, whether the lock it created is
+// still active, has long since expired, or the whole process has
+// restarted since — this is what makes "the same logical request, no
+// matter how late it arrives" and "a genuinely new request" distinguish
+// unambiguously, instead of leaning on a lock whose job is a different,
+// time-limited thing.
+
+interface EatingRequestRow {
+  kinds: string;
+  started_at: string;
+  ends_at: string;
+}
+
+/** The durable, permanent result for this exact (player, idempotencyKey)
+ * pair, if this key has ever been used to actually start an action for
+ * this identity — regardless of whether that action's own lock is still
+ * active. Checked by startEating before anything else. */
+export function eatingRequestResult(
+  db: Database.Database,
+  playerId: string,
+  idempotencyKey: string,
+): EatingAction | null {
+  const row = db
+    .prepare(`SELECT kinds, started_at, ends_at FROM bar_eating_requests WHERE player_id = ? AND idempotency_key = ?`)
+    .get(playerId, idempotencyKey) as EatingRequestRow | undefined;
+  return row ? { kinds: JSON.parse(row.kinds), startedAt: row.started_at, endsAt: row.ends_at } : null;
+}
+
+/** Records the permanent result for a request that genuinely started a
+ * new action — called by startEating in the same transaction as
+ * writeEatingLock, right after it, so the two always agree. Isolated per
+ * (player_id, idempotency_key): a literal key collision between two
+ * different identities (plausible only if a client ever generated a
+ * non-unique key, since the real client always scopes it by playerId) can
+ * never return or affect the other identity's own result, because the
+ * primary key includes player_id. */
+export function recordEatingRequest(
+  db: Database.Database,
+  playerId: string,
+  idempotencyKey: string,
+  action: EatingAction,
+  now = new Date(),
+): void {
+  db.prepare(
+    `INSERT INTO bar_eating_requests (player_id, idempotency_key, kinds, started_at, ends_at, created_at) VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(player_id, idempotency_key) DO NOTHING`,
+  ).run(playerId, idempotencyKey, JSON.stringify(action.kinds), action.startedAt, action.endsAt, now.toISOString());
+}

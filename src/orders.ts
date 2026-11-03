@@ -15,7 +15,15 @@ import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import { logAction, markIdentityVerified, transact } from "./actionLog.ts";
 import { requireBarSession } from "./bar.ts";
-import { activeEatingRow, isEating, writeEatingLock, type EatingAction, type EatingKind } from "./eating.ts";
+import {
+  activeEatingRow,
+  eatingRequestResult,
+  isEating,
+  recordEatingRequest,
+  writeEatingLock,
+  type EatingAction,
+  type EatingKind,
+} from "./eating.ts";
 import { restoreStamina, STAMINA_MEAL_RESTORE, STAMINA_DRINK_RESTORE } from "./stamina.ts";
 
 export class OrderError extends Error {
@@ -446,7 +454,16 @@ export function placeOrder(
  * contract (and the 15 tests in spec/orders.test.ts that already pin it
  * down) is unchanged by the seated-eating feature. The seat check, the
  * eating-lock check, and the ~8-second animation all live one level up,
- * in startEating. */
+ * in startEating.
+ *
+ * NOT reachable over HTTP as of the 2026-11 correction: `POST
+ * /api/orders/consume` used to expose this function directly with no
+ * seat/lock check in front of it, which let a standing patron bypass the
+ * entire seated-eating feature (a real bug Codex found and reproduced —
+ * see CLAUDE.md's seated-eating correction and
+ * spec/ordersHttp.test.ts). That route is gone; this function now has
+ * exactly one caller, startEating, and exists purely as an internal
+ * building block. */
 export function consumeHeldItem(
   db: Database.Database,
   barPlayerId: string,
@@ -532,7 +549,27 @@ function heldToStart(db: Database.Database, barPlayerId: string): HeldItemRow[] 
  * the time it finishes (see src/eating.ts's own header for why this is
  * the design, not a shortcut). Idempotent the same way placeOrder is: a
  * retried start with the same idempotencyKey returns the already-started
- * action rather than re-consuming anything or restarting the clock. */
+ * action rather than re-consuming anything or restarting the clock —
+ * including after that action's own lock has long since naturally
+ * expired, or the process has restarted, since the check below is
+ * against a durable, permanent record (src/eating.ts's
+ * eatingRequestResult/recordEatingRequest), never the lock row alone.
+ *
+ * 2026-11 correction (Codex found and reproduced this as a real bug,
+ * fixed here): a retried request carrying an OLD action's own key used to
+ * be checked only against the LOCK's own idempotency_key column — which
+ * only ever remembers the single most recent request and stops mattering
+ * the instant the lock naturally expires. A late or duplicated retry of
+ * the FIRST request, arriving after that lock had already expired (and
+ * possibly after the player had already ordered something new), would
+ * fall through to the "start a new action" branch below and consume
+ * whatever happens to be held *now* — a completely different item than
+ * the one that request actually meant, restarting the clock and silently
+ * misattributing a fresh restore to a stale request. The fix: check the
+ * durable per-(player, key) record FIRST, unconditionally, before the
+ * lock's own active/expired state is even considered — see
+ * spec/eating.test.ts's own regression tests for the exact scenario this
+ * closes. */
 export function startEating(
   db: Database.Database,
   barPlayerId: string,
@@ -543,9 +580,20 @@ export function startEating(
   if (!idempotencyKey) throw new OrderError("missing idempotency key", "bad_request", 400);
 
   return transact(db, () => {
+    // Checked first and unconditionally: a key that already started a
+    // real action always returns that exact original result, regardless
+    // of whether its own lock is still active, has since expired, or the
+    // row behind it no longer exists at all.
+    const pastResult = eatingRequestResult(db, barPlayerId, idempotencyKey);
+    if (pastResult) return pastResult;
+
     const existing = activeEatingRow(db, barPlayerId);
     if (existing?.active) {
-      if (existing.row.idempotency_key === idempotencyKey) return toEatingAction(existing.row);
+      // existing.row.idempotency_key can only ever be the CURRENT lock's
+      // own key (bar_eating_actions is overwritten per-player on every
+      // new start) — the pastResult check above already handles any
+      // older key durably, so this branch only needs to refuse a
+      // genuinely different, concurrent request while still locked.
       throw new OrderError("you're already eating or drinking", "eating_active", 409);
     }
 
@@ -562,6 +610,7 @@ export function startEating(
     for (const row of toConsume) consumeHeldItemLocked(db, barPlayerId, row.id);
     const kinds = toConsume.map((r) => r.kind as EatingKind);
     const action = writeEatingLock(db, barPlayerId, kinds, idempotencyKey);
+    recordEatingRequest(db, barPlayerId, idempotencyKey, action);
 
     logAction(db, {
       action: "start_eating",
@@ -573,10 +622,6 @@ export function startEating(
 
     return action;
   });
-}
-
-function toEatingAction(row: { kinds: string; started_at: string; ends_at: string }): EatingAction {
-  return { kinds: JSON.parse(row.kinds), startedAt: row.started_at, endsAt: row.ends_at };
 }
 
 export { currentEatingAction, isEating } from "./eating.ts";

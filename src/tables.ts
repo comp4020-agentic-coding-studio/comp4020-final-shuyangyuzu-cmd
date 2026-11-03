@@ -605,8 +605,25 @@ export function departActiveTable(db: Database.Database, barPlayerId: string, ba
  * the table. A no-op if there's no pending departure at all. */
 export function resumeActiveTable(db: Database.Database, barPlayerId: string, barSessionSecret: string): void {
   requireBarSession(db, barPlayerId, barSessionSecret);
+  // Mid an eating/drinking animation (CLAUDE.md's seated-eating section):
+  // a deliberate "I'm actually back" resume is exactly the kind of
+  // re-entry into a bound game this identity cannot genuinely be doing
+  // while physically seated elsewhere eating/drinking — rooms.resumeGame
+  // itself refuses this too (reached via the lower-level rooms.resumeGame
+  // call just below, for a session that calls it directly), but checked
+  // here as well, before even resolving the seat, same wrapping pattern
+  // createTableRoom/joinTableRoom/startNpcGame already use for a
+  // rooms.ts-level RoomError.
+  if (isEating(db, barPlayerId)) throw new TableError("finish eating or drinking first", "eating_active", 409);
   const seat=resolveActiveSeat(db,barPlayerId);
-  if(seat)rooms.resumeGame(db,seat.code,seat.playerId,seat.sessionSecret);
+  if(seat){
+    try {
+      rooms.resumeGame(db,seat.code,seat.playerId,seat.sessionSecret);
+    } catch (err) {
+      if (err instanceof RoomError) throw new TableError(err.message, err.code, err.status);
+      throw err;
+    }
+  }
   const existing = db.prepare(`SELECT table_id FROM table_departures WHERE bar_player_id = ?`).get(barPlayerId) as
     | { table_id: string }
     | undefined;

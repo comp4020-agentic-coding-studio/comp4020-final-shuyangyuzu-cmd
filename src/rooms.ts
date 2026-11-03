@@ -7,6 +7,7 @@ import type Database from "better-sqlite3";
 import { randomBytes, randomInt, randomUUID } from "node:crypto";
 import { logAction, markIdentityVerified, shortIdFor, transact } from "./actionLog.ts";
 import { freshDeck } from "./deck.ts";
+import { isEating } from "./eating.ts";
 import { applyPlacement, applyRoll, finalStandings, GameError, startGame as startGameLogic, startNextRound, TOTAL_ROUNDS } from "./game.ts";
 import { chooseNpcPlacement } from "./npc.ts";
 import {
@@ -869,6 +870,12 @@ export function departChoice(db: Database.Database, code:string, playerId:string
 
 export function resumeGame(db: Database.Database, code:string, playerId:string, sessionSecret:string):void {
   const row=loadOpenRoom(db,code);requireSession(db,row.id,playerId,sessionSecret);
+  // 2026-11 correction: a deliberate "I'm actually back" resume is
+  // exactly the kind of re-entry into a bound game CLAUDE.md's
+  // seated-eating section means to block while the lock is active — this
+  // identity cannot simultaneously be physically returning to the table
+  // and mid the seated-only eating animation at a real dining/stool seat.
+  refuseIfEating(db,playerId);
   const state:RoomState=JSON.parse(row.state_json);
   if(!state.pendingRequests.some(p=>p.id===playerId)&&(!state.players[playerId]||state.players[playerId].controller==='npc'))throw new RoomError('your seat has already been released','player_removed',409);
   transact(db,()=>{
@@ -1224,9 +1231,42 @@ function refuseIfNpcControlled(state: RoomState, playerId: string): void {
   }
 }
 
+/** Refuses any game action for a room `playerId` whose BAR identity
+ * (resolved via `bar_players.current_game_player_id`, the same link
+ * src/position.ts and src/tables.ts already use) is currently mid an
+ * eating/drinking lock (CLAUDE.md's seated-eating section) — 2026-11
+ * correction, Codex-found/reproduced bug.
+ *
+ * createTableRoom/joinTableRoom/startNpcGame already refuse *starting* a
+ * new game while eating, but that only guards the entry points for
+ * something new — it says nothing about a room session (a second,
+ * already-open tab, kept perfectly valid the whole time a patron is
+ * physically away from the table) acting on a game this identity is
+ * ALREADY bound to. The eating lock requires standing up from the Vegas
+ * chair and physically sitting at a real dining/stool seat first (an
+ * already-started game's own turn-taking continues under the same
+ * away-from-table machinery CLAUDE.md's leave/exit states describe), so
+ * "bound to a started game" and "currently eating" are never
+ * contradictory facts about the same identity at the same moment — this
+ * is exactly the gap a second open tab could exploit. Checked inside
+ * roll/place/resumeGame themselves, the same way refuseIfNpcControlled
+ * above is, rather than only at the join/create layer. A room `playerId`
+ * with no bound bar identity at all (an invite-only direct room, or a
+ * player who never went through the bar) has nothing to check here and
+ * is never refused on this basis. */
+function refuseIfEating(db: Database.Database, playerId: string): void {
+  const bp = db.prepare(`SELECT id FROM bar_players WHERE current_game_player_id = ?`).get(playerId) as
+    | { id: string }
+    | undefined;
+  if (bp && isEating(db, bp.id)) {
+    throw new RoomError("finish eating or drinking first", "eating_active", 409);
+  }
+}
+
 export function roll(db: Database.Database, code: string, playerId: string, sessionSecret: string): void {
   const row = loadOpenRoom(db, code);
   requireSession(db, row.id, playerId, sessionSecret);
+  refuseIfEating(db, playerId);
 
   transact(db, () => {
     const fresh = db
@@ -1269,6 +1309,7 @@ export function place(
 ): void {
   const row = loadOpenRoom(db, code);
   requireSession(db, row.id, playerId, sessionSecret);
+  refuseIfEating(db, playerId);
 
   transact(db, () => {
     const fresh = db
@@ -1368,6 +1409,7 @@ export function requireSeatedHumanPlayer(
 export function nextRound(db:Database.Database,code:string,playerId:string,sessionSecret:string,expectedRound:number):void {
   const row=loadOpenRoom(db,code);requireSession(db,row.id,playerId,sessionSecret);
   if(row.host_player_id!==playerId)throw new RoomError('only the host can continue to the next round','not_host',403);
+  refuseIfEating(db,playerId);
   transact(db,()=>{
     const fresh=getRoomRow(db,code), state:RoomState=JSON.parse(fresh.state_json);
     refuseIfNpcControlled(state,playerId);

@@ -17,8 +17,9 @@ import { BAR_SEATS, GAME_CHAIRS } from "../src/barLayout.ts";
 import { openDb } from "../src/db.ts";
 import { EATING_DURATION_MS, isEating } from "../src/eating.ts";
 import { OrderError, placeOrder, startEating } from "../src/orders.ts";
+import { RoomError, approveJoin, getPublicState, place, resumeGame, roll, setReady, startGame } from "../src/rooms.ts";
 import { currentStamina } from "../src/stamina.ts";
-import { createTableRoom, startNpcGame, TableError } from "../src/tables.ts";
+import { createTableRoom, joinTableRoom, resumeActiveTable, startNpcGame, TableError } from "../src/tables.ts";
 
 let dir: string;
 let db: Database.Database;
@@ -218,4 +219,253 @@ it("refuses a wrong session secret for starting to eat", () => {
   seatPlayer(p.playerId, p.sessionSecret);
   placeOrder(db, p.playerId, p.sessionSecret, "soda", null, "k1");
   expect(() => startEating(db, p.playerId, "wrong-secret", "e1")).toThrow();
+});
+
+// ---- Regression: Codex reproduced this directly (2026-11 review) ----
+//
+// startEating's idempotency check only ever looked at activeEatingRow's
+// own `active` flag — true only while `ends_at > now`. Once the lock had
+// naturally expired, a retried request carrying the FIRST action's own
+// idempotency key fell straight through to the ordinary "start a new
+// action" path, which collects whatever is CURRENTLY held — including an
+// item ordered after the first action already finished — and consumes
+// it, restoring stamina again and restarting the 8-second clock. A
+// network retry of the first "eat" request arriving late (after the
+// animation had already finished and the player had ordered something
+// new) would therefore silently eat/drink the NEW item and replay the
+// cutscene, never touching the original request's own already-settled
+// item at all.
+it("retrying the FIRST eat request after its lock naturally expired must not consume a newly-ordered item or restart the clock (Codex-reproduced)", () => {
+  const p = joinBar(db, "Retry After Expiry", "red", "warm");
+  seatPlayer(p.playerId, p.sessionSecret);
+  const firstDrink = placeOrder(db, p.playerId, p.sessionSecret, "soda", null, "k-drink-1");
+  const first = startEating(db, p.playerId, p.sessionSecret, "eat-key-1");
+  expect(first.kinds).toEqual(["drink"]);
+
+  // The 8-second window has genuinely passed — the same lazy-expiry
+  // simulation spec/eating.test.ts's own "the lock expires naturally"
+  // case above already uses.
+  db.prepare(`UPDATE bar_eating_actions SET ends_at = ? WHERE player_id = ?`).run(
+    new Date(Date.now() - 1000).toISOString(),
+    p.playerId,
+  );
+  expect(isEating(db, p.playerId)).toBe(false);
+
+  // The player orders something new in the meantime.
+  const secondDrink = placeOrder(db, p.playerId, p.sessionSecret, "coffee", null, "k-drink-2");
+  const staminaBeforeRetry = currentStamina(db, p.playerId);
+
+  // A delayed/duplicated network retry of the ORIGINAL request arrives.
+  const retried = startEating(db, p.playerId, p.sessionSecret, "eat-key-1");
+
+  // Must return the original action's own result, unchanged — never a
+  // freshly-started one.
+  expect(retried.startedAt).toBe(first.startedAt);
+  expect(retried.endsAt).toBe(first.endsAt);
+  expect(retried.kinds).toEqual(first.kinds);
+
+  // The newly-ordered coffee must still be sitting there, untouched.
+  const secondRow = db.prepare(`SELECT state FROM held_items WHERE id = ?`).get(secondDrink.id) as { state: string };
+  expect(secondRow.state).toBe("held");
+
+  // No second restore happened.
+  expect(currentStamina(db, p.playerId)).toBeCloseTo(staminaBeforeRetry, 2);
+
+  // The original drink's own row is unaffected by the retry (still
+  // exactly as consumed as it already was).
+  const firstRow = db.prepare(`SELECT state FROM held_items WHERE id = ?`).get(firstDrink.id) as { state: string };
+  expect(firstRow.state).toBe("consumed");
+});
+
+it("retrying the FIRST eat request survives the lock row no longer existing at all (e.g. a fresh db reopen) and still returns the original result, never a second consume", () => {
+  const p = joinBar(db, "Retry After Reopen", "red", "warm");
+  seatPlayer(p.playerId, p.sessionSecret);
+  placeOrder(db, p.playerId, p.sessionSecret, "soda", null, "k-drink-1");
+  const first = startEating(db, p.playerId, p.sessionSecret, "eat-key-1");
+
+  // Expire the lock, then actually delete the row outright — simulating
+  // a sweep/restart scenario where nothing short-lived survives, only the
+  // already-committed held_items/stamina state (which is the real
+  // "nothing pending to lose" guarantee src/eating.ts's own header
+  // describes) and whatever durable record of the request itself exists.
+  db.prepare(`DELETE FROM bar_eating_actions WHERE player_id = ?`).run(p.playerId);
+  const newDrink = placeOrder(db, p.playerId, p.sessionSecret, "coffee", null, "k-drink-2");
+  const staminaBefore = currentStamina(db, p.playerId);
+
+  const retried = startEating(db, p.playerId, p.sessionSecret, "eat-key-1");
+  expect(retried.startedAt).toBe(first.startedAt);
+  expect(retried.endsAt).toBe(first.endsAt);
+
+  const row = db.prepare(`SELECT state FROM held_items WHERE id = ?`).get(newDrink.id) as { state: string };
+  expect(row.state).toBe("held");
+  expect(currentStamina(db, p.playerId)).toBeCloseTo(staminaBefore, 2);
+});
+
+it("a retried eat request after an actual process restart (the db file closed and reopened) still returns the original result, never a second consume", () => {
+  const dbPath = join(dir, "vegas.db");
+  const p = joinBar(db, "Real Reopen", "red", "warm");
+  seatPlayer(p.playerId, p.sessionSecret);
+  placeOrder(db, p.playerId, p.sessionSecret, "soda", null, "k-drink-1");
+  const first = startEating(db, p.playerId, p.sessionSecret, "eat-key-1");
+  db.prepare(`UPDATE bar_eating_actions SET ends_at = ? WHERE player_id = ?`).run(
+    new Date(Date.now() - 1000).toISOString(),
+    p.playerId,
+  );
+
+  // A genuine process restart: close this connection entirely and open a
+  // fresh one against the same file on disk, the same way openDb() runs
+  // on every real server start — exercising the actual migration path
+  // (bar_eating_requests must already exist, or be created, on this
+  // reopen) rather than just the in-process row deletion above.
+  db.close();
+  db = openDb(dbPath);
+
+  const newDrink = placeOrder(db, p.playerId, p.sessionSecret, "coffee", null, "k-drink-2");
+  const staminaBefore = currentStamina(db, p.playerId);
+
+  const retried = startEating(db, p.playerId, p.sessionSecret, "eat-key-1");
+  expect(retried.startedAt).toBe(first.startedAt);
+  expect(retried.endsAt).toBe(first.endsAt);
+  expect(retried.kinds).toEqual(["drink"]);
+
+  const row = db.prepare(`SELECT state FROM held_items WHERE id = ?`).get(newDrink.id) as { state: string };
+  expect(row.state).toBe("held");
+  expect(currentStamina(db, p.playerId)).toBeCloseTo(staminaBefore, 2);
+});
+
+it("a genuinely different player's identical idempotency key is isolated — never returns or affects another player's eating action", () => {
+  const a = joinBar(db, "Key Isolation A", "red", "warm");
+  const b = joinBar(db, "Key Isolation B", "blue", "warm");
+  seatPlayer(a.playerId, a.sessionSecret, 0);
+  seatPlayer(b.playerId, b.sessionSecret, 1);
+  placeOrder(db, a.playerId, a.sessionSecret, "soda", null, "k-a");
+  placeOrder(db, b.playerId, b.sessionSecret, "coffee", null, "k-b");
+
+  const sharedKey = "shared-key-collision";
+  const aAction = startEating(db, a.playerId, a.sessionSecret, sharedKey);
+  const bAction = startEating(db, b.playerId, b.sessionSecret, sharedKey);
+
+  // Each identity's own action is independent — the same literal key
+  // string used by two different players must never cross-return or
+  // cross-affect the other's result.
+  expect(aAction.kinds).toEqual(["drink"]);
+  expect(bAction.kinds).toEqual(["drink"]);
+  expect(isEating(db, a.playerId)).toBe(true);
+  expect(isEating(db, b.playerId)).toBe(true);
+  const aHeld = db.prepare(`SELECT state FROM held_items WHERE player_id = ?`).all(a.playerId) as { state: string }[];
+  const bHeld = db.prepare(`SELECT state FROM held_items WHERE player_id = ?`).all(b.playerId) as { state: string }[];
+  expect(aHeld.every((h) => h.state === "consumed")).toBe(true);
+  expect(bHeld.every((h) => h.state === "consumed")).toBe(true);
+});
+
+// ---- Regression: multi-tab/existing-game actions during an eating lock
+// (Codex review, 2026-11) ----
+//
+// A bar identity who already has a started Vegas game bound to them
+// (current_table_id/current_game_player_id) can genuinely be away from
+// that table — sitting at a real dining/stool seat — while the room's own
+// game session (a second browser tab, kept open the whole time) is still
+// perfectly valid and never itself checked isEating. createTableRoom/
+// joinTableRoom/startNpcGame already refuse a NEW game while eating, but
+// that only guards the "start/join something" entry points — it says
+// nothing about acting on a game this identity is ALREADY bound to.
+// Before this fix, rooms.roll/place/resumeGame had no isEating check of
+// their own at all, so the second tab's room session could roll, place,
+// or explicitly resume the table right through an active eating lock.
+function startedTwoPlayerGame() {
+  const host = joinBar(db, "Eating Host", "red", "warm");
+  const created = createTableRoom(db, "vegas-1", host.playerId, host.sessionSecret, "red");
+  const guestBar = joinBar(db, "Eating Guest", "blue", "warm");
+  const guest = joinTableRoom(db, "vegas-1", guestBar.playerId, guestBar.sessionSecret, "yellow");
+  approveJoin(db, created.code, created.playerId, created.sessionSecret, guest.playerId);
+  setReady(db, created.code, created.playerId, created.sessionSecret, true);
+  setReady(db, created.code, guest.playerId, guest.sessionSecret, true);
+  startGame(db, created.code, created.playerId, created.sessionSecret);
+  return { host, created, guestBar, guest };
+}
+
+// The server randomly chooses round 1's starting player (CLAUDE.md:
+// "Round 1 chooses its starter using server RNG"), so these tests work
+// out which of host/guest's own ROOM player ids actually holds the turn
+// and gate that SAME bar identity, rather than assuming it's always the
+// host — a test that just always picked the host would silently pass for
+// the wrong reason half the time (gating a player who was never going to
+// act anyway) instead of actually exercising the bug.
+function roomAndBarSessionFor(
+  roomPlayerId: string,
+  host: { playerId: string; sessionSecret: string },
+  bar: { host: { playerId: string; sessionSecret: string }; guestBar: { playerId: string; sessionSecret: string } },
+  guest: { playerId: string; sessionSecret: string },
+) {
+  const isHost = roomPlayerId === host.playerId;
+  return {
+    room: isHost ? host : guest,
+    bar: isHost ? bar.host : bar.guestBar,
+  };
+}
+
+it("rolling for an existing, already-started game is refused while this identity's eating lock is active (multi-tab)", () => {
+  const { host, created, guestBar, guest } = startedTwoPlayerGame();
+  const starting = getPublicState(db, created.code).currentPlayerId!;
+  const { room, bar } = roomAndBarSessionFor(starting, created, { host, guestBar }, guest);
+
+  // Whichever bar identity actually holds the current turn walks back to
+  // the bar (a separate tab/view from the room session above) and sits
+  // down to eat — the room session itself is untouched, exactly like a
+  // second open tab would be.
+  seatPlayer(bar.playerId, bar.sessionSecret);
+  placeOrder(db, bar.playerId, bar.sessionSecret, "soda", null, "k1");
+  startEating(db, bar.playerId, bar.sessionSecret, "eat-key-1");
+  expect(isEating(db, bar.playerId)).toBe(true);
+
+  expect(() => roll(db, created.code, room.playerId, room.sessionSecret)).toThrow(RoomError);
+  const after = getPublicState(db, created.code);
+  expect(after.lastRoll).toBeNull(); // nothing actually rolled
+});
+
+it("placing for an existing, already-started game is refused while this identity's eating lock is active (multi-tab)", () => {
+  const { host, created, guestBar, guest } = startedTwoPlayerGame();
+  const starting = getPublicState(db, created.code).currentPlayerId!;
+  const { room, bar } = roomAndBarSessionFor(starting, created, { host, guestBar }, guest);
+
+  // Roll for real first (before eating starts) so there's a legal value
+  // to place, isolating this test to the `place` gate specifically.
+  roll(db, created.code, room.playerId, room.sessionSecret);
+  const rolled = getPublicState(db, created.code);
+  const value = rolled.lastRoll!.values[0];
+
+  seatPlayer(bar.playerId, bar.sessionSecret);
+  placeOrder(db, bar.playerId, bar.sessionSecret, "soda", null, "k1");
+  startEating(db, bar.playerId, bar.sessionSecret, "eat-key-1");
+
+  expect(() => place(db, created.code, room.playerId, room.sessionSecret, value)).toThrow(RoomError);
+  const after = getPublicState(db, created.code);
+  expect(after.currentPlayerId).toBe(starting); // the turn never actually advanced
+});
+
+it("explicitly resuming an existing table binding (tables.resumeActiveTable / rooms.resumeGame) is refused while eating", () => {
+  const { host, created } = startedTwoPlayerGame();
+
+  // Step away physically (starts the 3-minute away-from-table clock) —
+  // this is the actual precondition for "Return to your game"/resume to
+  // have anything to do.
+  seatPlayer(host.playerId, host.sessionSecret);
+  const departureBefore = db.prepare(`SELECT 1 FROM table_departures WHERE bar_player_id = ?`).get(host.playerId);
+  expect(departureBefore).toBeTruthy();
+
+  placeOrder(db, host.playerId, host.sessionSecret, "soda", null, "k1");
+  startEating(db, host.playerId, host.sessionSecret, "eat-key-1");
+
+  // The bar-level "I'm actually back" action must not silently succeed
+  // and clear the departure/resume the game while the eating lock is
+  // active — it's exactly the kind of "other entry point back into the
+  // game" the standing instruction asks to be covered, not just the
+  // literal join/create table routes.
+  expect(() => resumeActiveTable(db, host.playerId, host.sessionSecret)).toThrow(TableError);
+  const departureAfter = db.prepare(`SELECT 1 FROM table_departures WHERE bar_player_id = ?`).get(host.playerId);
+  expect(departureAfter).toBeTruthy(); // never cleared
+
+  // The lower-level rooms.resumeGame, as the room session's own tab might
+  // call it directly, must independently refuse too.
+  expect(() => resumeGame(db, created.code, created.playerId, created.sessionSecret)).toThrow(RoomError);
 });

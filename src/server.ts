@@ -1002,31 +1002,23 @@ app.post("/api/orders/place", async (c) => {
   return c.json(result, 201);
 });
 
-// Retained as the low-level consume primitive (still exactly what
-// spec/orders.test.ts exercises) but no longer the client's own eat/
-// drink entry point — public/menuBook.js's "Holding" page and its Eat/
-// Drink buttons are gone (CLAUDE.md's seated-eating section); the
-// overhead prompt now calls /api/orders/eat below instead, which is
-// seated- and lock-gated and plays the ~8s animation. This endpoint has
-// no seat or lock check of its own (matching src/orders.ts's own
-// consumeHeldItem contract, unchanged) and is kept only so a client that
-// somehow still calls it behaves exactly as it always has — not a path
-// the shipped UI uses anymore.
-app.post("/api/orders/consume", async (c) => {
-  const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody & { heldItemId?: unknown };
-  const result = orders.consumeHeldItem(
-    db,
-    barPlayerId(body),
-    barSessionSecret(body),
-    typeof body.heldItemId === "string" ? body.heldItemId : "",
-  );
-  // Stamina just changed — push a fresh snapshot the same way every
-  // other bar mutation already does, so the HUD's stamina chip and the
-  // character panel update live for this identity's other open tabs too.
-  const snap = barSnapshot(live.bumpBarSeq());
-  live.publishBar(snap);
-  return c.json(result);
-});
+// REMOVED (2026-11, Codex-found bug, Claude fix): this route used to
+// expose src/orders.ts's consumeHeldItem directly, with no seat or
+// eating-lock check of its own — a standing patron holding an item could
+// call it over plain HTTP and restore stamina instantly, with none of the
+// seated-eating feature's actual rules (a real dining/stool seat, the
+// ~8s server-controlled animation lock) ever applying. consumeHeldItem
+// itself is unchanged and still exactly what spec/orders.test.ts pins
+// down — it is startEating's own internal, already-authenticated
+// primitive (src/orders.ts), never meant to enforce the seat/lock rule on
+// its own, and that was always true. The bug was this route handing that
+// primitive to the public internet with nothing in front of it. Rather
+// than bolt a seat/lock check onto a second public entry point (which
+// would just be a second copy of startEating's own rule to keep in sync),
+// the route is gone outright: /api/orders/eat below is the one and only
+// public way to ever consume a held item, for every client, with no
+// other path left to bypass it. See CLAUDE.md's seated-eating correction
+// and spec/ordersHttp.test.ts's own regression test.
 
 // The actual seated-eating entry point (CLAUDE.md's seated-eating
 // section): requires a real dining/stool seat and consumes every

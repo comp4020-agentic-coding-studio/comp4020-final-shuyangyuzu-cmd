@@ -220,6 +220,47 @@ it("adds the poker away column to an already-existing poker_members table, prese
   } finally { migrated.close(); }
 });
 
+// 2026-11 correction: bar_eating_requests is a brand-new table added
+// alongside the pre-existing bar_eating_actions lock, so CREATE TABLE IF
+// NOT EXISTS is genuinely sufficient (same reasoning as bar_seats/
+// table_departures above) — still verified against a real pre-existing
+// database (one that already has bar_eating_actions from the original
+// seated-eating round, but predates this round's durable-request table)
+// rather than assumed safe, per this file's own established discipline.
+function createPreEatingRequestsSchema(path: string): void {
+  const db = new Database(path);
+  db.exec(`
+    CREATE TABLE bar_players (
+      id TEXT PRIMARY KEY, nickname TEXT NOT NULL, color TEXT NOT NULL, skin TEXT NOT NULL DEFAULT 'warm',
+      x INTEGER NOT NULL, y INTEGER NOT NULL, current_table_id TEXT, current_seat_id TEXT, current_game_player_id TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE bar_eating_actions (
+      player_id TEXT PRIMARY KEY REFERENCES bar_players(id),
+      kinds TEXT NOT NULL, idempotency_key TEXT, started_at TEXT NOT NULL, ends_at TEXT NOT NULL
+    );
+    INSERT INTO bar_players VALUES ('old-eater', 'Old Eater', 'red', 'warm', 5, 5, NULL, NULL, NULL, '2026-10-29');
+    INSERT INTO bar_eating_actions VALUES ('old-eater', '["drink"]', 'pre-existing-key', '2026-10-29T00:00:00.000Z', '2026-10-29T00:00:08.000Z');
+  `);
+  db.close();
+}
+
+it("adds bar_eating_requests to a database that already has bar_eating_actions, without disturbing the existing lock row", () => {
+  const path = join(dir, "vegas.db");
+  createPreEatingRequestsSchema(path);
+
+  const db = openDb(path);
+  const names = (
+    db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>
+  ).map((r) => r.name);
+  expect(names).toContain("bar_eating_requests");
+
+  // The pre-existing lock row from before this round survives untouched.
+  const lock = db.prepare(`SELECT kinds, idempotency_key FROM bar_eating_actions WHERE player_id = 'old-eater'`).get();
+  expect(lock).toEqual({ kinds: '["drink"]', idempotency_key: "pre-existing-key" });
+  db.close();
+});
+
 it("preserves a table's current_room_id across a reopen rather than resetting the seed", () => {
   const path = join(dir, "vegas.db");
   createPreBarSchema(path);
