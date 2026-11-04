@@ -717,6 +717,27 @@ export function rejoin(db: Database.Database, code: string, playerId: string, se
   requireSession(db, row.id, playerId, sessionSecret);
 }
 
+/** Mints a brand-new `sessions.session_secret` for this room player id
+ * and invalidates the old one — used only by src/accounts.ts's login
+ * takeover (2026-11-04). CLAUDE.md's existing "never return the
+ * server's room secret" rule is about never handing an OLD, already-
+ * issued secret back out through some fallback path; this is the
+ * opposite operation — issuing a genuinely NEW one, which the caller
+ * must already have independently verified (via account_characters,
+ * never via the stale secret itself) belongs to the account asking for
+ * it. A no-op-returning-null for a playerId with no `sessions` row at
+ * all (a pending join request has a session row too, so this still
+ * works for a not-yet-seated pending requester; only a playerId that was
+ * never given a room session at all — shouldn't happen for anything
+ * `current_game_player_id` ever points at — returns null). */
+export function rotateSession(db: Database.Database, playerId: string): string | null {
+  const exists = db.prepare(`SELECT 1 FROM sessions WHERE player_id = ?`).get(playerId);
+  if (!exists) return null;
+  const newSecret = newSessionSecret();
+  db.prepare(`UPDATE sessions SET session_secret = ? WHERE player_id = ?`).run(newSecret, playerId);
+  return newSecret;
+}
+
 export function heartbeat(db: Database.Database, code: string, playerId: string, sessionSecret: string): void {
   const row = loadOpenRoom(db, code);
   requireSession(db, row.id, playerId, sessionSecret);

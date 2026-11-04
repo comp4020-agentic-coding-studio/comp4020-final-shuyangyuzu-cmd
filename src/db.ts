@@ -9,6 +9,7 @@ import { dirname } from "node:path";
 import { installTransactionLogging } from "./actionLog.ts";
 import { migratePoker } from './pokerSchema.ts';
 import { migrateDomino } from './dominoSchema.ts';
+import { migrateAccounts } from './accountsSchema.ts';
 import { findFreeTile } from "./bar.ts";
 import { BAR_SEATS, GAME_TABLES, defaultSpawn, isWalkingFloor } from "./barLayout.ts";
 import { initStamina } from "./stamina.ts";
@@ -29,6 +30,7 @@ export function openDb(path: string): Database.Database {
   migrate(db);
   migratePoker(db);
   migrateDomino(db);
+  migrateAccounts(db);
   seedBarFurniture(db);
   seedBarSeats(db);
   // Any bar identity that existed before this feature shipped needs its

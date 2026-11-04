@@ -27,6 +27,8 @@ import { BUILD_VERSION, renderIndexHtml } from "./version.ts";
 import * as voice from "./voice.ts";
 import { registerPoker } from './pokerRoutes.ts';
 import { registerDomino } from './dominoRoutes.ts';
+import { registerAccounts } from './accountRoutes.ts';
+import { AccountError } from './accounts.ts';
 import { getIceServers } from "./iceConfig.ts";
 
 // Every outgoing room payload carries `epoch` (SERVER_EPOCH, constant for
@@ -296,7 +298,7 @@ async function claimedRejectionActor(c: Context): Promise<{ kind: "bar" | "room"
 }
 
 app.onError(async (err, c) => {
-  if (err instanceof RoomError || err instanceof BarError || err instanceof TableError || err instanceof ChatError || err instanceof OrderError) {
+  if (err instanceof RoomError || err instanceof BarError || err instanceof TableError || err instanceof ChatError || err instanceof OrderError || err instanceof AccountError) {
     const status = err.status as 400 | 403 | 404 | 409 | 410 | 413 | 429;
     const actor = await claimedRejectionActor(c);
     // `wasIdentityVerified()` is real evidence, not an inference from the
@@ -1188,6 +1190,7 @@ setInterval(() => {
 // work as a cache-busting token rather than a routing concern.
 registerPoker(app,db);
 registerDomino(app,db);
+registerAccounts(app,db);
 app.use("/*", serveStatic({ root: "./public" }));
 
 const port = Number(process.env.PORT ?? 8080);

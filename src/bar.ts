@@ -219,6 +219,24 @@ export function requireBarSession(db: Database.Database, playerId: string, sessi
   markIdentityVerified();
 }
 
+/** Mints a brand-new bar_sessions.session_secret for this identity and
+ * invalidates the old one, atomically — used only by src/accounts.ts's
+ * login takeover (2026-11-04's explicit multi-device credential-rotation
+ * decision, CLAUDE.md), never by any ordinary bar action. The caller
+ * must already have independently verified that whoever is asking for
+ * this rotation is the legitimate account controlling this identity
+ * (accounts.ts does this via account_characters, never via the OLD
+ * bar session_secret itself — the whole point is that a stale device's
+ * cached secret must stop working the instant this runs). Returns the
+ * new secret, which the caller hands back to the NEW device only. */
+export function rotateBarSession(db: Database.Database, playerId: string): string {
+  const exists = db.prepare(`SELECT 1 FROM bar_players WHERE id = ?`).get(playerId);
+  if (!exists) throw new BarError("no such bar identity", "player_not_found", 404);
+  const newSecret = randomBytes(24).toString("base64url");
+  db.prepare(`UPDATE bar_sessions SET session_secret = ? WHERE player_id = ?`).run(newSecret, playerId);
+  return newSecret;
+}
+
 /** Re-authenticates and refreshes this identity's own heartbeat — and,
  * because a tile that was legitimately free while this identity was
  * disconnected may since have been claimed by someone else (a stale

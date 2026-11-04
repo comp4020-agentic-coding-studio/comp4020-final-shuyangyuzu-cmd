@@ -19,6 +19,7 @@ import { afterEach, beforeEach, expect, it } from "vitest";
 import { openDb } from "../src/db.ts";
 import { BAR_SEATS, GAME_TABLES, defaultSpawn } from "../src/barLayout.ts";
 import { joinBar } from "../src/bar.ts";
+import { register } from "../src/accounts.ts";
 
 it("repositions occupied chairs with their patron, and moves only floor patrons obstructed by the layout", () => {
   const path = join(dir, "seated-layout.db");
@@ -282,4 +283,66 @@ it("preserves a table's current_room_id across a reopen rather than resetting th
   };
   expect(row.current_room_id).toBe("some-room-id");
   db2.close();
+});
+
+// 2026-11-04: accounts (src/accountsSchema.ts) adds bar_players.account_id
+// to an already-existing bar_players table, exactly the same migration
+// shape as `skin`/`current_game_player_id` above — built against a
+// database that predates the accounts feature entirely (has bar_players,
+// no account_id column, no accounts/account_sessions/account_characters
+// tables at all), per this file's own standing rule that passing the
+// rest of the suite proves nothing about this specific failure mode.
+function createPreAccountsSchema(path: string): void {
+  const db = new Database(path);
+  db.exec(`
+    CREATE TABLE bar_players (
+      id TEXT PRIMARY KEY, nickname TEXT NOT NULL, color TEXT NOT NULL, skin TEXT NOT NULL DEFAULT 'warm',
+      x INTEGER NOT NULL, y INTEGER NOT NULL, current_table_id TEXT, current_seat_id TEXT, current_game_player_id TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE bar_sessions (player_id TEXT PRIMARY KEY REFERENCES bar_players(id), session_secret TEXT NOT NULL);
+    INSERT INTO bar_players VALUES ('old-guest', 'Old Guest', 'red', 'warm', 5, 5, NULL, NULL, NULL, '2026-10-01');
+    INSERT INTO bar_sessions VALUES ('old-guest', 'old-secret');
+  `);
+  db.close();
+}
+
+it("adds bar_players.account_id and the account tables to a database that predates accounts entirely, preserving the existing guest row", () => {
+  const path = join(dir, "vegas.db");
+  createPreAccountsSchema(path);
+
+  const db = openDb(path);
+  try {
+    const columns = (db.prepare("PRAGMA table_info(bar_players)").all() as Array<{ name: string }>).map((c) => c.name);
+    expect(columns).toContain("account_id");
+    const names = (db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>).map(
+      (r) => r.name,
+    );
+    expect(names).toContain("accounts");
+    expect(names).toContain("account_sessions");
+    expect(names).toContain("account_characters");
+
+    // The pre-existing guest identity survives untouched, with the new
+    // column defaulting to NULL (a guest, not controlled by any account)
+    // rather than erroring or being dropped.
+    const guest = db.prepare(`SELECT id, nickname, account_id FROM bar_players WHERE id = 'old-guest'`).get();
+    expect(guest).toEqual({ id: "old-guest", nickname: "Old Guest", account_id: null });
+  } finally {
+    db.close();
+  }
+});
+
+it("opening an accounts-era database twice (idempotent migration) doesn't error and doesn't disturb an already-registered account", () => {
+  const path = join(dir, "vegas.db");
+  const db1 = openDb(path);
+  const result = register(db1, "IdempotentUser", "correct horse battery staple", null);
+  db1.close();
+
+  const db2 = openDb(path);
+  try {
+    const row = db2.prepare(`SELECT username FROM accounts WHERE id = ?`).get(result.accountId) as { username: string };
+    expect(row.username).toBe("IdempotentUser");
+  } finally {
+    db2.close();
+  }
 });

@@ -74,10 +74,11 @@ import type Database from "better-sqlite3";
 import { AsyncLocalStorage } from "node:async_hooks";
 
 export interface ActionLogActor {
-  /** Which identity layer this actor belongs to — "bar" (tavern identity)
-   * or "room" (a game room's own player record). CLAUDE.md: these are
-   * always two separate identity spaces, never merged. */
-  kind: "bar" | "room";
+  /** Which identity layer this actor belongs to — "bar" (tavern identity),
+   * "room" (a game room's own player record), or "account" (a logged-in
+   * account, a third layer above the bar identity — 2026-11-04). CLAUDE.md:
+   * these are always separate identity spaces, never merged. */
+  kind: "bar" | "room" | "account";
   /** The real id, truncated to 8 characters — enough to tell two
    * same-nickname identities apart on screen, never the whole UUID (no
    * operational reason to print the rest, and shorter is easier to read

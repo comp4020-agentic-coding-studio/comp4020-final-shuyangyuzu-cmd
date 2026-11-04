@@ -339,6 +339,18 @@ export function getActiveSeat(
   return seat ? { tableId: seat.tableId, roomCode: seat.code, pending: seat.pending } : null;
 }
 
+/** The Vegas room player id currently bound to this bar identity, if
+ * any — used only by src/accounts.ts's login takeover, which needs the
+ * room-side playerId to rotate that room's own `sessions.session_secret`
+ * (rooms.rotateSession). Deliberately never returns the existing
+ * session_secret itself (CLAUDE.md's standing rule) — rotation mints a
+ * brand-new one instead, which the caller then hands only to the newly-
+ * logged-in device. */
+export function activeVegasRoomPlayerId(db: Database.Database, barPlayerId: string): { code: string; playerId: string } | null {
+  const seat = resolveActiveSeat(db, barPlayerId);
+  return seat ? { code: seat.code, playerId: seat.playerId } : null;
+}
+
 /** A lost browser room secret must not prevent its authenticated bar
  * owner leaving. Match the requested room so an old error tab can never
  * accidentally exit a newer game this person has since joined. */
