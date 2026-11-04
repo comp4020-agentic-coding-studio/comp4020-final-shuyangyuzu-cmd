@@ -36,6 +36,26 @@ async function signal(code: string, session: Session, callId: string, toPlayerId
   return postJson(`/api/rooms/${code}/voice/signal`, { ...session, callId, toPlayerId, signalType, data });
 }
 
+// 2026-11-05 fix: this file's one test needing a genuinely *pending*
+// (not auto-seated) requester has to go through the bar's real physical
+// Vegas-table flow (src/tables.ts) — createRoom/joinRoom above is the
+// unbound /api/rooms path and has no "pending" concept at all. There are
+// only 2 real online Vegas tables, shared by every HTTP spec file that
+// uses this flow (spec/tables.test.ts, spec/accountGameTakeover.test.ts,
+// spec/accountsHttp.test.ts) — this helper mirrors spec/tables.test.ts's
+// own anEmptyVegasTable rather than hardcoding "vegas-2", which failed
+// outright whenever another concurrently-run file already held it. The
+// test itself now disbands afterward too (it never did before), so this
+// file doesn't leave a table permanently consumed for every other spec
+// file sharing the same running server.
+async function anEmptyVegasTable(): Promise<string> {
+  const res = await fetch(new URL("/api/bar/tables", baseUrl));
+  const tables = (await res.json()) as Array<{ id: string; gameType: string; tableMode: string; status: string }>;
+  const empty = tables.find((t) => t.gameType === "vegas" && t.tableMode === "online" && t.status === "empty");
+  if (!empty) throw new Error("no empty online Vegas table available for this test — only 2 exist");
+  return empty.id;
+}
+
 async function createThreePlayerRoom(): Promise<{ code: string; a: Session; b: Session; c: Session }> {
   const a = await createRoom(baseUrl, "Alice", "red");
   const bRes = await joinRoom(baseUrl, a.code, "Bob", "blue");
@@ -192,20 +212,26 @@ it("a pending (not-yet-approved) join request cannot start or join a call", asyn
   // refuse it the same way any other seated-player-only action does.
   // Uses the bar's online-table flow (src/tables.ts), the only path that
   // produces a genuinely pending (not auto-seated) request.
+  const tableId = await anEmptyVegasTable();
   const hostPatron = await postJson("/api/bar/join", { nickname: "VoiceHost", color: "teal", skin: "warm" });
   expect(hostPatron.status).toBe(201);
-  const created = await postJson("/api/bar/tables/vegas-2/create", { ...hostPatron.body, color: "red" });
+  const created = await postJson(`/api/bar/tables/${tableId}/create`, { ...hostPatron.body, color: "red" });
   expect(created.status).toBe(201);
 
   const guestPatron = await postJson("/api/bar/join", { nickname: "VoiceGuest", color: "orange", skin: "tan" });
   expect(guestPatron.status).toBe(201);
-  const requested = await postJson("/api/bar/tables/vegas-2/join", { ...guestPatron.body, color: "blue" });
+  const requested = await postJson(`/api/bar/tables/${tableId}/join`, { ...guestPatron.body, color: "blue" });
   expect(requested.status).toBe(201);
   expect(requested.body.pending).toBe(true);
   const pendingSession: Session = { playerId: requested.body.playerId, sessionSecret: requested.body.sessionSecret };
 
   const res = await startCall(created.body.code, pendingSession);
   expect(res.status).toBe(410); // player_removed: a pending request is never a seated Player
+
+  // Free the table back up — this test previously never disbanded,
+  // permanently consuming one of only 2 shared online Vegas tables for
+  // every other spec file running against the same server.
+  await postJson(`/api/rooms/${created.body.code}/disband`, { ...created.body, confirm: true });
 });
 
 it("cross-room: a valid session for one room cannot act on another room's call", async () => {
