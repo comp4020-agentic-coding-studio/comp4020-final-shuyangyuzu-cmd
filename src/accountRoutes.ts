@@ -90,6 +90,15 @@ function takeOverCharacter(db: Database.Database, barPlayerId: string): {
   return { barSessionSecret, vegasRoom };
 }
 
+/** `takeOverCharacter`'s own rotation, called where nobody needs the
+ * freshly-minted secrets back (logout has no "new device" to report them
+ * to) — a thin, differently-named wrapper purely so each call site reads
+ * as what it's actually doing (revoking vs. handing off), not two
+ * independent implementations of the same rotation to keep in sync. */
+function revokeCharacterCredentials(db: Database.Database, barPlayerId: string): void {
+  takeOverCharacter(db, barPlayerId);
+}
+
 export function registerAccounts(app: Hono, db: Database.Database): void {
   app.post("/api/accounts/register", async (c) => {
     requireSameOrigin(c);
@@ -119,7 +128,17 @@ export function registerAccounts(app: Hono, db: Database.Database): void {
     // brand-new character needs its freshly-minted secret reported back.
     const barSessionSecret = result.freshBarSecret ?? undefined;
     return c.json(
-      { accountId: result.accountId, username: result.username, barPlayerId: result.barPlayerId, barSessionSecret },
+      {
+        accountId: result.accountId,
+        username: result.username,
+        barPlayerId: result.barPlayerId,
+        barSessionSecret,
+        // Plaintext, shown exactly this once — the server never has
+        // another copy of these after this response (only the hash is
+        // stored). The client's own responsibility to display clearly
+        // and let the user save them.
+        recoveryCodes: result.recoveryCodes,
+      },
       201,
     );
   });
@@ -178,11 +197,7 @@ export function registerAccounts(app: Hono, db: Database.Database): void {
     // login mints its own). This is what keeps a cached/leaked copy of
     // this browser's own old bar secret from continuing to act as this
     // character after the user explicitly signed out.
-    if (barPlayerId) {
-      bar.rotateBarSession(db, barPlayerId);
-      const activeVegas = tables.activeVegasRoomPlayerId(db, barPlayerId);
-      if (activeVegas) rooms.rotateSession(db, activeVegas.playerId);
-    }
+    if (barPlayerId) revokeCharacterCredentials(db, barPlayerId);
     return c.json({ ok: true });
   });
 
@@ -208,5 +223,66 @@ export function registerAccounts(app: Hono, db: Database.Database): void {
       deleteCookie(c, COOKIE_NAME, { path: "/" });
       return c.json({ account: null });
     }
+  });
+
+  /** Forgotten-password recovery (2026-11-04, recovery-code design — the
+   * user's own explicit choice: no email system exists in this app, and
+   * this works entirely locally with zero external configuration). No
+   * cookie is read or required here — by definition, a user resetting a
+   * forgotten password cannot be expected to still hold a valid account
+   * session; a currently-valid, unused recovery code is the ONLY proof
+   * accepted (CLAUDE.md: "绝不能只凭用户名、昵称或本机 localStorage 允许
+   * 重置"). On success, logs the new device in immediately (a fresh
+   * cookie) and rotates the bar/room credentials exactly like a login
+   * takeover would — the account's own character/stamina/items/game data
+   * is completely untouched; only the password, account sessions, and
+   * recovery-code batch are ever written here. */
+  app.post("/api/accounts/reset-password", async (c) => {
+    requireSameOrigin(c);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      username?: unknown;
+      recoveryCode?: unknown;
+      newPassword?: unknown;
+      confirmNewPassword?: unknown;
+    };
+    const username = asString(body.username);
+    const recoveryCode = asString(body.recoveryCode);
+    const newPassword = asString(body.newPassword);
+    const confirmNewPassword = asString(body.confirmNewPassword);
+    if (newPassword !== confirmNewPassword) {
+      throw new AccountError("passwords do not match", "password_mismatch", 400);
+    }
+    const result = accounts.resetPasswordWithRecoveryCode(db, username, recoveryCode, newPassword);
+    setCookie(c, COOKIE_NAME, result.token, cookieOptions());
+    if (!result.barPlayerId) {
+      return c.json({ accountId: result.accountId, username: result.username, barPlayerId: null, newRecoveryCodes: result.newRecoveryCodes });
+    }
+    const takeover = takeOverCharacter(db, result.barPlayerId);
+    return c.json({
+      accountId: result.accountId,
+      username: result.username,
+      barPlayerId: result.barPlayerId,
+      barSessionSecret: takeover.barSessionSecret,
+      vegasRoom: takeover.vegasRoom,
+      // A fresh batch replacing the one the just-used code came from
+      // (CLAUDE.md: "使用后失效并提供新的恢复码") — shown exactly once,
+      // the same as registration's own first batch.
+      newRecoveryCodes: result.newRecoveryCodes,
+    });
+  });
+
+  /** Lets an already-logged-in user voluntarily re-roll their own
+   * recovery-code batch (e.g. they used one, or suspect the old batch
+   * leaked) — requires the CURRENT password (CLAUDE.md: "旧账号补设恢复
+   * 方式必须验证当前密码"), authenticated via the ordinary account
+   * cookie like any other logged-in action. */
+  app.post("/api/accounts/recovery-codes/regenerate", async (c) => {
+    requireSameOrigin(c);
+    const token = getCookie(c, COOKIE_NAME);
+    const info = accounts.verifyAccountSession(db, token);
+    const body = (await c.req.json().catch(() => ({}))) as { currentPassword?: unknown };
+    const currentPassword = asString(body.currentPassword);
+    const recoveryCodes = accounts.regenerateRecoveryCodes(db, info.accountId, currentPassword);
+    return c.json({ recoveryCodes });
   });
 }

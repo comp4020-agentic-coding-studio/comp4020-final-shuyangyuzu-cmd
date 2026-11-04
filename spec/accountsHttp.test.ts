@@ -243,3 +243,115 @@ it("explicit logout also rotates an actively-bound Vegas room's own session_secr
     confirm: true,
   });
 });
+
+// ---- Password recovery via recovery codes, the HTTP layer (the server
+// logic itself is covered directly in spec/accounts.test.ts) — cookie
+// issuance on a successful reset, and the credential-revocation side
+// effects that only exist at this layer. ----
+
+it("registration returns a batch of recovery codes in the HTTP response", async () => {
+  const username = uniqueUsername("httprecov");
+  const password = "correct horse battery staple";
+  const reg = await postJson("/api/accounts/register", { username, password, confirmPassword: password });
+  expect(reg.status).toBe(201);
+  expect(reg.body.recoveryCodes).toHaveLength(8);
+});
+
+it("resetting a password with a valid code logs the caller in immediately (sets a working cookie)", async () => {
+  const username = uniqueUsername("httpreset");
+  const password = "correct horse battery staple";
+  const reg = await postJson("/api/accounts/register", { username, password, confirmPassword: password });
+  const newPassword = "a totally different password 123";
+  const reset = await postJson("/api/accounts/reset-password", {
+    username,
+    recoveryCode: reg.body.recoveryCodes[0],
+    newPassword,
+    confirmNewPassword: newPassword,
+  });
+  expect(reset.status).toBe(200);
+  expect(reset.cookie).toBeTruthy();
+  const me = await getJson("/api/accounts/me", reset.cookie);
+  expect(me.body.account.username).toBe(username);
+});
+
+it("resetting a password revokes the OLD device's account cookie too, via the multi-device-style session wipe", async () => {
+  const username = uniqueUsername("httpresetcookie");
+  const password = "correct horse battery staple";
+  const reg = await postJson("/api/accounts/register", { username, password, confirmPassword: password });
+  const oldCookie = reg.cookie;
+
+  const meBefore = await getJson("/api/accounts/me", oldCookie);
+  expect(meBefore.body.account).not.toBeNull();
+
+  const newPassword = "yet another password 456";
+  await postJson("/api/accounts/reset-password", {
+    username,
+    recoveryCode: reg.body.recoveryCodes[0],
+    newPassword,
+    confirmNewPassword: newPassword,
+  });
+
+  const meAfter = await getJson("/api/accounts/me", oldCookie);
+  expect(meAfter.body.account).toBeNull();
+});
+
+it("resetting a password rejects mismatched confirm-password before ever touching a recovery code", async () => {
+  const username = uniqueUsername("httpresetmismatch");
+  const password = "correct horse battery staple";
+  const reg = await postJson("/api/accounts/register", { username, password, confirmPassword: password });
+  const res = await postJson("/api/accounts/reset-password", {
+    username,
+    recoveryCode: reg.body.recoveryCodes[0],
+    newPassword: "one password here",
+    confirmNewPassword: "a different password here",
+  });
+  expect(res.status).toBe(400);
+  expect(res.body.error).toBe("password_mismatch");
+  // The code must still be unused — confirm it still works for a real reset.
+  const realReset = await postJson("/api/accounts/reset-password", {
+    username,
+    recoveryCode: reg.body.recoveryCodes[0],
+    newPassword: "the actual new password 789",
+    confirmNewPassword: "the actual new password 789",
+  });
+  expect(realReset.status).toBe(200);
+});
+
+it("a wrong recovery code is refused with 401 and never reveals whether the username exists", async () => {
+  const username = uniqueUsername("httpresetwrong");
+  const password = "correct horse battery staple";
+  await postJson("/api/accounts/register", { username, password, confirmPassword: password });
+  const wrongForReal = await postJson("/api/accounts/reset-password", {
+    username,
+    recoveryCode: "ZZZZ-ZZZZ",
+    newPassword: "some new password",
+    confirmNewPassword: "some new password",
+  });
+  const wrongForFake = await postJson("/api/accounts/reset-password", {
+    username: uniqueUsername("neverregistered"),
+    recoveryCode: "ZZZZ-ZZZZ",
+    newPassword: "some new password",
+    confirmNewPassword: "some new password",
+  });
+  expect(wrongForReal.status).toBe(401);
+  expect(wrongForFake.status).toBe(401);
+  expect(wrongForReal.body.error).toBe(wrongForFake.body.error);
+  expect(wrongForReal.body.message).toBe(wrongForFake.body.message);
+});
+
+it("regenerating recovery codes requires an authenticated cookie and the current password", async () => {
+  const username = uniqueUsername("httpregen");
+  const password = "correct horse battery staple";
+  const reg = await postJson("/api/accounts/register", { username, password, confirmPassword: password });
+
+  const noCookie = await postJson("/api/accounts/recovery-codes/regenerate", { currentPassword: password });
+  expect(noCookie.status).toBe(401);
+
+  const wrongPassword = await postJson("/api/accounts/recovery-codes/regenerate", { currentPassword: "wrong one" }, reg.cookie);
+  expect(wrongPassword.status).toBe(401);
+
+  const correct = await postJson("/api/accounts/recovery-codes/regenerate", { currentPassword: password }, reg.cookie);
+  expect(correct.status).toBe(200);
+  expect(correct.body.recoveryCodes).toHaveLength(8);
+  expect(correct.body.recoveryCodes.every((c: string) => !reg.body.recoveryCodes.includes(c))).toBe(true);
+});

@@ -11,7 +11,16 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
-import { AccountError, characterFor, login, logout, register, verifyAccountSession } from "../src/accounts.ts";
+import {
+  AccountError,
+  characterFor,
+  login,
+  logout,
+  regenerateRecoveryCodes,
+  register,
+  resetPasswordWithRecoveryCode,
+  verifyAccountSession,
+} from "../src/accounts.ts";
 import { joinBar, updateAppearance } from "../src/bar.ts";
 import { openDb } from "../src/db.ts";
 import { currentStamina } from "../src/stamina.ts";
@@ -207,4 +216,113 @@ it("eating lock, held items, and position are all preserved across login/logout 
   // The character's own state (stamina already restored by startEating
   // above) is completely untouched by the login itself.
   expect(currentStamina(db, guest.playerId)).toBeCloseTo(100, 2);
+});
+
+// ---- Password recovery via recovery codes (2026-11-04, the user's own
+// explicit choice over email+link — this app has no email system, and
+// this works entirely locally with zero external configuration). ----
+
+it("registering issues a batch of 8 unique, correctly-formatted recovery codes", () => {
+  const result = register(db, "Monica", "correct horse battery staple", null);
+  expect(result.recoveryCodes).toHaveLength(8);
+  expect(new Set(result.recoveryCodes).size).toBe(8); // all unique
+  for (const code of result.recoveryCodes) {
+    expect(code).toMatch(/^[A-Z0-9]{4}-[A-Z0-9]{4}$/);
+  }
+});
+
+it("resets a forgotten password with a valid, unused recovery code", () => {
+  const result = register(db, "Nancy", "correct horse battery staple", null);
+  const reset = resetPasswordWithRecoveryCode(db, "Nancy", result.recoveryCodes[0], "a brand new password 123");
+  expect(reset.username).toBe("Nancy");
+  expect(reset.barPlayerId).toBe(result.barPlayerId);
+  expect(reset.token).toBeTruthy();
+  // The new password actually works; the old one no longer does.
+  expect(() => login(db, "Nancy", "a brand new password 123")).not.toThrow();
+  expect(() => login(db, "Nancy", "correct horse battery staple")).toThrow(/incorrect username or password/);
+});
+
+it("a recovery code is case- and dash-insensitive, since the user is typing it back by hand", () => {
+  const result = register(db, "Oscar", "correct horse battery staple", null);
+  const code = result.recoveryCodes[0];
+  const messyVariant = code.toLowerCase().replace("-", "");
+  expect(() => resetPasswordWithRecoveryCode(db, "Oscar", messyVariant, "another new password 456")).not.toThrow();
+});
+
+it("a used recovery code cannot be reused, and a fresh batch replaces the entire old one", () => {
+  const result = register(db, "Patricia", "correct horse battery staple", null);
+  const usedCode = result.recoveryCodes[0];
+  const reset = resetPasswordWithRecoveryCode(db, "Patricia", usedCode, "first reset password 111");
+  expect(reset.newRecoveryCodes).toHaveLength(8);
+  // The just-used code is gone from the new batch...
+  expect(reset.newRecoveryCodes).not.toContain(usedCode);
+  // ...and cannot be used again, even though it was never literally
+  // deleted from account_recovery_codes (used_at is set, not DELETEd).
+  const err = expectAccountError(() => resetPasswordWithRecoveryCode(db, "Patricia", usedCode, "second reset password 222"));
+  expect(err.code).toBe("invalid_recovery_code");
+  // Every OTHER old code from the original batch is also dead — the
+  // whole batch was replaced, not just the one that got used.
+  for (const oldCode of result.recoveryCodes.slice(1)) {
+    expect(() => resetPasswordWithRecoveryCode(db, "Patricia", oldCode, "third reset password 333")).toThrow(/invalid or has already been used/);
+  }
+});
+
+it("an incorrect recovery code, and a reset against a nonexistent account, fail with the identical generic message — no account-existence enumeration", () => {
+  const result = register(db, "Quentin", "correct horse battery staple", null);
+  const wrongCode = expectAccountError(() => resetPasswordWithRecoveryCode(db, "Quentin", "ZZZZ-ZZZZ", "new password here"));
+  const noSuchAccount = expectAccountError(() => resetPasswordWithRecoveryCode(db, "NobodyRegisteredThis", "ZZZZ-ZZZZ", "new password here"));
+  expect(wrongCode.code).toBe(noSuchAccount.code);
+  expect(wrongCode.message).toBe(noSuchAccount.message);
+  void result;
+});
+
+it("resetting a password revokes every other account_sessions row for that account, the same multi-device policy a fresh login already enforces", () => {
+  const result = register(db, "Rachel", "correct horse battery staple", null);
+  const oldSessionToken = result.token;
+  expect(() => verifyAccountSession(db, oldSessionToken)).not.toThrow();
+  resetPasswordWithRecoveryCode(db, "Rachel", result.recoveryCodes[0], "freshly reset password 789");
+  expect(() => verifyAccountSession(db, oldSessionToken)).toThrow(/session has ended/);
+});
+
+it("resetting a password never touches the account's own character/stamina/held-items data — only password, sessions, and recovery codes change", () => {
+  const guest = joinBar(db, "Untouched", "pink", "deep");
+  const result = register(db, "Steve", "correct horse battery staple", { playerId: guest.playerId, sessionSecret: guest.sessionSecret });
+  db.prepare(`UPDATE bar_stamina SET value = 61 WHERE player_id = ?`).run(guest.playerId);
+  resetPasswordWithRecoveryCode(db, "Steve", result.recoveryCodes[0], "a different password 999");
+  expect(characterFor(db, result.accountId)).toEqual({ barPlayerId: guest.playerId });
+  expect(currentStamina(db, guest.playerId)).toBeCloseTo(61, 2);
+  const nickname = db.prepare(`SELECT nickname FROM bar_players WHERE id = ?`).get(guest.playerId) as { nickname: string };
+  expect(nickname.nickname).toBe("Untouched");
+});
+
+it("resetting a password is rate-limited per username, the same shape login's own rate limit already uses", () => {
+  const result = register(db, "Tina", "correct horse battery staple", null);
+  let hitLimit = false;
+  for (let i = 0; i < 20; i++) {
+    try {
+      resetPasswordWithRecoveryCode(db, "Tina", "ZZZZ-ZZZZ", "attempt password here");
+    } catch (err) {
+      if (err instanceof AccountError && err.code === "rate_limited") {
+        hitLimit = true;
+        break;
+      }
+    }
+  }
+  expect(hitLimit).toBe(true);
+  void result;
+});
+
+it("regenerating recovery codes requires the current password, and invalidates the entire old batch", () => {
+  const result = register(db, "Uma", "correct horse battery staple", null);
+  const wrongPasswordAttempt = expectAccountError(() => regenerateRecoveryCodes(db, result.accountId, "wrong password entirely"));
+  expect(wrongPasswordAttempt.code).toBe("invalid_credentials");
+
+  const newCodes = regenerateRecoveryCodes(db, result.accountId, "correct horse battery staple");
+  expect(newCodes).toHaveLength(8);
+  expect(newCodes.every((c) => !result.recoveryCodes.includes(c))).toBe(true);
+  // The OLD batch no longer works for a reset.
+  const err = expectAccountError(() => resetPasswordWithRecoveryCode(db, "Uma", result.recoveryCodes[0], "some new password"));
+  expect(err.code).toBe("invalid_recovery_code");
+  // The NEW batch does.
+  expect(() => resetPasswordWithRecoveryCode(db, "Uma", newCodes[0], "some genuinely new password 555")).not.toThrow();
 });

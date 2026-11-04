@@ -997,13 +997,62 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       enteredThisPage=false;
       return true;
     }
+    // Shown exactly once, right after the codes are generated (at
+    // registration, after a successful reset, or after a voluntary
+    // regenerate) — the server has already forgotten the plaintext by
+    // the time this renders (only the hash is ever stored), so this is
+    // the one and only chance the user has to see these. `onDone` is
+    // called once the user explicitly acknowledges — never auto-advances
+    // on a timer, since copying/writing them down takes real time.
+    function renderRecoveryCodes(codes,onDone){
+      const copyMsg=el('p',{class:'dialog-footnote',role:'status'},'');
+      overlay.replaceChildren(el('section',{class:'world-dialog auth-dialog',role:'dialog','aria-label':'Save your recovery codes'},[
+        el('p',{class:'eyebrow'},'Las Vegas · OPEN ALL EVENING'),el('h1',{},'Save these recovery codes'),
+        el('p',{class:'dialog-subtitle'},"If you ever forget your password, any ONE of these unused codes lets you set a new one. Each code works only once, and this is the only time they'll ever be shown — write them down or copy them somewhere safe now."),
+        el('ul',{class:'recovery-code-list'},codes.map(code=>el('li',{},el('code',{},code)))),
+        el('div',{class:'account-panel-actions'},[
+          el('button',{type:'button',class:'hud-button',onclick:async()=>{
+            try{
+              if(!navigator.clipboard?.writeText)throw Error('Clipboard unavailable');
+              await navigator.clipboard.writeText(codes.join('\n'));
+              copyMsg.textContent='Copied to clipboard.';
+            }catch{copyMsg.textContent="Couldn't copy automatically — please select and copy the codes above.";}
+          }},'Copy all'),
+        ]),
+        copyMsg,
+        el('button',{type:'button',class:'enter-world',onclick:()=>{overlay.replaceChildren();onDone();}},"I've saved these codes"),
+      ]));
+    }
+    // A logged-in user voluntarily re-rolling their own recovery-code
+    // batch (e.g. after using one, or suspecting the old batch leaked) —
+    // requires the current password first (CLAUDE.md: "旧账号补设恢复方
+    // 式必须验证当前密码"), the server's own check, not just a client
+    // gate.
+    function openRegenerateRecoveryCodes(){
+      const error=el('p',{class:'error',role:'alert'});
+      const currentPasswordField=passwordField(el,{id:'regen-current-password',placeholder:'Current password',autocomplete:'current-password'});
+      const submit=el('button',{type:'submit',class:'enter-world'},'Get new codes');
+      const form=el('form',{class:'world-dialog auth-dialog',role:'dialog','aria-label':'Get new recovery codes',onsubmit:async e=>{
+        e.preventDefault();submit.disabled=true;error.textContent='';
+        try{
+          const result=await accountsApi.regenerateRecoveryCodes({currentPassword:currentPasswordField.input.value});
+          renderRecoveryCodes(result.recoveryCodes,()=>chooseCharacter());
+        }catch(err){error.textContent=err.message||'Could not generate new codes';submit.disabled=false;}
+      }},[
+        el('p',{class:'eyebrow'},'Las Vegas · OPEN ALL EVENING'),el('h1',{},'Get new recovery codes'),
+        el('p',{class:'dialog-subtitle'},'This replaces your entire existing batch — any old codes, used or not, stop working.'),
+        el('label',{for:'regen-current-password'},'Current password'),currentPasswordField.wrapper,
+        error,submit,
+        el('button',{type:'button',class:'hud-button',onclick:()=>chooseCharacter()},'Cancel'),
+      ]);overlay.replaceChildren(form);currentPasswordField.input.focus();
+    }
     // The floating Log in / Sign up / Continue as guest entry point
     // (CLAUDE.md's account section) — shown over the existing character
     // editor rather than replacing it, since "continue as guest" is
     // exactly today's existing chooseCharacter() flow with nothing new
     // required of it.
     function openAuthOverlay(startMode='menu'){
-      let mode=startMode; // 'menu' | 'login' | 'register'
+      let mode=startMode; // 'menu' | 'login' | 'register' | 'reset'
       const error=el('p',{class:'error',role:'alert'});
       function renderMenu(){
         error.textContent='';
@@ -1069,11 +1118,23 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
                 saveSession(result.vegasRoom.code,{playerId:result.barPlayerId,sessionSecret:result.vegasRoom.sessionSecret});
               }
             }
-            overlay.replaceChildren();
-            if(session){
-              try{const resp=await post('/rejoin',session);applyIncoming(resp);activeSeat=resp.activeSeat??null;}catch{}
+            const afterAuth=async()=>{
+              if(session){
+                try{const resp=await post('/rejoin',session);applyIncoming(resp);activeSeat=resp.activeSeat??null;}catch{}
+              }
+              chooseCharacter();
+            };
+            // A brand-new account's first recovery-code batch is shown
+            // exactly once, right here — nothing else in this app ever
+            // has another chance to show these (only the hash survives
+            // server-side). A login never generates new codes, so this
+            // only ever fires for mode==='register'.
+            if(result.recoveryCodes){
+              renderRecoveryCodes(result.recoveryCodes,afterAuth);
+            }else{
+              overlay.replaceChildren();
+              await afterAuth();
             }
-            chooseCharacter();
           }catch(err){error.textContent=err.message||'Could not complete that request';submit.disabled=false;}
         }},[
           el('p',{class:'eyebrow'},'Las Vegas · OPEN ALL EVENING'),el('h1',{},mode==='login'?'Log in':'Sign up'),
@@ -1082,11 +1143,66 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
           ...(confirmPasswordField?[el('label',{for:'auth-confirm'},'Confirm password'),confirmPasswordField.wrapper]:[]),
           ...(migrateCheckbox?[el('div',{class:'auth-migrate-row'},[migrateCheckbox,el('label',{for:'auth-migrate'},'Keep my current guest character')])]:[]),
           error,submit,
+          ...(mode==='login'?[el('button',{type:'button',class:'hud-button auth-forgot-link',onclick:()=>{mode='reset';renderResetForm();}},'Forgot password?')]:[]),
           el('button',{type:'button',class:'hud-button',onclick:()=>{mode='menu';renderMenu();}},'Back'),
-          ...(mode==='register'?[el('p',{class:'dialog-footnote'},'No email is required, and there is no password-recovery option yet — write your password down somewhere safe.')]:[]),
+          ...(mode==='register'?[el('p',{class:'dialog-footnote'},'No email is required. If you forget your password, the recovery codes shown after signup are the only way back in — there is no email-based recovery.')]:[]),
         ]);overlay.replaceChildren(form);username.focus();
       }
-      if(mode==='menu')renderMenu();else renderForm();
+      // The reset-password form (CLAUDE.md's recovery-code design) — a
+      // real recovery code is the ONLY proof accepted here, never
+      // username/nickname/localStorage alone. No account cookie is read
+      // or required: by definition, someone resetting a forgotten
+      // password cannot be expected to still have a valid session.
+      function renderResetForm(){
+        error.textContent='';
+        const resetUsername=el('input',{placeholder:'Username',id:'reset-username',maxlength:'24',required:true,autocomplete:'username'});
+        const codeInput=el('input',{placeholder:'XXXX-XXXX',id:'reset-code',required:true,autocomplete:'off',style:'text-transform:uppercase'});
+        const newPasswordField=passwordField(el,{id:'reset-new-password',placeholder:'New password',autocomplete:'new-password'});
+        const confirmNewPasswordField=passwordField(el,{id:'reset-confirm-password',placeholder:'Confirm new password',autocomplete:'new-password'});
+        const submit=el('button',{type:'submit',class:'enter-world'},'Reset password');
+        const form=el('form',{class:'world-dialog auth-dialog',role:'dialog','aria-label':'Reset your password',onsubmit:async e=>{
+          e.preventDefault();submit.disabled=true;error.textContent='';
+          try{
+            if(newPasswordField.input.value!==confirmNewPasswordField.input.value){
+              error.textContent='Passwords do not match';submit.disabled=false;return;
+            }
+            const result=await accountsApi.resetPassword({
+              username:resetUsername.value,recoveryCode:codeInput.value,
+              newPassword:newPasswordField.input.value,confirmNewPassword:confirmNewPasswordField.input.value,
+            });
+            account={id:result.accountId,username:result.username};
+            // Exactly the same takeover-style credential handoff a fresh
+            // login already performs — this device is now logged in with
+            // the new password, immediately usable.
+            if(result.barPlayerId&&result.barSessionSecret){
+              session={playerId:result.barPlayerId,sessionSecret:result.barSessionSecret};
+              try{localStorage.setItem(sessionKey,JSON.stringify(session));}catch{}
+            }
+            if(result.vegasRoom){
+              saveSession(result.vegasRoom.code,{playerId:result.barPlayerId,sessionSecret:result.vegasRoom.sessionSecret});
+            }
+            const afterReset=async()=>{
+              if(session){
+                try{const resp=await post('/rejoin',session);applyIncoming(resp);activeSeat=resp.activeSeat??null;}catch{}
+              }
+              chooseCharacter();
+            };
+            // The just-used code's whole batch is replaced — shown once,
+            // exactly like a fresh registration's own first batch.
+            renderRecoveryCodes(result.newRecoveryCodes,afterReset);
+          }catch(err){error.textContent=err.message||'Could not reset your password';submit.disabled=false;}
+        }},[
+          el('p',{class:'eyebrow'},'Las Vegas · OPEN ALL EVENING'),el('h1',{},'Reset your password'),
+          el('p',{class:'dialog-subtitle'},'Enter your username and one of your unused recovery codes.'),
+          el('label',{for:'reset-username'},'Username'),resetUsername,
+          el('label',{for:'reset-code'},'Recovery code'),codeInput,
+          el('label',{for:'reset-new-password'},'New password'),newPasswordField.wrapper,
+          el('label',{for:'reset-confirm-password'},'Confirm new password'),confirmNewPasswordField.wrapper,
+          error,submit,
+          el('button',{type:'button',class:'hud-button',onclick:()=>{mode='login';renderForm();}},'Back'),
+        ]);overlay.replaceChildren(form);resetUsername.focus();
+      }
+      if(mode==='menu')renderMenu();else if(mode==='reset')renderResetForm();else renderForm();
     }
     function chooseCharacter(){
       let color=mine?.color||'green',skin=mine?.skin||'warm';
@@ -1144,6 +1260,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
                   e.preventDefault();
                   if(await doLogout())openAuthOverlay('login');
                 }},'Switch account'),
+                el('button',{type:'button',class:'hud-button',onclick:e=>{e.preventDefault();openRegenerateRecoveryCodes();}},'Get new recovery codes'),
               ]),
             ]),
           ]:[

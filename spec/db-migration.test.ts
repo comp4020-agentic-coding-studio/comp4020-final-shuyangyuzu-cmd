@@ -321,6 +321,7 @@ it("adds bar_players.account_id and the account tables to a database that predat
     expect(names).toContain("accounts");
     expect(names).toContain("account_sessions");
     expect(names).toContain("account_characters");
+    expect(names).toContain("account_recovery_codes");
 
     // The pre-existing guest identity survives untouched, with the new
     // column defaulting to NULL (a guest, not controlled by any account)
@@ -344,5 +345,63 @@ it("opening an accounts-era database twice (idempotent migration) doesn't error 
     expect(row.username).toBe("IdempotentUser");
   } finally {
     db2.close();
+  }
+});
+
+// 2026-11-04: recovery codes (account_recovery_codes) are a brand-new
+// table added inside the SAME migrateAccounts() CREATE TABLE block that
+// already created accounts/account_sessions/account_characters in the
+// prior round — so the realistic already-deployed scenario this needs
+// to survive isn't "no accounts schema at all" (createPreAccountsSchema
+// above already covers that), it's specifically "the accounts tables
+// from the PRIOR round already exist on disk, recovery codes don't yet."
+// Built by hand against that exact prior shape, not assumed safe just
+// because CREATE TABLE IF NOT EXISTS usually is.
+function createPreRecoveryCodesSchema(path: string): void {
+  const db = new Database(path);
+  db.exec(`
+    CREATE TABLE bar_players (
+      id TEXT PRIMARY KEY, nickname TEXT NOT NULL, color TEXT NOT NULL, skin TEXT NOT NULL DEFAULT 'warm',
+      x INTEGER NOT NULL, y INTEGER NOT NULL, current_table_id TEXT, current_seat_id TEXT, current_game_player_id TEXT,
+      account_id TEXT, created_at TEXT NOT NULL
+    );
+    CREATE TABLE accounts (
+      id TEXT PRIMARY KEY, username TEXT NOT NULL, username_normalized TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    CREATE TABLE account_sessions (
+      token TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id),
+      created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL
+    );
+    CREATE TABLE account_characters (
+      account_id TEXT PRIMARY KEY REFERENCES accounts(id), bar_player_id TEXT NOT NULL UNIQUE REFERENCES bar_players(id)
+    );
+    CREATE TABLE auth_attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, bucket TEXT NOT NULL, at INTEGER NOT NULL);
+    INSERT INTO bar_players VALUES ('old-account-holder', 'Old Holder', 'blue', 'warm', 7, 7, NULL, NULL, NULL, 'old-account-id', '2026-11-01');
+    INSERT INTO accounts VALUES ('old-account-id', 'OldAccountHolder', 'oldaccountholder', 'scrypt:16384:8:1:aa:bb', '2026-11-01');
+    INSERT INTO account_characters VALUES ('old-account-id', 'old-account-holder');
+  `);
+  db.close();
+}
+
+it("adds account_recovery_codes to a database with the prior round's own accounts tables already in place, preserving the existing account/character link", () => {
+  const path = join(dir, "vegas.db");
+  createPreRecoveryCodesSchema(path);
+
+  const db = openDb(path);
+  try {
+    const names = (db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>).map(
+      (r) => r.name,
+    );
+    expect(names).toContain("account_recovery_codes");
+
+    // The pre-existing account/character link from before this round
+    // survives untouched.
+    const link = db.prepare(`SELECT account_id, bar_player_id FROM account_characters WHERE account_id = 'old-account-id'`).get();
+    expect(link).toEqual({ account_id: "old-account-id", bar_player_id: "old-account-holder" });
+    const account = db.prepare(`SELECT username FROM accounts WHERE id = 'old-account-id'`).get() as { username: string };
+    expect(account.username).toBe("OldAccountHolder");
+  } finally {
+    db.close();
   }
 });

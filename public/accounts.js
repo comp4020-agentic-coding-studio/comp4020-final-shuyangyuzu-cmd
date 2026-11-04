@@ -39,3 +39,11 @@ export async function login({ username, password }) {
 export async function logout() {
   return post('/logout', {});
 }
+
+export async function resetPassword({ username, recoveryCode, newPassword, confirmNewPassword }) {
+  return post('/reset-password', { username, recoveryCode, newPassword, confirmNewPassword });
+}
+
+export async function regenerateRecoveryCodes({ currentPassword }) {
+  return post('/recovery-codes/regenerate', { currentPassword });
+}

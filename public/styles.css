@@ -391,6 +391,15 @@ button.stamina-chip { display:flex; align-items:center; gap:7px; padding:9px 12p
 .auth-migrate-row { display:flex; align-items:center; gap:8px; margin:12px 0; }
 .auth-migrate-row label { margin:0; font-weight:400; color:#453b3f; }
 .auth-migrate-row input { width:auto; padding:0; }
+.auth-forgot-link { background:transparent; border:none; color:#6b5a8a; font-size:12px; text-decoration:underline; padding:4px 0; margin:4px 0 0; width:auto; display:block; }
+.auth-forgot-link:hover,.auth-forgot-link:focus-visible { color:#453b3f; }
+/* The one-time recovery-code display (2026-11-04) — a plain monospace
+   grid so every code is easy to read/copy by hand, each in its own list
+   item for screen-reader navigation. */
+.recovery-code-list { list-style:none; display:grid; grid-template-columns:repeat(2,1fr); gap:8px; margin:18px 0; padding:0; }
+.recovery-code-list li { background:#fffaf3; border:1px solid #d9cec0; border-radius:6px; padding:10px; text-align:center; }
+.recovery-code-list code { font-family:'Courier New',monospace; font-size:15px; font-weight:700; color:#453b3f; letter-spacing:1px; }
+@media (max-width:480px) { .recovery-code-list { grid-template-columns:1fr; } }
 .world-toast { position:absolute; bottom:26px; left:50%; transform:translateX(-50%); max-width:calc(100% - 40px); text-align:center; color:#e8d7c1; padding:11px 22px; border:1px solid #d9b27b30; background:#272531ed; border-radius:30px; font-size:12px; pointer-events:none; }
 .world-overlay { position:absolute; inset:0; display:grid; place-items:center; pointer-events:none; padding:24px; }
 .world-overlay:has(> *) { background:#18151d65; backdrop-filter:blur(2px); pointer-events:auto; }

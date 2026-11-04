@@ -68,6 +68,27 @@ export function migrateAccounts(db: Database.Database): void {
       at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS auth_attempts_bucket_idx ON auth_attempts(bucket, at);
+
+    -- Password recovery, the recovery-code design (2026-11-04, the
+    -- user's own explicit choice over email+link, since this app has no
+    -- email system and the codes work fully locally with zero external
+    -- config). One row per currently-valid, unused code for an account --
+    -- a fresh batch of PASSWORD_RECOVERY_CODE_COUNT rows replaces the
+    -- entire previous batch every time a batch is (re)generated (at
+    -- registration, and again after a successful reset), so "how many
+    -- unused codes does this account have" is just a row count, never a
+    -- flag to track separately. Only code_hash (SHA-256 of the actual
+    -- code) is ever stored -- never the plaintext code itself, the same
+    -- "the server only keeps a secure digest" principle password hashing
+    -- already establishes, applied to a second kind of secret.
+    CREATE TABLE IF NOT EXISTS account_recovery_codes (
+      id TEXT PRIMARY KEY,
+      account_id TEXT NOT NULL REFERENCES accounts(id),
+      code_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      used_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS account_recovery_codes_account_idx ON account_recovery_codes(account_id);
   `);
   // bar_players already exists on any already-deployed volume (CLAUDE.md's
   // migration rule) — addColumnIfMissing, not a wider CREATE TABLE.

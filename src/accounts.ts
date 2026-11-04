@@ -28,7 +28,7 @@
 // below for how an in-progress game seat specifically is handled.
 
 import type Database from "better-sqlite3";
-import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomInt, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import { logAction, transact } from "./actionLog.ts";
 import * as bar from "./bar.ts";
 import { BarError } from "./bar.ts";
@@ -240,6 +240,11 @@ export interface RegisterResult {
    * fresh session_secret, color, and spawn position the same way
    * bar.joinBar already returns them for an ordinary guest join. */
   freshBarSecret: string | null;
+  /** This account's first batch of recovery codes, plaintext, shown to
+   * the user exactly once — the client's own responsibility to display
+   * clearly and never fetch again (there is nothing to fetch; only the
+   * hash is ever stored). */
+  recoveryCodes: string[];
 }
 
 /** Registers a brand-new account. `migrateGuest`, if provided, is the
@@ -333,6 +338,7 @@ export function register(
     }
 
     const token = issueSession(db, accountId);
+    const recoveryCodes = generateRecoveryCodes(db, accountId);
     logAction(db, {
       action: "account_register",
       outcome: "ok",
@@ -340,7 +346,7 @@ export function register(
       actor: { kind: "account", id: accountId, nickname: username },
       detail: { migratedGuest: !!migrateGuest },
     });
-    return { accountId, username, token, barPlayerId, freshBarSecret };
+    return { accountId, username, token, barPlayerId, freshBarSecret, recoveryCodes };
   });
 }
 
@@ -394,6 +400,176 @@ export function logout(db: Database.Database, token: string | undefined): void {
   if (row) {
     logAction(db, { action: "account_logout", outcome: "ok", verified: true, actor: { kind: "account", id: row.accountId } });
   }
+}
+
+// ---- Password recovery — recovery codes (2026-11-04, the user's own
+// explicit choice over email+link: this app has no email system at all,
+// and codes work completely locally with zero external configuration,
+// matching where this project actually is). CLAUDE.md's own standing
+// rules this design follows: a recovery credential must be unpredictable
+// and the server stores only a secure digest of it (never the plaintext
+// code — the identical principle password hashing already establishes,
+// just SHA-256 rather than scrypt, since a recovery code is already
+// high-entropy server-generated randomness, not a human-chosen low-
+// entropy password that needs slow hashing to resist offline guessing);
+// a used code is invalidated and a fresh batch is issued; resetting a
+// password must never be possible from username/nickname/localStorage
+// alone — only a real, currently-valid, unused code proves anything here.
+//
+// 8 codes per batch (a conventional backup-code count — matches what
+// most 2FA recovery-code UIs already show users), each formatted
+// XXXX-XXXX from a 32-character unambiguous alphabet (CLAUDE.md's own
+// room-code alphabet, reused rather than inventing a second one) — 8
+// characters of real entropy per code (40 bits), plenty to resist online
+// guessing once also rate-limited below, while still being short enough
+// to type by hand if printed out.
+const RECOVERY_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+const RECOVERY_CODE_COUNT = 8;
+
+function generateOneRecoveryCode(): string {
+  let code = "";
+  for (let i = 0; i < 8; i++) {
+    if (i === 4) code += "-";
+    code += RECOVERY_CODE_ALPHABET[randomInt(RECOVERY_CODE_ALPHABET.length)];
+  }
+  return code;
+}
+
+function hashRecoveryCode(code: string): string {
+  // Normalized the same way the user will realistically type it back in
+  // (uppercased, dash-insensitive) before hashing, so "abcd1234",
+  // "ABCD-1234", and "abcd-1234" all hash identically — the dash is a
+  // display/typing convenience, never part of the actual secret.
+  const normalized = code.toUpperCase().replace(/-/g, "");
+  return createHash("sha256").update(normalized).digest("hex");
+}
+
+/** Replaces this account's entire batch of recovery codes with a fresh
+ * one (deleting every existing row first, used or not) and returns the
+ * plaintext codes — the ONLY time they ever exist outside a hash,
+ * exactly like a password at registration. The caller is responsible
+ * for showing these to the user exactly once; nothing here logs or
+ * otherwise persists the plaintext anywhere. Called at registration
+ * (every new account gets a first batch) and again after a successful
+ * reset (the just-used code, and every other old code, must stop working
+ * once a new batch exists — CLAUDE.md: "使用后失效并提供新的恢复码"). */
+function generateRecoveryCodes(db: Database.Database, accountId: string): string[] {
+  db.prepare(`DELETE FROM account_recovery_codes WHERE account_id = ?`).run(accountId);
+  const codes: string[] = [];
+  const now = new Date().toISOString();
+  for (let i = 0; i < RECOVERY_CODE_COUNT; i++) {
+    const code = generateOneRecoveryCode();
+    codes.push(code);
+    db.prepare(`INSERT INTO account_recovery_codes (id, account_id, code_hash, created_at, used_at) VALUES (?, ?, ?, ?, NULL)`).run(
+      randomUUID(),
+      accountId,
+      hashRecoveryCode(code),
+      now,
+    );
+  }
+  return codes;
+}
+
+/** Regenerates this account's own recovery codes, requiring the
+ * CURRENT password first (CLAUDE.md: "旧账号补设恢复方式必须验证当前密
+ * 码") — used both for an account's first batch being re-rolled on
+ * request, and is the same primitive `register` and `resetPassword`
+ * below build on. Never callable by anyone who doesn't already hold
+ * either the current password or (via `resetPassword`) a currently-valid
+ * recovery code — recovery codes can never be bootstrapped from nothing. */
+export function regenerateRecoveryCodes(db: Database.Database, accountId: string, currentPassword: string): string[] {
+  const row = db.prepare(`SELECT password_hash AS passwordHash FROM accounts WHERE id = ?`).get(accountId) as
+    | { passwordHash: string }
+    | undefined;
+  if (!row || !verifyPassword(currentPassword, row.passwordHash)) {
+    throw new AccountError("incorrect password", "invalid_credentials", 401);
+  }
+  return transact(db, () => {
+    const codes = generateRecoveryCodes(db, accountId);
+    logAction(db, { action: "account_recovery_codes_regenerated", outcome: "ok", verified: true, actor: { kind: "account", id: accountId } });
+    return codes;
+  });
+}
+
+export interface ResetPasswordResult {
+  accountId: string;
+  username: string;
+  token: string;
+  barPlayerId: string | null;
+  newRecoveryCodes: string[];
+}
+
+/** Resets a forgotten password using one currently-valid, unused
+ * recovery code — verified by hash, never by comparing to a stored
+ * plaintext (there isn't one). CLAUDE.md's required shape, all inside
+ * one transaction:
+ * - the code is marked used (and therefore can never be presented
+ *   again) the INSTANT it verifies, before the password is even
+ *   changed — so a crash between these two steps can never leave the
+ *   code both "used" and "didn't actually do anything."
+ * - every OTHER account_sessions row is deleted (same as a fresh
+ *   `issueSession`), so every old browser tab/device's account cookie
+ *   stops working the moment this completes — src/accountRoutes.ts's
+ *   route layer separately rotates the bar/room session_secret the
+ *   same way `takeOverCharacter`/logout already do, for the identical
+ *   "旧的 bar/game session 路径也要检查" reason.
+ * - a fresh batch of recovery codes replaces the entire old batch
+ *   (including the one just consumed and every other still-unused
+ *   one) — CLAUDE.md: "恢复码使用后失效并提供新的恢复码."
+ * - the account's own character/stamina/held-items/game data is
+ *   completely untouched — this only ever writes `password_hash`,
+ *   `account_sessions`, and `account_recovery_codes`, never
+ *   `account_characters` or anything in `bar_players`. */
+export function resetPasswordWithRecoveryCode(
+  db: Database.Database,
+  usernameInput: string,
+  recoveryCode: string,
+  newPassword: string,
+): ResetPasswordResult {
+  const normalized = normalizeUsername(usernameInput.trim());
+  // Bucketed by username, the same reasoning login's own rate limit
+  // uses — a recovery code is exactly the kind of credential an
+  // attacker would try to brute-force against one specific account.
+  checkRateLimit(db, `reset:${normalized}`);
+  validatePassword(newPassword);
+
+  const account = db.prepare(`SELECT id, username FROM accounts WHERE username_normalized = ?`).get(normalized) as
+    | { id: string; username: string }
+    | undefined;
+  // Same generic failure whether the account doesn't exist or the code
+  // is wrong/already used/expired-by-rotation — CLAUDE.md: "错误反馈不
+  // 能泄露账号是否存在."
+  const genericFailure = () => new AccountError("that recovery code is invalid or has already been used", "invalid_recovery_code", 401);
+  if (!account) throw genericFailure();
+
+  const codeHash = hashRecoveryCode(recoveryCode);
+  const codeRow = db
+    .prepare(`SELECT id FROM account_recovery_codes WHERE account_id = ? AND code_hash = ? AND used_at IS NULL`)
+    .get(account.id, codeHash) as { id: string } | undefined;
+  if (!codeRow) throw genericFailure();
+
+  return transact(db, () => {
+    // Marked used before anything else — see this function's own header
+    // for why the ordering matters.
+    db.prepare(`UPDATE account_recovery_codes SET used_at = ? WHERE id = ?`).run(new Date().toISOString(), codeRow.id);
+    db.prepare(`UPDATE accounts SET password_hash = ? WHERE id = ?`).run(hashPassword(newPassword), account.id);
+    const token = issueSession(db, account.id);
+    const newRecoveryCodes = generateRecoveryCodes(db, account.id);
+    const character = characterFor(db, account.id);
+    logAction(db, {
+      action: "account_password_reset",
+      outcome: "ok",
+      verified: true,
+      actor: { kind: "account", id: account.id, nickname: account.username },
+    });
+    return {
+      accountId: account.id,
+      username: account.username,
+      token,
+      barPlayerId: character?.barPlayerId ?? null,
+      newRecoveryCodes,
+    };
+  });
 }
 
 export { BarError };
