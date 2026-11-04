@@ -243,10 +243,18 @@ export function register(
   password: string,
   migrateGuest: { playerId: string; sessionSecret: string } | null,
 ): RegisterResult {
-  checkRateLimit(db, `register`);
   const username = validateUsername(usernameInput);
   validatePassword(password);
   const normalized = normalizeUsername(username);
+  // Bucketed by the normalized username being registered, not a single
+  // global bucket — this app has no real client IP available to bucket
+  // by (Fly terminates TLS in front of it with no forwarded-IP header
+  // this codebase already trusts anywhere else), and a single shared
+  // "register" bucket would let a handful of signups from anywhere
+  // briefly lock out every OTHER legitimate signup too, which is its own
+  // denial-of-service. Bucketing by username at least rate-limits
+  // repeated attempts to claim one specific name.
+  checkRateLimit(db, `register:${normalized}`);
 
   return transact(db, () => {
     const existing = db.prepare(`SELECT 1 FROM accounts WHERE username_normalized = ?`).get(normalized);
