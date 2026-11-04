@@ -178,6 +178,48 @@ function drawEatingScene(ctx, vw, vh, { color, skin, phase, seatKind, reduceMoti
   ctx.restore();
 }
 
+// A password <input> plus its own independent show/hide eye toggle
+// (2026-11-04) — used by every password field in the account forms
+// (login, register, confirm, and the later reset-password form), so the
+// behavior is defined once rather than copied per field. Returns
+// {wrapper, input}: `wrapper` is what the caller actually appends to the
+// DOM (an input-and-button pair), `input` is the real <input> element
+// for reading .value / calling .focus().
+//
+// - type="button" on the toggle, never type="submit" — clicking it must
+//   never submit the enclosing <form> (a real risk here specifically,
+//   since every caller of this helper sits inside a form whose own
+//   submit handler does real work).
+// - Each instance owns its own closed-over `visible` flag — toggling one
+//   field never touches any other field's own visibility, content, or
+//   focus; clicking the eye re-focuses the input afterward so the next
+//   keystroke lands where the user expects rather than on the button.
+// - aria-label text and aria-pressed both flip with the state ("Show
+//   password" / "Hide password"), so a screen reader announces the
+//   actual current action, not a static label.
+// - Nothing here writes the password anywhere (no console.log, no
+//   storage) — toggling visibility only ever changes the input's own
+//   `type` attribute, which the browser already renders; this helper
+//   introduces no new place a password value could end up persisted.
+function passwordField(el, { id, placeholder, autocomplete, required=true }) {
+  let visible=false;
+  const input=el('input',{type:'password',id,placeholder,autocomplete,required:required||undefined});
+  const eye=el('button',{
+    type:'button',class:'password-toggle','aria-label':'Show password','aria-pressed':'false',
+    'aria-controls':id,tabindex:'0',
+  },[el('span',{'aria-hidden':'true',class:'password-toggle-icon'},'👁')]);
+  eye.onclick=()=>{
+    visible=!visible;
+    input.type=visible?'text':'password';
+    eye.setAttribute('aria-label',visible?'Hide password':'Show password');
+    eye.setAttribute('aria-pressed',String(visible));
+    eye.classList.toggle('password-toggle-active',visible);
+    input.focus();
+  };
+  const wrapper=el('div',{class:'password-field'},[input,eye]);
+  return {wrapper,input};
+}
+
 export function createTavern({ el, render, navigate, buildClassicPanel, saveSession, shouldApplyLiveUpdate, createMenuBook, mixologyModule, ordersApi, accountsApi }) {
   const menuBook=createMenuBook({el,mixologyModule,ordersApi});
   const colors = { red:'#c85e59', blue:'#6485bc', green:'#629e86', yellow:'#ddba65', purple:'#997cb5', teal:'#66b5b0', orange:'#cf8858', pink:'#cd88a3' };
@@ -890,7 +932,20 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       keys.clear();heldDirection=null;path=[];
       if(open)speechInput.focus();else canvas.focus();
     }
-    speechToggle.onclick=()=>toggleSpeech(speechBar.hidden);
+    // Real bug, not just a visual one (2026-11-04): every other
+    // interactive control in this file already checks
+    // overlay.childElementCount before acting (movement, clicks, seat
+    // targets, keydown) — this toggle never did, so the chat bubble
+    // button remained clickable (and, worse, visually painted on top of)
+    // any open dialog, including the new login/signup form. The CSS
+    // fix below (`.tavern-world:has(>.world-overlay>*) .speech-toggle`)
+    // hides it from view the same way world-overlay's own :has()
+    // selector already hides the map's background tint rules; this JS
+    // guard is the actual behavioral fix (a hidden-but-still-wired
+    // onclick could still fire from a stale reference or synthetic
+    // event) and the one that matches this file's own established
+    // pattern for every other control.
+    speechToggle.onclick=()=>{if(overlay.childElementCount)return;toggleSpeech(speechBar.hidden);};
     speechInput.addEventListener('keydown',e=>{if(e.key==='Escape'){e.preventDefault();toggleSpeech(false);}});
     async function doSay(){
       if(!mine)return;
@@ -966,8 +1021,10 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       function renderForm(){
         error.textContent='';
         const username=el('input',{placeholder:'Username',id:'auth-username',maxlength:'24',required:true,autocomplete:'username'});
-        const password=el('input',{type:'password',placeholder:'Password',id:'auth-password',required:true,autocomplete:mode==='login'?'current-password':'new-password'});
-        const confirmPassword=mode==='register'?el('input',{type:'password',placeholder:'Confirm password',id:'auth-confirm',required:true,autocomplete:'new-password'}):null;
+        const passwordField1=passwordField(el,{id:'auth-password',placeholder:'Password',autocomplete:mode==='login'?'current-password':'new-password'});
+        const password=passwordField1.input;
+        const confirmPasswordField=mode==='register'?passwordField(el,{id:'auth-confirm',placeholder:'Confirm password',autocomplete:'new-password'}):null;
+        const confirmPassword=confirmPasswordField?confirmPasswordField.input:null;
         // The optional "keep my current guest character" checkbox
         // (CLAUDE.md: 服务器验证过的当前游客凭证进行一次性、事务性的绑定) —
         // only offered when this browser actually has a guest character
@@ -1021,8 +1078,8 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         }},[
           el('p',{class:'eyebrow'},'Las Vegas · OPEN ALL EVENING'),el('h1',{},mode==='login'?'Log in':'Sign up'),
           el('label',{for:'auth-username'},'Username'),username,
-          el('label',{for:'auth-password'},'Password'),password,
-          ...(confirmPassword?[el('label',{for:'auth-confirm'},'Confirm password'),confirmPassword]:[]),
+          el('label',{for:'auth-password'},'Password'),passwordField1.wrapper,
+          ...(confirmPasswordField?[el('label',{for:'auth-confirm'},'Confirm password'),confirmPasswordField.wrapper]:[]),
           ...(migrateCheckbox?[el('div',{class:'auth-migrate-row'},[migrateCheckbox,el('label',{for:'auth-migrate'},'Keep my current guest character')])]:[]),
           error,submit,
           el('button',{type:'button',class:'hud-button',onclick:()=>{mode='menu';renderMenu();}},'Back'),

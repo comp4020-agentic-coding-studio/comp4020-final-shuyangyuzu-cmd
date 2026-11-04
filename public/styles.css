@@ -377,12 +377,35 @@ button.stamina-chip { display:flex; align-items:center; gap:7px; padding:9px 12p
 .auth-dialog .auth-menu { display:flex; flex-direction:column; gap:10px; margin:18px 0; }
 .auth-dialog label { font-size:11px; font-weight:650; color:#776765; display:block; margin:10px 0 4px; }
 .auth-dialog input { background:#fffaf3; border:1px solid #d9cec0; color:#453b3f; padding:12px; width:100%; font-size:14px; box-sizing:border-box; }
+/* The password input + its own show/hide eye (2026-11-04) — the input
+   keeps its own full-width styling above, with its right padding
+   widened here so real text/dots never sit underneath the button; the
+   button is sized well past the 44px touch-target minimum and placed
+   with its own padding so a finger on mobile can't miss it or clip the
+   input's own right edge. */
+.password-field { position:relative; width:100%; }
+.password-field input { padding-right:46px; margin:0; }
+.password-toggle { position:absolute; top:0; right:0; bottom:0; width:44px; min-width:44px; padding:0; margin:0; display:grid; place-items:center; background:transparent; border:none; border-radius:0 4px 4px 0; color:#8a7a68; font-size:18px; cursor:pointer; }
+.password-toggle:hover,.password-toggle:focus-visible { color:#453b3f; background:#00000008; outline:none; }
+.password-toggle-active { color:#6b5a8a; }
 .auth-migrate-row { display:flex; align-items:center; gap:8px; margin:12px 0; }
 .auth-migrate-row label { margin:0; font-weight:400; color:#453b3f; }
 .auth-migrate-row input { width:auto; padding:0; }
 .world-toast { position:absolute; bottom:26px; left:50%; transform:translateX(-50%); max-width:calc(100% - 40px); text-align:center; color:#e8d7c1; padding:11px 22px; border:1px solid #d9b27b30; background:#272531ed; border-radius:30px; font-size:12px; pointer-events:none; }
 .world-overlay { position:absolute; inset:0; display:grid; place-items:center; pointer-events:none; padding:24px; }
 .world-overlay:has(> *) { background:#18151d65; backdrop-filter:blur(2px); pointer-events:auto; }
+/* A real bug, not just cosmetic (2026-11-04): the chat toggle/bubble and
+   the on-screen d-pad have no z-index/stacking context of their own, so
+   with no rule hiding them they painted on top of any open dialog
+   (first caught with the login/signup form, but true of every world
+   dialog this file renders) even though the dpad's own click handlers
+   were already correctly refusing to act (overlay.childElementCount).
+   `.tavern-world:has(>.world-overlay>*)` reaches the dialog's siblings
+   from their shared parent, the same reasoning world-overlay's own
+   :has() rule above already uses one level up. */
+.tavern-world:has(>.world-overlay>*) .speech-toggle,
+.tavern-world:has(>.world-overlay>*) .speech-bar { display:none; }
+.tavern-world:has(>.world-overlay>*) .world-dpad { visibility:hidden; }
 .world-dialog { pointer-events:auto; width:min(590px,100%); max-height:calc(100dvh - 48px); overflow-y:auto; padding:32px; border-radius:22px; background:#faf3e7; border:1px solid #fff7e2; color:#40383f; box-shadow:0 24px 90px #110c1760; position:relative; }
 .world-dialog h1 { font-family:Georgia,serif; font-size:36px; font-weight:normal; letter-spacing:-1px; margin:0; }
 .eyebrow { color:#917357; letter-spacing:2px; font-size:10px; font-weight:700; margin:0 0 10px; }
