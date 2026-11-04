@@ -193,3 +193,53 @@ it("guest migration at signup: the new account controls the exact pre-existing g
   const appearance = await postJson("/api/bar/appearance", { ...guestSession, nickname: "Migratee", color: "blue", skin: "warm" });
   expect(appearance.status).toBe(200);
 });
+
+// ---- Explicit logout must revoke more than just the account cookie —
+// CLAUDE.md: "旧的 bar/game session 路径也要检查，不能让退出后残留的旧凭证
+// 绕过新会话机制". A cached or leaked copy of this browser's own bar
+// session_secret must stop working the instant logout completes, the
+// same rotation a new-device login already performs — just with the
+// freshly-minted secret handed to nobody, since there is no "new device"
+// at logout time. ----
+it("explicit logout rotates this account's bar session_secret, not just the account cookie — a cached copy of the old secret stops working", async () => {
+  const username = uniqueUsername("httplogoutrot");
+  const password = "correct horse battery staple";
+  const reg = await postJson("/api/accounts/register", { username, password, confirmPassword: password });
+  const oldBarSecret = reg.body.barSessionSecret;
+  const barPlayerId = reg.body.barPlayerId;
+
+  const beforeLogout = await postJson("/api/bar/heartbeat", { playerId: barPlayerId, sessionSecret: oldBarSecret });
+  expect(beforeLogout.status).toBe(200);
+
+  const logout = await postJson("/api/accounts/logout", {}, reg.cookie);
+  expect(logout.status).toBe(200);
+
+  const afterLogout = await postJson("/api/bar/heartbeat", { playerId: barPlayerId, sessionSecret: oldBarSecret });
+  expect(afterLogout.status).toBe(403);
+});
+
+it("explicit logout also rotates an actively-bound Vegas room's own session_secret", async () => {
+  const username = uniqueUsername("httplogoutroom");
+  const password = "correct horse battery staple";
+  const reg = await postJson("/api/accounts/register", { username, password, confirmPassword: password });
+  const barSession = { playerId: reg.body.barPlayerId, sessionSecret: reg.body.barSessionSecret };
+
+  const tablesRes = await getJson("/api/bar/tables");
+  const emptyTable = tablesRes.body.find((t: any) => t.gameType === "vegas" && t.tableMode === "online" && t.status === "empty");
+  const created = await postJson(`/api/bar/tables/${emptyTable.id}/create`, { ...barSession, color: "red" });
+  const roomSession = { playerId: created.body.playerId, sessionSecret: created.body.sessionSecret };
+
+  await postJson("/api/accounts/logout", {}, reg.cookie);
+
+  const oldRoomAttempt = await postJson(`/api/rooms/${created.body.code}/ready`, { ...roomSession, ready: true });
+  expect(oldRoomAttempt.status).toBe(403);
+
+  // Clean up — log back in to get a fresh credential and disband, so
+  // this doesn't permanently consume one of only 2 online Vegas tables.
+  const relogin = await postJson("/api/accounts/login", { username, password });
+  await postJson(`/api/rooms/${created.body.code}/disband`, {
+    playerId: roomSession.playerId,
+    sessionSecret: relogin.body.vegasRoom.sessionSecret,
+    confirm: true,
+  });
+});

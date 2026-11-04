@@ -153,8 +153,36 @@ export function registerAccounts(app: Hono, db: Database.Database): void {
   app.post("/api/accounts/logout", async (c) => {
     requireSameOrigin(c);
     const token = getCookie(c, COOKIE_NAME);
+    // Real proof of which account is logging out, read BEFORE the
+    // session row is deleted below — never trusted from the request body
+    // (there isn't one), and never skipped just because the token looks
+    // already-invalid (an already-logged-out/expired token still clears
+    // the cookie harmlessly below).
+    let barPlayerId: string | null = null;
+    if (token) {
+      try {
+        barPlayerId = accounts.characterFor(db, accounts.verifyAccountSession(db, token).accountId)?.barPlayerId ?? null;
+      } catch {
+        // stale/expired token — nothing to rotate, logout still proceeds
+      }
+    }
     accounts.logout(db, token);
     deleteCookie(c, COOKIE_NAME, { path: "/" });
+    // "旧的 bar/game session 路径也要检查，不能让退出后残留的旧凭证绕过新
+    // 会话机制" — an explicit logout must do more than drop the account
+    // cookie: whatever bar session_secret (and, if actively bound, Vegas
+    // room session_secret) this browser was holding must stop working
+    // too, the same rotation takeOverCharacter already performs for a
+    // new-device login, just with the freshly-minted secret reported to
+    // nobody (there is no "new device" here to hand it to — the next
+    // login mints its own). This is what keeps a cached/leaked copy of
+    // this browser's own old bar secret from continuing to act as this
+    // character after the user explicitly signed out.
+    if (barPlayerId) {
+      bar.rotateBarSession(db, barPlayerId);
+      const activeVegas = tables.activeVegasRoomPlayerId(db, barPlayerId);
+      if (activeVegas) rooms.rotateSession(db, activeVegas.playerId);
+    }
     return c.json({ ok: true });
   });
 
