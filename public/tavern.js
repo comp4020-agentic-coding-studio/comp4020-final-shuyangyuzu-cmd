@@ -293,10 +293,26 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     // {kinds, startedAt, endsAt, seatKind} while active, else null.
     let eatingUI=null;
     const holdCleanups=[];
+    // Same-browser, multiple-tabs logout sync: `localStorage.removeItem`
+    // fires a `storage` event in every OTHER tab of the same origin (never
+    // the tab that made the change) — exactly the signal needed for "I
+    // logged out in tab 1, tab 2 should reflect that immediately" without
+    // waiting for either poll below. A late response already in flight
+    // for the old identity still can't resurrect this UI: `session` is
+    // cleared here before any such response could land, and every bar
+    // route re-checks the (now-gone) session_secret server-side anyway.
+    const storageHandler=e=>{
+      if(e.key!==sessionKey||e.newValue!==null||!active)return;
+      session=null;mine=null;staminaFill.style.width='0%';staminaLabel.textContent='—';
+      activeSeat=null;if(returnGameButton){returnGameButton.remove();returnGameButton=null;}
+      overlay.replaceChildren();openAuthOverlay();
+    };
+    window.addEventListener('storage',storageHandler);
     dispose=()=>{
       active=false;holdCleanups.forEach(cleanup=>cleanup());document.body.classList.remove('world-mode');
       if(eventSource){eventSource.close();eventSource=null;}
       if(visibilityHandler){document.removeEventListener('visibilitychange',visibilityHandler);window.removeEventListener('focus',visibilityHandler);visibilityHandler=null;}
+      window.removeEventListener('storage',storageHandler);
     };
     const displayPositions=new Map();
     const timers=[];
