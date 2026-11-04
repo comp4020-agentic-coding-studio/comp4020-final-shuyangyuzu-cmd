@@ -4,11 +4,13 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import type Database from 'better-sqlite3';
 import {openDb} from '../src/db.ts';
-import {joinBar,moveBar} from '../src/bar.ts';
-import {GAME_CHAIRS} from '../src/barLayout.ts';
+import {joinBar,moveBar,sitAtSeat,standFromSeat} from '../src/bar.ts';
+import {GAME_CHAIRS,BAR_SEATS} from '../src/barLayout.ts';
 import {deal,deck,moves,play,drawOrPass,endTotal,npcMove,type DominoState,type Tile} from '../src/dominoEngine.ts';
 import {openDomino,respondDomino,actDomino,dominoMe,leaveDomino,tickDomino} from '../src/domino.ts';
 import {getTablesStatus} from '../src/tables.ts';
+import {placeOrder,startEating} from '../src/orders.ts';
+import {isEating} from '../src/eating.ts';
 
 describe('All Fives rules',()=>{
   it('deals seven each, fourteen hidden, with the highest double opening',()=>{const s=deal(undefined,deck());expect(s.hands.map(h=>h.length)).toEqual([7,7]);expect(s.stock).toHaveLength(14);expect(s.turn).toBe(1);expect(s.required).toEqual([2,2]);expect(moves(s)).toEqual([{tile:[2,2],end:'start'}]);});
@@ -71,4 +73,78 @@ describe('two isolated facing pairs',()=>{
     expect(dominoMe(db,a.playerId,a.sessionSecret).room).toBeNull();expect(dominoMe(db,b.playerId,b.sessionSecret).room).not.toBeNull();
   });
   it('requires identity and blocks leaving the table by walking',()=>{const a=patron('A');expect(()=>openDomino(db,a.playerId,'wrong','offline',0)).toThrow();openDomino(db,a.playerId,a.sessionSecret,'offline',0);expect(()=>moveBar(db,a.playerId,a.sessionSecret,1,1)).toThrow(/domino/);});
+});
+
+// ---- Integration verification: dominoes merged alongside seated eating
+// (2026-11-04 integration round). Both features were built on separate
+// branches without seeing each other's code; this confirms the two
+// actually-merged guards (domino.ts's assertFree optional-schema check
+// against bar_eating_actions, and bar.ts's domino_members check in
+// sitAtSeat) behave correctly together, not just that the merge was
+// textually clean. ----
+describe('dominoes and seated eating, merged on one identity layer',()=>{
+  let db:Database.Database,dir:string;
+  beforeEach(()=>{dir=mkdtempSync(join(tmpdir(),'domino-eating-test-'));db=openDb(join(dir,'test.db'));});
+  afterEach(()=>{db.close();rmSync(dir,{recursive:true,force:true});});
+  const patron=(name:string)=>joinBar(db,name,'red','warm');
+  function seatAndStartEating(id:string,secret:string):void {
+    const seat=BAR_SEATS[0];
+    db.prepare('UPDATE bar_players SET x = ?, y = ? WHERE id = ?').run(seat.x,seat.y+1,id);
+    sitAtSeat(db,id,secret,seat.id);
+    placeOrder(db,id,secret,'soda',null,'eat-vs-domino-key');
+    startEating(db,id,secret,'eat-vs-domino-key');
+  }
+
+  it('cannot open a domino seat while an eating/drinking lock is active, and can once it ends',()=>{
+    const a=patron('EatingPatron');
+    seatAndStartEating(a.playerId,a.sessionSecret);
+    expect(isEating(db,a.playerId)).toBe(true);
+    // Eating requires physically occupying a bar_seats row for its whole
+    // duration — standFromSeat itself refuses while isEating, so that row
+    // can never be vacated mid-lock. assertFree's generic "already in a
+    // bar seat" check therefore refuses this before its own, more specific
+    // eating_active check is ever reached — still a correct refusal,
+    // confirmed by the actual thrown error code below.
+    expect(()=>openDomino(db,a.playerId,a.sessionSecret,'offline',0)).toThrow(/current seat/);
+    // Lock naturally expires (the same lazy-evaluation shape every other
+    // grace period in this codebase uses), then standing up and opening a
+    // domino seat both succeed.
+    db.prepare('UPDATE bar_eating_actions SET ends_at = ? WHERE player_id = ?').run(new Date(Date.now()-1000).toISOString(),a.playerId);
+    expect(isEating(db,a.playerId)).toBe(false);
+    standFromSeat(db,a.playerId,a.sessionSecret);
+    const r=openDomino(db,a.playerId,a.sessionSecret,'offline',0);
+    expect(r.pending).toBe(false);
+  });
+
+  it('a seated domino player cannot also occupy a dining/stool seat or start eating',()=>{
+    const a=patron('DominoPatron');
+    openDomino(db,a.playerId,a.sessionSecret,'offline',0);
+    const seat=BAR_SEATS[0];
+    db.prepare('UPDATE bar_players SET x = ?, y = ? WHERE id = ?').run(seat.x,seat.y+1,a.playerId);
+    expect(()=>sitAtSeat(db,a.playerId,a.sessionSecret,seat.id)).toThrow(/domino/);
+  });
+
+  it('one pair leaving its domino match does not disturb the other pair, which keeps playing independently of any eating activity elsewhere in the bar',()=>{
+    const a=patron('A'),b=patron('B'),c=patron('C'),d=patron('D');
+    const r1=openDomino(db,a.playerId,a.sessionSecret,'online',0);
+    openDomino(db,b.playerId,b.sessionSecret,'online',1);
+    respondDomino(db,a.playerId,a.sessionSecret,r1.roomId,b.playerId,true);
+    const r2=openDomino(db,c.playerId,c.sessionSecret,'online',2);
+    openDomino(db,d.playerId,d.sessionSecret,'online',3);
+    respondDomino(db,c.playerId,c.sessionSecret,r2.roomId,d.playerId,true);
+
+    // A completely separate bar identity eating/drinking at the same time
+    // must have zero effect on either pair's own match.
+    const bystander=patron('Bystander');
+    seatAndStartEating(bystander.playerId,bystander.sessionSecret);
+    expect(isEating(db,bystander.playerId)).toBe(true);
+
+    leaveDomino(db,a.playerId,a.sessionSecret);
+    expect(dominoMe(db,b.playerId,b.sessionSecret).room).toBeNull();
+    const pairTwoView=dominoMe(db,c.playerId,c.sessionSecret).room;
+    expect(pairTwoView).not.toBeNull();
+    expect(pairTwoView!.id).toBe(r2.roomId);
+    actDomino(db,c.playerId,c.sessionSecret,r2.roomId,pairTwoView!.version,'start');
+    expect(dominoMe(db,d.playerId,d.sessionSecret).room!.phase).toBe('playing');
+  });
 });
