@@ -36,6 +36,16 @@ export async function placeOrder(session, { itemId, variant, idempotencyKey }) {
   return post('/place', { ...session, itemId, variant, idempotencyKey });
 }
 
-export async function consumeHeld(session, heldItemId) {
-  return post('/consume', { ...session, heldItemId });
+// The one and only public way to ever consume a held item (2026-11
+// correction) — consumes every currently-held item in one call and
+// starts the server's ~8s action lock, requiring a real dining/stool
+// seat and refusing with 'not_seated'/'nothing_held'/'eating_active'.
+// There used to be a second, lower-level `consumeHeld` call here hitting
+// a now-removed `/consume` route with no seat/lock check of its own — a
+// standing patron could call it directly and bypass the entire seated-
+// eating feature (Codex-found bug; see CLAUDE.md's seated-eating
+// correction and spec/ordersHttp.test.ts). Removed outright rather than
+// patched, since this client module never actually called it anyway.
+export async function startEating(session, idempotencyKey) {
+  return post('/eat', { ...session, idempotencyKey });
 }

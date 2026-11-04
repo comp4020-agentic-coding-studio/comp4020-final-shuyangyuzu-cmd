@@ -330,6 +330,19 @@ body.world-mode { padding:0; overflow:hidden; background:#3e3036; }
 .seat-layer button.seat-target:hover,.seat-layer button.seat-target:focus-visible { border-color:#ffe0a1; background:#ffe0a125; box-shadow:0 0 10px #ffd48680; outline:none; }
 .seat-layer button.seat-target:hover::after,.seat-layer button.seat-target:focus-visible::after { content:attr(data-hint); position:absolute; bottom:66px; left:50%; transform:translateX(-50%); padding:5px 8px; white-space:nowrap; border-radius:5px; color:#fff1cf; background:#30242a; font-size:11px; pointer-events:none; }
 .tavern-world > canvas { display:block; width:100%; height:100%; image-rendering:pixelated; touch-action:none; outline:none; }
+/* The overhead holding/eat/drink prompt (CLAUDE.md's seated-eating
+   section) — a real seat-target-style button so it's reachable the same
+   way every other in-world hotspot already is (tab, tap, no hover
+   requirement), but styled as a small pill rather than a square hotspot
+   since it carries real text, not just a silent hover hint. */
+.eat-prompt-target { width:auto!important; height:auto!important; display:none; padding:4px 10px!important; border-radius:999px!important; background:#3f4a33e6!important; color:#e9f0d8; font-size:11px; font-weight:600; letter-spacing:.3px; border:1px solid #6b7d4f80!important; box-shadow:0 4px 12px #0005; }
+.eat-prompt-target:hover,.eat-prompt-target:focus-visible { background:#4c5a3de6!important; border-color:#9fb56f!important; }
+.eat-prompt-target:disabled { cursor:default; opacity:.85; }
+.eat-prompt-target.eat-prompt-passive { background:#3f4a3399!important; }
+/* The seated eating/drinking cutscene — a second full-screen layer above
+   everything else in the scene (HUD included), shown only while an
+   eating action is actually in progress for this viewer. */
+.eating-cutscene { position:absolute; inset:0; z-index:30; display:none; image-rendering:pixelated; }
 .world-hud { position:absolute; top:22px; left:24px; right:24px; display:flex; justify-content:space-between; gap:16px; align-items:center; pointer-events:none; }
 .world-brand { display:flex; align-items:center; gap:12px; color:#fae9cd; padding:12px 18px; border:1px solid #d9b27b40; background:#272531e8; border-radius:14px; box-shadow:0 5px 24px #0003; }
 .brand-mark { color:#e9b86a; font-size:28px; }
@@ -590,9 +603,6 @@ body.table-mode { --bg:#50372a; --panel:#49372f; --fg:#f5e7ca; --muted:#d0b997; 
 .order-card button{margin-top:auto}
 .order-variants{display:flex;flex-direction:column;gap:8px;margin:14px 0}
 .order-variants label{display:flex;align-items:center;gap:8px;cursor:pointer}
-.order-held{list-style:none;padding:0;margin:18px 0}
-.order-held li{display:flex;justify-content:space-between;align-items:center;gap:14px;padding:12px 0;border-bottom:1px solid #ddcdb6}
-.order-held small{color:#907958}
 
 /* The counter's physical menu book (public/menuBook.js) — the single
    in-scene entry point replacing the old "Mixology book"/"Meals/Drinks"
@@ -638,8 +648,6 @@ body.table-mode { --bg:#50372a; --panel:#49372f; --fg:#f5e7ca; --muted:#d0b997; 
 .book-bookmark{background:#8a5f3b;color:#fbe9c9;border:1px solid #5c3d23;border-left:none;border-radius:0 6px 6px 0;padding:9px 12px;font-size:11px;letter-spacing:.2px;box-shadow:3px 3px 6px #0004;text-align:left;transition:background .15s ease,color .15s ease}
 .book-bookmark:hover{background:#9c6c42}
 .book-bookmark.is-active{background:#f6ecd4;color:#4a3223;font-weight:700}
-.book-bookmark--holding{background:#5c7148;color:#f2f7e8}
-.book-bookmark--holding.is-active{background:#f6ecd4;color:#3f5230}
 
 .book-pages{position:relative;display:flex;height:100%;background:#4a3223;border:14px solid #3a2a1c;border-radius:10px;box-shadow:0 28px 90px #0b0704cc,inset 0 0 0 2px #6d4e32;overflow:hidden;perspective:none}
 /* Perspective is opening-only: internal turns must never magnify the paper. */

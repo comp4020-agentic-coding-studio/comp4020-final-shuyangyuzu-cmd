@@ -25,6 +25,159 @@ export function bindDirectionHold(button, { onPress, onRelease, onTap }) {
     win.removeEventListener('blur', release); button.ownerDocument.removeEventListener('visibilitychange', hidden);
   };
 }
+// Splits the server's own [startedAt, endsAt) window evenly across
+// however many kinds are actually being eaten/drunk (one or two — never
+// more), each kind getting an equal share and the same lift/active/down
+// sub-stages within its own share, so a solo meal and the "meal" half of
+// a combined action look identical — only the window they sit inside
+// differs. Pure function of (kinds, progress 0..1), independently
+// testable without a real clock or a running animation frame.
+//
+// `localProgress` (2026-11 addition, Codex-reviewed "the plate just sits
+// there" gap) is the same 0..1 value `local` always was internally, now
+// exposed so drawEatingScene can interpolate a CONTINUOUS pick-up/eat/
+// put-down motion instead of only three discrete snapshots — `stage`
+// itself is unchanged and still exactly "lift" | "active" | "down" at the
+// same 0.25/0.75 thresholds, so nothing that only reads `.kind`/`.stage`
+// breaks.
+export function eatingPhaseAt(kinds, progress) {
+  const n = kinds.length;
+  if (n === 0) return null;
+  const clamped = Math.max(0, Math.min(1, progress));
+  const index = Math.min(n - 1, Math.floor(clamped * n));
+  const kind = kinds[index];
+  const local = clamped * n - index; // 0..1 within this kind's own share
+  const stage = local < 0.25 ? 'lift' : local < 0.75 ? 'active' : 'down';
+  return { kind, stage, localProgress: local };
+}
+
+// Continuous "lift it up -> consume it fully -> set it back down" curve
+// over one kind's own 0..1 local share (CLAUDE.md's seated-eating
+// correction: the plate/glass must visibly move and visibly empty, not
+// sit fixed while only a bite-counter or liquid-height snaps between a
+// couple of discrete values). LIFT_END/LOWER_START are shared between the
+// rise/fall interpolation and the consumption interpolation so the two
+// always agree: still rising/already lowering means "not yet eating/
+// drinking," fully raised means "actively consuming."
+const EAT_LIFT_END = 0.18;
+const EAT_LOWER_START = 0.82;
+
+/** 0 at the very start of this kind's share (still on the table), ramps
+ * to 1 by EAT_LIFT_END (fully raised to mouth height), holds at 1 through
+ * the active window, then ramps back to 0 after EAT_LOWER_START (back
+ * down on the table, now empty). */
+function liftFactor(local) {
+  if (local <= EAT_LIFT_END) return local / EAT_LIFT_END;
+  if (local >= EAT_LOWER_START) return 1 - (local - EAT_LOWER_START) / (1 - EAT_LOWER_START);
+  return 1;
+}
+
+/** 0 while still being lifted (nothing eaten/drunk yet), ramps linearly
+ * to 1 across the actively-held window, then holds at 1 while being
+ * lowered back down (already empty by the time it reaches the table). */
+function consumedFactor(local) {
+  const span = EAT_LOWER_START - EAT_LIFT_END;
+  return Math.max(0, Math.min(1, (local - EAT_LIFT_END) / span));
+}
+
+// The seated eating/drinking cutscene (CLAUDE.md's seated-eating
+// section) — a third-person close-up drawn with the viewer's own
+// clothing colour/skin tone, over a dining-table or counter/back-bar
+// background depending on where they're seated. Pure canvas drawing,
+// code-authored like the rest of this file's art (CLAUDE.md: original or
+// clearly licensed, never copied). Kept as its own module-level
+// function, not a method on the big closure below, since it only needs
+// its 2D context, the colour/skin hexes already in scope, and plain
+// numbers — nothing from the rest of createTavern's internal state.
+//
+// 2026-11 correction (Codex review): the plate/glass used to sit fixed in
+// one spot with only the arm/liquid-height snapping between a few
+// discrete poses — "pick up the plate, eat, put the empty plate down,
+// pick up the drink, drink it, put the glass down" wasn't actually
+// happening, just three still frames per item. Every prop that moves now
+// interpolates continuously from liftFactor/consumedFactor above: the
+// plate/glass itself visibly rises off the table to mouth height, the
+// food/liquid visibly shrinks away while it's held up there, and it
+// visibly lowers back down already empty — a real, continuous motion
+// rather than a snap between poses, matching the request's own
+// pick-up/finish/put-down wording exactly. `box(x, y, w, h, colour)` is
+// intentionally a 5-argument helper closing over this function's own
+// `ctx` — a prior round's bug was calling it with a stray leading `ctx`
+// argument copied from this file's OTHER `box(c, x, y, w, h, colour)`
+// helper (used for the live map canvas); every call site below passes
+// exactly five arguments, never six.
+function drawEatingScene(ctx, vw, vh, { color, skin, phase, seatKind, reduceMotion }) {
+  const cx = vw / 2, cy = vh / 2;
+  const box = (x, y, w, h, c) => { ctx.fillStyle = c; ctx.fillRect(x, y, w, h); };
+  // Background: the counter/back-bar (dark cabinet, bottles) for a bar
+  // stool, a dining-table close-up (warm wood, a plate) otherwise —
+  // CLAUDE.md's two required backgrounds, reusing this file's existing
+  // warm pixel palette (the same cabinetBottle/rug colours drawn
+  // elsewhere in this module for the live map).
+  if (seatKind === 'stool') {
+    box(0, 0, vw, vh, '#2e211d');
+    box(0, vh * 0.55, vw, vh * 0.45, '#6b4635');
+    box(0, vh * 0.55, vw, 6, '#8a5f3f');
+    for (let i = 0; i < 5; i++) box(vw * 0.08 + i * vw * 0.18, vh * 0.12, vw * 0.07, vh * 0.3, ['#729f80', '#9c6848', '#b78a59', '#5e7d9e', '#8a594c'][i % 5]);
+  } else {
+    box(0, 0, vw, vh, '#473943');
+    box(0, vh * 0.58, vw, vh * 0.42, '#8d4545');
+    box(vw * 0.08, vh * 0.6, vw * 0.84, vh * 0.06, '#ad7054');
+  }
+  if (!phase) return;
+  // The seated figure, large and centred — reuses this scene's own
+  // skin/colour swatches, not the shared world sprite() primitive (that
+  // one is tuned for a small top-down tile, not a close-up).
+  const s = Math.min(vw, vh) / 7;
+  ctx.save();
+  ctx.translate(cx, cy + s * 0.6);
+  box(-s * 1.1, -s * 0.4, s * 2.2, s * 1.4, color); // torso
+  box(-s * 0.7, -s * 1.9, s * 1.4, s * 1.5, skin); // head
+  box(-s * 0.9, -s * 2.05, s * 1.8, s * 0.55, '#43302d'); // hair
+  const tableY = -s * 0.15; // resting height on the table/counter top
+  const local = Math.max(0, Math.min(1, phase.localProgress ?? 0));
+  const lift = liftFactor(local);
+  const consumed = consumedFactor(local);
+  // A small chewing/sipping wobble only while actually, actively holding
+  // the item up near the mouth (lift close to 1) and not mid the
+  // rise/lower transit — skipped entirely under prefers-reduced-motion
+  // (CLAUDE.md: a less-motion pose is fine, a frozen illusion of eating
+  // is not required to move).
+  const activelyHeld = local > EAT_LIFT_END && local < EAT_LOWER_START;
+  const wobble = reduceMotion || !activelyHeld ? 0 : Math.sin(Date.now() / 160) * s * 0.05;
+
+  if (phase.kind === 'meal') {
+    const liftedY = tableY - s * 0.85;
+    const plateY = tableY - (tableY - liftedY) * lift + wobble;
+    // The plate itself moves — from resting on the table, up to mouth
+    // height, and back down — rather than staying fixed while only an
+    // arm/bite-count changes elsewhere.
+    box(-s * 0.9, plateY, s * 1.8, s * 0.25, '#f5ecd9');
+    // The food remaining on the plate visibly shrinks away as it's eaten
+    // (a single shrinking portion, not a few discrete bite-marks) —
+    // centred on the plate, width scales from full down to nothing.
+    const foodW = s * 1.4 * (1 - consumed);
+    if (foodW > 0.5) box(-foodW / 2, plateY + s * 0.03, foodW, s * 0.12, '#8a5f3f');
+    // Forearm + fork, following the plate's own current height so the
+    // whole gesture reads as one continuous reach-up/reach-down motion.
+    box(s * 0.6, plateY - s * 0.35, s * 0.22, s * 0.55, skin);
+    box(s * 0.6 + s * 0.04, plateY - s * 0.47, s * 0.14, s * 0.14, '#cfd3d8'); // fork head
+  } else {
+    const liftedY = tableY - s * 0.85;
+    const glassY = tableY - (tableY - liftedY) * lift + wobble;
+    const glassX = s * 0.72;
+    // Liquid level drops continuously as the glass is held up, rather
+    // than snapping between two heights — never fully to zero, so an
+    // "empty" glass still reads as a glass rather than disappearing.
+    const fullH = s * 0.3, emptyH = s * 0.04;
+    const liquidH = fullH - (fullH - emptyH) * consumed;
+    box(glassX, glassY, s * 0.28, s * 0.5, '#f5ecd988'); // glass outline/shell
+    box(glassX, glassY + (s * 0.5 - liquidH), s * 0.28, liquidH, '#e4bf7e'); // remaining liquid
+    box(glassX + s * 0.02, glassY - s * 0.55, s * 0.2, s * 0.55, skin); // arm holding it
+  }
+  ctx.restore();
+}
+
 export function createTavern({ el, render, navigate, buildClassicPanel, saveSession, shouldApplyLiveUpdate, createMenuBook, mixologyModule, ordersApi }) {
   const menuBook=createMenuBook({el,mixologyModule,ordersApi});
   const colors = { red:'#c85e59', blue:'#6485bc', green:'#629e86', yellow:'#ddba65', purple:'#997cb5', teal:'#66b5b0', orange:'#cf8858', pink:'#cd88a3' };
@@ -109,6 +262,14 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     // someone instead of into them" — the original, chat-independent part
     // 2 rule.
     let approachTarget=null;
+    // The seated eating/drinking lock (CLAUDE.md's seated-eating
+    // section) — mirrors exactly what the public snapshot's own
+    // mine.eating field says, never a locally-invented duration: the
+    // cutscene's progress is always computed from the server's own
+    // startedAt/endsAt, so a refresh or a reconnect mid-animation simply
+    // resumes at the right point rather than restarting or losing it.
+    // {kinds, startedAt, endsAt, seatKind} while active, else null.
+    let eatingUI=null;
     const holdCleanups=[];
     dispose=()=>{
       active=false;holdCleanups.forEach(cleanup=>cleanup());document.body.classList.remove('world-mode');
@@ -149,13 +310,42 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     for(const [label,dx,dy] of [['↑',0,-1],['←',-1,0],['↓',0,1],['→',1,0]]) {
       const b=el('button',{'aria-label':`Walk ${label}`},label);directions.appendChild(b);
       holdCleanups.push(bindDirectionHold(b, {
-        onPress:()=>{ if(!mine||overlay.childElementCount)return;path=[];heldDirection={dx,dy};queueStep(dx,dy); },
+        onPress:()=>{ if(!mine||overlay.childElementCount||eatingUI)return;path=[];heldDirection={dx,dy};queueStep(dx,dy); },
         onRelease:({cancelled})=>{ if(heldDirection?.dx===dx&&heldDirection?.dy===dy){heldDirection=null;if(cancelled)path=[];} },
         onTap:()=>queueStep(dx,dy),
       }));
     }
     const seatLayer=el('div',{class:'seat-layer'});
-    const scene=el('div',{class:'tavern-world'},[canvas,seatLayer,hud,toast,directions]); render(scene);
+    // The overhead holding/eat/drink prompt (CLAUDE.md's seated-eating
+    // section) — a single DOM button layered over the canvas, following
+    // this patron's own head position every frame exactly like
+    // menuBookButton/seat-target buttons already do, rather than a
+    // canvas-drawn label (which can't be a real click target). Hidden
+    // whenever there's nothing to show; its own text is set per-frame
+    // from holdingLabelFor() below. Only ever rendered — let alone
+    // clickable — for `mine`; a bystander's own holding/eating status is
+    // drawn as a plain, non-interactive canvas tag in animate() instead
+    // (CLAUDE.md: others can see it, but never click it for someone else).
+    const eatPromptBtn=el('button',{class:'seat-target eat-prompt-target',onclick:async()=>{
+      if(!mine||overlay.childElementCount||eatingUI)return;
+      try{
+        const idempotencyKey=`${session.playerId}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+        const resp=await ordersApi.startEating(session,idempotencyKey);
+        eatingUI={kinds:resp.kinds,startedAt:resp.startedAt,endsAt:resp.endsAt,seatKind:mySeatKind()};
+      }catch(e){toast.textContent=e.message||'Could not start eating.';}
+    }});
+    seatLayer.appendChild(eatPromptBtn);
+    // The eating cutscene's own full-screen canvas — a separate layer
+    // above everything else in the scene (including the HUD/toast),
+    // shown only while eatingUI is set. Kept as a second canvas rather
+    // than reusing the map's own one: the map canvas keeps rendering the
+    // live world underneath at its own resolution/camera, which this
+    // scene has no use for and would have to fight for context state
+    // with (fillStyle/transform) every frame.
+    const eatCanvas=el('canvas',{class:'eating-cutscene','aria-hidden':'true'});
+    const eatCtx=eatCanvas.getContext('2d');
+    const eatReduceMotion=typeof matchMedia==='function'?matchMedia('(prefers-reduced-motion: reduce)'):{matches:false};
+    const scene=el('div',{class:'tavern-world'},[canvas,seatLayer,hud,toast,directions,eatCanvas]); render(scene);
     const overlay=el('div',{class:'world-overlay'});scene.appendChild(overlay);
     // The counter's own physical menu book (public/menuBook.js) — one
     // in-scene entry point replacing the old "Mixology book"/"Meals/
@@ -164,9 +354,36 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     // stops held movement the same way every other overlay dialog here
     // already does.
     function openMenuBook(){
-      if(!mine||overlay.childElementCount)return;
+      if(!mine||overlay.childElementCount||eatingUI)return;
       path=[];destination=null;keys.clear();heldDirection=null;pendingSitSeat=null;approachTarget=null;
       menuBook.open(overlay,session,menuBookButton.getBoundingClientRect());
+    }
+    // Which background the cutscene should show — a stool (counter/
+    // back-bar) or a dining-table seat — read from the real seat/
+    // furniture layout, the same `layout.seats`/fixtures data every
+    // other seat-aware function here already uses, never guessed from
+    // position alone.
+    function mySeatKind(){
+      if(!mine?.seatId)return 'dining';
+      const seat=(layout.seats||[]).find(s=>s.id===mine.seatId);
+      const f=seat&&fixtures.find(x=>x.id===seat.furnitureId);
+      return f?.kind==='stool'?'stool':'dining';
+    }
+    // "Eat" / "Drink" / "Eat & Drink", from this patron's own currently-
+    // held kinds (CLAUDE.md: the prompt names the action, never the
+    // specific dish) — null when there is nothing to hold/eat yet, which
+    // hides the prompt entirely rather than showing an empty button.
+    function holdingLabelFor(p){
+      if(!p)return null;
+      const seated=p.seatId!=null;
+      const meal=p.holding?.meal, drink=p.holding?.drink;
+      if(!meal&&!drink)return null;
+      const what=meal&&drink?'Eat & Drink':meal?'Eat':'Drink';
+      // Standing: a plain, non-clickable "holding" tag — can carry food/
+      // a drink around, but can't consume it until actually seated
+      // (CLAUDE.md: server already refuses this; the prompt just never
+      // invites the click it would be refused anyway).
+      return seated?{label:what,actionable:true}:{label:'Holding',actionable:false};
     }
     let layout;
     try { layout=await read('/layout'); } catch(e) {toast.textContent=e.message;return;}
@@ -255,7 +472,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       const f=fixtures.find(f=>f.id===s.furnitureId);
       const label=`Sit — ${f?.kind==='stool'?'bar stool':'dining chair'} ${s.id}`;
       const button=el('button',{class:'seat-target','aria-label':label,'data-hint':'Sit down',title:'Sit down',onclick:()=>{
-        if(!mine||overlay.childElementCount)return;
+        if(!mine||overlay.childElementCount||eatingUI)return;
         // A seat-target button is a separate DOM element layered over the
         // canvas — it never goes through the canvas's own click handler,
         // so the same player-click-takes-priority rule (part 2) has to be
@@ -270,7 +487,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     for(const s of layout.gameChairs||[]){
       const f=fixtures.find(f=>f.id===s.tableId);
       const button=el('button',{class:'seat-target','aria-label':`Choose ${s.color} seat — ${f.label}`,'data-hint':f.available?`Choose ${s.color} seat`:'Not yet open',title:f.available?`Choose ${s.color} seat`:'Not yet open',onclick:()=>{
-        if(!mine||overlay.childElementCount)return;
+        if(!mine||overlay.childElementCount||eatingUI)return;
         // A present game occupant's effective position is this exact
         // chair tile (src/position.ts) — clicking it walks up to them
         // (part 2's "real chair position, not a hidden lobby coordinate"
@@ -297,13 +514,17 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     // `<button>`) and by a plain tap on mobile (CLAUDE.md: "must not
     // require hover to be discoverable").
     const menuBookButton=el('button',{class:'seat-target menu-book-target','aria-label':'Open the counter’s book','data-hint':'Open the book','title':'Open the book',onclick:()=>{
-      if(!mine||overlay.childElementCount)return;
+      if(!mine||overlay.childElementCount||eatingUI)return;
       openMenuBook();
     }});
     seatLayer.appendChild(menuBookButton);
     const ctx=canvas.getContext('2d');
     let vw=window.innerWidth,vh=window.innerHeight;
-    const resize=()=>{vw=window.innerWidth;vh=window.innerHeight;const dpr=Math.min(devicePixelRatio||1,2);canvas.width=vw*dpr;canvas.height=vh*dpr;canvas.style.width=vw+'px';canvas.style.height=vh+'px';ctx.setTransform(dpr,0,0,dpr,0,0);};resize();
+    const resize=()=>{
+      vw=window.innerWidth;vh=window.innerHeight;const dpr=Math.min(devicePixelRatio||1,2);
+      canvas.width=vw*dpr;canvas.height=vh*dpr;canvas.style.width=vw+'px';canvas.style.height=vh+'px';ctx.setTransform(dpr,0,0,dpr,0,0);
+      eatCanvas.width=vw*dpr;eatCanvas.height=vh*dpr;eatCanvas.style.width=vw+'px';eatCanvas.style.height=vh+'px';eatCtx.setTransform(dpr,0,0,dpr,0,0);
+    };resize();
     window.addEventListener('resize',resize);
     // Mirrors src/barLayout.ts's isWalkingFloor, from the same
     // FURNITURE list (fetched via GET /api/bar/layout) — a fixture with
@@ -336,7 +557,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       }
       if(!prev.has(end))return [];const result=[];let key=end;while(key!==start){result.unshift(key.split(',').map(Number));key=prev.get(key);}return result;
     }
-    function queueStep(dx,dy){if(!mine||moving||overlay.childElementCount)return;const x=mine.x+dx,y=mine.y+dy;if(canStep(x,y)){pendingSitSeat=null;approachTarget=null;path=[[x,y]];destination={x,y};}}
+    function queueStep(dx,dy){if(!mine||moving||overlay.childElementCount||eatingUI)return;const x=mine.x+dx,y=mine.y+dy;if(canStep(x,y)){pendingSitSeat=null;approachTarget=null;path=[[x,y]];destination={x,y};}}
     // The one free-adjacent-tile picker behind both "click an occupied
     // floor tile" (part 2) and "click a nearby player to chat" (part 3):
     // among the up to 4 cardinal neighbours of (tx,ty) that are actually
@@ -361,7 +582,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     // (ordinary, server-validated step by step) and let step() below
     // finish the gesture once it confirms arrival.
     function beginSit(seat){
-      if(!mine||overlay.childElementCount)return;
+      if(!mine||overlay.childElementCount||eatingUI)return;
       if(manhattan(mine.x,mine.y,seat.x,seat.y)<=1){
         path=[];destination=null;pendingSitSeat=null;
         post(`/seats/${seat.id}/sit`,session).then(resp=>{applyIncoming(resp);toast.textContent='Seated — use Stand up to leave the chair.';}).catch(e=>{toast.textContent=e.message||'Could not sit down';});
@@ -377,7 +598,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     // (that was part 3's own, now superseded by public speech bubbles;
     // see CLAUDE.md's "Public tavern speech" section for the history).
     function approachPlayer(player){
-      if(!mine||overlay.childElementCount||player.id===mine.id)return;
+      if(!mine||overlay.childElementCount||eatingUI||player.id===mine.id)return;
       if(manhattan(mine.x,mine.y,player.x,player.y)<=1)return; // already adjacent — nothing more to do
       const approach=findApproachTile(player.x,player.y);
       if(!approach){toast.textContent="Can't reach them right now.";return;}
@@ -407,6 +628,21 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         // than only ever once per whole session.
         if(pct<20&&!lowStaminaNotified){lowStaminaNotified=true;toast.textContent='Getting low on energy — the counter has meals and drinks.';}
         else if(pct>=20)lowStaminaNotified=false;
+      }
+      // Recovers the eating lock straight from the server's own public
+      // field on every reconcile — including the very first one after a
+      // fresh page load/refresh or a reconnect — rather than only ever
+      // being set locally by the prompt's own click handler. This is
+      // what makes a mid-animation refresh resume the cutscene instead
+      // of silently losing it, and what clears it the moment the
+      // server's own lazy-expiry says the 8 seconds are up, with no
+      // client "I'm done" message required either way (CLAUDE.md).
+      if(mine?.eating){
+        if(!eatingUI||eatingUI.startedAt!==mine.eating.startedAt){
+          eatingUI={kinds:mine.eating.kinds,startedAt:mine.eating.startedAt,endsAt:mine.eating.endsAt,seatKind:mySeatKind()};
+        }
+      }else if(eatingUI){
+        eatingUI=null;
       }
     }
     // The staleness rule for this channel: public/liveSync.js's
@@ -708,11 +944,11 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       }},'Return to your game');hud.querySelector('.hud-actions').appendChild(returnGameButton);}
       toast.textContent='Welcome in. WASD / arrows to walk · click a destination';canvas.focus();
     }
-    const keyDown=e=>{if(['INPUT','TEXTAREA'].includes(e.target.tagName)||overlay.childElementCount)return;const key=e.key.toLowerCase();if(['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright'].includes(key)){e.preventDefault();keys.add(key);path=[];pendingSitSeat=null;approachTarget=null;}if(e.key==='Escape'){path=[];destination=null;pendingSitSeat=null;approachTarget=null;}};
+    const keyDown=e=>{if(['INPUT','TEXTAREA'].includes(e.target.tagName)||overlay.childElementCount||eatingUI)return;const key=e.key.toLowerCase();if(['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright'].includes(key)){e.preventDefault();keys.add(key);path=[];pendingSitSeat=null;approachTarget=null;}if(e.key==='Escape'){path=[];destination=null;pendingSitSeat=null;approachTarget=null;}};
     const keyUp=e=>keys.delete(e.key.toLowerCase());const blur=()=>{keys.clear();heldDirection=null;path=[];pendingSitSeat=null;approachTarget=null;};
     window.addEventListener('keydown',keyDown);window.addEventListener('keyup',keyUp);window.addEventListener('blur',blur);
     canvas.addEventListener('click',e=>{
-      if(!mine||overlay.childElementCount)return;const rect=canvas.getBoundingClientRect(),x=Math.floor((e.clientX-rect.left+camera.x)/tile),y=Math.floor((e.clientY-rect.top+camera.y)/tile);
+      if(!mine||overlay.childElementCount||eatingUI)return;const rect=canvas.getBoundingClientRect(),x=Math.floor((e.clientX-rect.left+camera.x)/tile),y=Math.floor((e.clientY-rect.top+camera.y)/tile);
       // A player's own tile takes priority over whatever floor, seat, or
       // table is underneath them (product-direction-update, part 2) —
       // clicking yourself is a deliberate no-op. Checked first, before
@@ -1042,7 +1278,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     }
     function animate(now){
       if(!active)return;frame=requestAnimationFrame(animate);
-      if(session&&mine&&!moving&&now-lastTime>145&&!overlay.childElementCount){
+      if(session&&mine&&!moving&&now-lastTime>145&&!overlay.childElementCount&&!eatingUI){
         let dx=0,dy=0;if(keys.has('w')||keys.has('arrowup'))dy=-1;else if(keys.has('s')||keys.has('arrowdown'))dy=1;
         if(keys.has('a')||keys.has('arrowleft'))dx=-1;else if(keys.has('d')||keys.has('arrowright'))dx=1;
         if(heldDirection){dx=heldDirection.dx;dy=heldDirection.dy;}
@@ -1101,6 +1337,32 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         menuBookButton.style.display=mine&&bx+bookHotspotHalfW*2>0&&by+bookHotspotHalfH*2>0&&bx<vw&&by<vh?'block':'none';
         menuBookButton.style.transform=`translate(${Math.round(bx)}px,${Math.round(by)}px)`;
       }
+      // My own overhead holding/eat/drink prompt (CLAUDE.md's seated-
+      // eating section) — positioned every frame above my own head,
+      // exactly where the nickname tag itself will be drawn a little
+      // further below, so the two never overlap (the prompt sits above
+      // the tag, not beside it). Hidden entirely once eatingUI is set
+      // (the cutscene has taken over) or once there's nothing held.
+      if(mine&&!eatingUI){
+        const myPrompt=holdingLabelFor(mine);
+        if(myPrompt){
+          const myPos=displayPositions.get(mine.id)||{x:mine.x,y:mine.y};
+          const px=(myPos.x+.5)*tile-camera.x, py=(mine.seatId?(myPos.y+.75)*tile-7:(myPos.y+.75)*tile)-camera.y-92;
+          eatPromptBtn.textContent=myPrompt.label;
+          eatPromptBtn.disabled=!myPrompt.actionable;
+          eatPromptBtn.classList.toggle('eat-prompt-passive',!myPrompt.actionable);
+          eatPromptBtn.style.display='block';
+          // The button's own width is auto/text-sized (CSS), so centering
+          // it under px is a CSS transform (translateX(-50%)) rather than
+          // a JS-measured half-width — correct regardless of how long
+          // "Eat & Drink" ends up being in any given font/zoom.
+          eatPromptBtn.style.transform=`translate(${Math.round(px)}px,${Math.round(py)}px) translateX(-50%)`;
+        }else{
+          eatPromptBtn.style.display='none';
+        }
+      }else{
+        eatPromptBtn.style.display='none';
+      }
       const seatedPatrons=new Set();
       for(const s of layout.gameChairs||[]){
         const t=state.tables.find(t=>t.id===s.tableId);
@@ -1136,6 +1398,24 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         sprite(ctx,x,p.seatId?y-7:y,colors[p.color]||colors.green,skins[p.skin]||skins.warm,p.seatId?1.0:1.15,walking?now/90:0,!!p.seatId);
         ctx.font='12px monospace';ctx.textAlign='center';const label=p.nickname+(p.id===mine?.id?' · you':'');const width=ctx.measureText(label).width+14;
         box(ctx,x-width/2,y-72,width,20,'#292635dc');ctx.fillStyle='#f5e7d2';ctx.fillText(label,x,y-58);
+        // A bystander's own holding/eating status (CLAUDE.md: visible to
+        // others, never clickable for anyone but the actor themselves,
+        // and never the specific dish) — drawn as a plain canvas tag
+        // just above the nickname, never for `mine` here (the clickable
+        // DOM prompt positioned earlier in this same frame already
+        // covers that case, and would otherwise double-render this
+        // text). Skipped for a frame where this patron also has an
+        // active speech bubble — that already occupies the same spot
+        // just above the nickname tag, and a speech bubble (max 8s) is
+        // the more time-sensitive of the two to show without crowding.
+        if(p.id!==mine?.id&&!p.speech){
+          const tag=p.eating?(p.eating.kinds.length>1?'Eating & drinking':p.eating.kinds[0]==='meal'?'Eating':'Drinking')
+            :(p.holding?.meal||p.holding?.drink)?'Holding':null;
+          if(tag){
+            const tw=ctx.measureText(tag).width+12;
+            box(ctx,x-tw/2,y-95,tw,17,'#3f4a3399');ctx.fillStyle='#e9f0d8';ctx.font='10px monospace';ctx.fillText(tag,x,y-83);ctx.font='12px monospace';
+          }
+        }
         // Follows the same interpolated, camera-adjusted (x,y) the
         // nickname tag and sprite themselves use — walking, sitting at a
         // dining/stool chair, and the camera panning all move the bubble
@@ -1144,6 +1424,24 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       }
       if(!session){sprite(ctx,vw/2,vh/2+60,colors.green,skins.warm,1.2);}
       const shade=ctx.createRadialGradient(vw/2,vh/2,100,vw/2,vh/2,Math.max(vw,vh)*.7);shade.addColorStop(0,'#100d1800');shade.addColorStop(1,'#100d1870');ctx.fillStyle=shade;ctx.fillRect(0,0,vw,vh);
+      // The seated eating/drinking cutscene (CLAUDE.md's seated-eating
+      // section) — drawn on its own full-screen layer above the whole
+      // map whenever eatingUI is set, timed purely from the server's own
+      // startedAt/endsAt (never a locally-invented duration), so a
+      // refresh mid-animation resumes at the right point rather than
+      // restarting. Cleared back to transparent the instant eatingUI
+      // goes null (reconcile() above, driven by the server's own lazy
+      // expiry) — nothing here ever decides on its own that the action
+      // is "done"; the server's state is what ends it.
+      if(mine&&eatingUI){
+        eatCanvas.style.display='block';
+        const startMs=new Date(eatingUI.startedAt).getTime(), endMs=new Date(eatingUI.endsAt).getTime();
+        const progress=endMs>startMs?(Date.now()-startMs)/(endMs-startMs):1;
+        const phase=eatingPhaseAt(eatingUI.kinds,progress);
+        drawEatingScene(eatCtx,vw,vh,{color:colors[mine.color]||colors.green,skin:skins[mine.skin]||skins.warm,phase,seatKind:eatingUI.seatKind,reduceMotion:eatReduceMotion.matches});
+      }else{
+        eatCanvas.style.display='none';
+      }
     }
     frame=requestAnimationFrame(animate);
     dispose=()=>{active=false;cancelAnimationFrame(frame);timers.forEach(clearInterval);holdCleanups.forEach(cleanup=>cleanup());window.removeEventListener('resize',resize);window.removeEventListener('keydown',keyDown);window.removeEventListener('keyup',keyUp);window.removeEventListener('blur',blur);document.body.classList.remove('world-mode');};

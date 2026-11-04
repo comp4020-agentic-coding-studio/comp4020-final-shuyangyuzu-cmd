@@ -15,6 +15,15 @@ import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import { logAction, markIdentityVerified, transact } from "./actionLog.ts";
 import { requireBarSession } from "./bar.ts";
+import {
+  activeEatingRow,
+  eatingRequestResult,
+  isEating,
+  recordEatingRequest,
+  writeEatingLock,
+  type EatingAction,
+  type EatingKind,
+} from "./eating.ts";
 import { restoreStamina, STAMINA_MEAL_RESTORE, STAMINA_DRINK_RESTORE } from "./stamina.ts";
 
 export class OrderError extends Error {
@@ -385,6 +394,10 @@ export function placeOrder(
   const item = menuItem(itemId);
   const resolvedVariant = resolveVariant(item, variant);
   if (!idempotencyKey) throw new OrderError("missing idempotency key", "bad_request", 400);
+  // Mid eating/drinking animation, no other action may run (CLAUDE.md:
+  // "while eating, no moving, standing, re-ordering/consuming, or game
+  // actions") — checked fresh here, not just hidden client-side.
+  if (isEating(db, barPlayerId)) throw new OrderError("finish eating or drinking first", "eating_active", 409);
 
   return transact(db, () => {
     const existingByKey = db
@@ -433,7 +446,24 @@ export function placeOrder(
  * makes a double-click, a retried fetch, or two tabs racing the same
  * consume unable to double-restore, the same idempotency shape
  * `placeOrder`'s own key check already uses, keyed here by the held
- * item's own row instead. */
+ * item's own row instead.
+ *
+ * Deliberately NOT gated on being seated or free of an eating lock —
+ * this is the low-level, exactly-once-per-row primitive `startEating`
+ * below actually calls for each held item it's starting; its own
+ * contract (and the 15 tests in spec/orders.test.ts that already pin it
+ * down) is unchanged by the seated-eating feature. The seat check, the
+ * eating-lock check, and the ~8-second animation all live one level up,
+ * in startEating.
+ *
+ * NOT reachable over HTTP as of the 2026-11 correction: `POST
+ * /api/orders/consume` used to expose this function directly with no
+ * seat/lock check in front of it, which let a standing patron bypass the
+ * entire seated-eating feature (a real bug Codex found and reproduced —
+ * see CLAUDE.md's seated-eating correction and
+ * spec/ordersHttp.test.ts). That route is gone; this function now has
+ * exactly one caller, startEating, and exists purely as an internal
+ * building block. */
 export function consumeHeldItem(
   db: Database.Database,
   barPlayerId: string,
@@ -441,37 +471,158 @@ export function consumeHeldItem(
   heldItemId: string,
 ): HeldItem {
   requireBarSession(db, barPlayerId, barSessionSecret);
+  return transact(db, () => consumeHeldItemLocked(db, barPlayerId, heldItemId));
+}
+
+/** The actual mutation, factored out so startEating (below) can call it
+ * for one or two held items inside its own single transaction without
+ * re-running requireBarSession for each — the caller already proved
+ * identity once. */
+function consumeHeldItemLocked(db: Database.Database, barPlayerId: string, heldItemId: string): HeldItem {
+  const row = db
+    .prepare(`SELECT id, kind, item_id, variant, state FROM held_items WHERE id = ? AND player_id = ?`)
+    .get(heldItemId, barPlayerId) as HeldItemRow | undefined;
+  if (!row) throw new OrderError("you aren't holding that item", "not_held", 404);
+
+  if (row.state === "consumed") {
+    // Already consumed — a harmless re-send of the same request, never
+    // a second restore. markIdentityVerified already ran via
+    // requireBarSession above, so this is logged as a genuine, verified
+    // no-op rather than a rejection.
+    return toHeldItem(row);
+  }
+
+  const item = MENU.find((m) => m.id === row.item_id);
+  const restoreAmount = item?.restoreAmount ?? 0;
+  restoreStamina(db, barPlayerId, restoreAmount);
+  db.prepare(`UPDATE held_items SET state = 'consumed', consumed_at = ? WHERE id = ?`).run(
+    new Date().toISOString(),
+    heldItemId,
+  );
+
+  logAction(db, {
+    action: "consume_item",
+    outcome: "ok",
+    verified: true,
+    actor: { kind: "bar", id: barPlayerId },
+    detail: { item: row.item_id, kind: row.kind, restored: restoreAmount },
+  });
+
+  return { ...toHeldItem(row), state: "consumed" };
+}
+
+// ---- Seated eating/drinking (2026-10-29 round) ----
+//
+// CLAUDE.md's "Seated eating and drinking" section is the full product
+// rule; this is the server-authoritative lifecycle it describes. A
+// dining/stool seat (src/barLayout.ts's BAR_SEATS — a game table's own
+// chairs are never in that table, by construction, so this check can't
+// be satisfied by sitting at a Vegas/poker chair) is required to START
+// eating; once started, the 8-second lock (src/eating.ts) is what keeps
+// the player from moving, standing, ordering again, or joining a game
+// until it naturally expires — not a second, separate "are they still
+// seated" check on every tick. Standing up mid-animation is simply one
+// more thing bar.ts's standFromSeat refuses while the lock is active,
+// the same way it already refuses while poker membership is active.
+
+/** Which held items an eating action should actually consume, and in
+ * which order the animation plays (CLAUDE.md: meal then drink, when
+ * both are held — "start eating -> finish the plate -> put it down ->
+ * pick up the drink -> finish it -> put it down"; only one kind plays if
+ * only one is held). Returns an empty array if nothing is actually held
+ * to eat/drink right now. */
+function heldToStart(db: Database.Database, barPlayerId: string): HeldItemRow[] {
+  const rows = db
+    .prepare(`SELECT id, kind, item_id, variant, state FROM held_items WHERE player_id = ? AND state = 'held'`)
+    .all(barPlayerId) as HeldItemRow[];
+  const meal = rows.find((r) => r.kind === "meal");
+  const drink = rows.find((r) => r.kind === "drink");
+  return [meal, drink].filter((r): r is HeldItemRow => r != null);
+}
+
+/** Starts the seated eating/drinking action for every currently-held
+ * item (one call starts both the meal and the drink together, if both
+ * are held — CLAUDE.md's combined sequence). Consumes each held item
+ * and restores stamina for it immediately, atomically, in the same
+ * transaction as the lock row itself — the 8-second wait that follows is
+ * purely a client-visible animation window with nothing still "owed" by
+ * the time it finishes (see src/eating.ts's own header for why this is
+ * the design, not a shortcut). Idempotent the same way placeOrder is: a
+ * retried start with the same idempotencyKey returns the already-started
+ * action rather than re-consuming anything or restarting the clock —
+ * including after that action's own lock has long since naturally
+ * expired, or the process has restarted, since the check below is
+ * against a durable, permanent record (src/eating.ts's
+ * eatingRequestResult/recordEatingRequest), never the lock row alone.
+ *
+ * 2026-11 correction (Codex found and reproduced this as a real bug,
+ * fixed here): a retried request carrying an OLD action's own key used to
+ * be checked only against the LOCK's own idempotency_key column — which
+ * only ever remembers the single most recent request and stops mattering
+ * the instant the lock naturally expires. A late or duplicated retry of
+ * the FIRST request, arriving after that lock had already expired (and
+ * possibly after the player had already ordered something new), would
+ * fall through to the "start a new action" branch below and consume
+ * whatever happens to be held *now* — a completely different item than
+ * the one that request actually meant, restarting the clock and silently
+ * misattributing a fresh restore to a stale request. The fix: check the
+ * durable per-(player, key) record FIRST, unconditionally, before the
+ * lock's own active/expired state is even considered — see
+ * spec/eating.test.ts's own regression tests for the exact scenario this
+ * closes. */
+export function startEating(
+  db: Database.Database,
+  barPlayerId: string,
+  barSessionSecret: string,
+  idempotencyKey: string,
+): EatingAction {
+  requireBarSession(db, barPlayerId, barSessionSecret);
+  if (!idempotencyKey) throw new OrderError("missing idempotency key", "bad_request", 400);
 
   return transact(db, () => {
-    const row = db
-      .prepare(`SELECT id, kind, item_id, variant, state FROM held_items WHERE id = ? AND player_id = ?`)
-      .get(heldItemId, barPlayerId) as HeldItemRow | undefined;
-    if (!row) throw new OrderError("you aren't holding that item", "not_held", 404);
+    // Checked first and unconditionally: a key that already started a
+    // real action always returns that exact original result, regardless
+    // of whether its own lock is still active, has since expired, or the
+    // row behind it no longer exists at all.
+    const pastResult = eatingRequestResult(db, barPlayerId, idempotencyKey);
+    if (pastResult) return pastResult;
 
-    if (row.state === "consumed") {
-      // Already consumed — a harmless re-send of the same request,
-      // never a second restore. markIdentityVerified already ran via
-      // requireBarSession above, so this is logged as a genuine,
-      // verified no-op rather than a rejection.
-      return toHeldItem(row);
+    const existing = activeEatingRow(db, barPlayerId);
+    if (existing?.active) {
+      // existing.row.idempotency_key can only ever be the CURRENT lock's
+      // own key (bar_eating_actions is overwritten per-player on every
+      // new start) — the pastResult check above already handles any
+      // older key durably, so this branch only needs to refuse a
+      // genuinely different, concurrent request while still locked.
+      throw new OrderError("you're already eating or drinking", "eating_active", 409);
     }
 
-    const item = MENU.find((m) => m.id === row.item_id);
-    const restoreAmount = item?.restoreAmount ?? 0;
-    restoreStamina(db, barPlayerId, restoreAmount);
-    db.prepare(`UPDATE held_items SET state = 'consumed', consumed_at = ? WHERE id = ?`).run(
-      new Date().toISOString(),
-      heldItemId,
-    );
+    const seated = db.prepare(`SELECT 1 FROM bar_seats WHERE occupied_by = ?`).get(barPlayerId);
+    if (!seated) {
+      throw new OrderError("sit at a dining table or a bar stool first", "not_seated", 409);
+    }
+
+    const toConsume = heldToStart(db, barPlayerId);
+    if (toConsume.length === 0) {
+      throw new OrderError("you aren't holding anything to eat or drink", "nothing_held", 409);
+    }
+
+    for (const row of toConsume) consumeHeldItemLocked(db, barPlayerId, row.id);
+    const kinds = toConsume.map((r) => r.kind as EatingKind);
+    const action = writeEatingLock(db, barPlayerId, kinds, idempotencyKey);
+    recordEatingRequest(db, barPlayerId, idempotencyKey, action);
 
     logAction(db, {
-      action: "consume_item",
+      action: "start_eating",
       outcome: "ok",
       verified: true,
       actor: { kind: "bar", id: barPlayerId },
-      detail: { item: row.item_id, kind: row.kind, restored: restoreAmount },
+      detail: { kinds: kinds.join("+") },
     });
 
-    return { ...toHeldItem(row), state: "consumed" };
+    return action;
   });
 }
+
+export { currentEatingAction, isEating } from "./eating.ts";
+export type { EatingAction, EatingKind } from "./eating.ts";

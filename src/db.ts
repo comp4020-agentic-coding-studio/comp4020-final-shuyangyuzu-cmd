@@ -289,6 +289,76 @@ function migrate(db: Database.Database): void {
     -- is the backstop against a race the application check alone can't
     -- rule out.
     CREATE UNIQUE INDEX IF NOT EXISTS held_items_one_per_kind ON held_items(player_id, kind) WHERE state = 'held';
+
+    -- Seated eating/drinking's own action lock (2026-10-29 round, Claude).
+    -- One row per bar identity currently mid-animation — same "one row,
+    -- lazily expired by comparing a stored timestamp to now, no sweep"
+    -- shape as bar_speech/table_departures above, which is deliberate:
+    -- it's what lets a refresh, a reconnect, or a server restart recover
+    -- for free (ends_at survives all three, and "still eating" is just
+    -- "ends_at > now", re-evaluated fresh on every read) without any
+    -- client "I'm done" callback ever being required (src/orders.ts's
+    -- startEating). kinds is a small JSON array ("meal", "drink", or
+    -- both, in display order) — enough for a bystander's client to know
+    -- what animation to render without exposing which specific dish
+    -- (CLAUDE.md's seated-eating section). idempotency_key is the same
+    -- "a retried click is a no-op, not a second restore" key every other
+    -- mutation in this codebase already uses (src/orders.ts's own
+    -- placeOrder, keyed the same way) — checked before the held item(s)
+    -- are actually consumed, so a doubled click can never double-restore
+    -- even though (unlike placeOrder) there's only one row to dedupe
+    -- against rather than one per order.
+    CREATE TABLE IF NOT EXISTS bar_eating_actions (
+      player_id TEXT PRIMARY KEY REFERENCES bar_players(id),
+      kinds TEXT NOT NULL,
+      idempotency_key TEXT,
+      started_at TEXT NOT NULL,
+      ends_at TEXT NOT NULL
+    );
+
+    -- Durable idempotency record for startEating (2026-11 correction —
+    -- Codex reproduced this as a real bug, Claude fixed it). Brand-new
+    -- table, so CREATE TABLE IF NOT EXISTS is genuinely sufficient here
+    -- (CLAUDE.md's migration rule only requires addColumnIfMissing for a
+    -- column added to a table that already exists in production).
+    --
+    -- bar_eating_actions above is a LOCK, not a request log: it is keyed
+    -- by player_id alone (one row per identity, overwritten by
+    -- ON CONFLICT on every new start) and its own idempotency_key column
+    -- only ever remembers the MOST RECENT request, with no memory of
+    -- anything before it, and it stops existing in any practical sense
+    -- the instant ends_at passes ("still eating" is simply false after
+    -- that). A retried request carrying an OLDER action's own key — late
+    -- off a slow network, or genuinely duplicated — would therefore fall
+    -- straight through startEating's "are we currently eating" check once
+    -- the original lock naturally expired, landing in the "start a new
+    -- action" path instead: it would consume whatever is held RIGHT NOW
+    -- (which could by then be a completely different, newly-ordered item)
+    -- and restart the clock, double-charging nothing by coincidence and
+    -- misattributing everything by design.
+    --
+    -- This table is keyed by (player_id, idempotency_key) directly — one
+    -- permanent row per request that ever actually started a new eating
+    -- action, holding exactly the result that request produced. Checked
+    -- FIRST, before bar_eating_actions' own active/expired state is even
+    -- considered: any request carrying a key already in this table always
+    -- returns that same stored result, verbatim, regardless of whether
+    -- the lock it created is still active, has since naturally expired,
+    -- or the row was deleted/the whole process restarted in between —
+    -- there is nothing time-sensitive about this lookup the way the lock
+    -- itself deliberately is. Rows accumulate permanently, the same way
+    -- held_items' own consumed rows already do, rather than being swept —
+    -- there is no unbounded-per-tick cost to clean up here, just one row
+    -- per eating action a player ever actually started.
+    CREATE TABLE IF NOT EXISTS bar_eating_requests (
+      player_id TEXT NOT NULL REFERENCES bar_players(id),
+      idempotency_key TEXT NOT NULL,
+      kinds TEXT NOT NULL,
+      started_at TEXT NOT NULL,
+      ends_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (player_id, idempotency_key)
+    );
   `);
 
   // Added after the first deploy. "CREATE TABLE IF NOT EXISTS" above is a

@@ -1003,20 +1003,42 @@ app.post("/api/orders/place", async (c) => {
   return c.json(result, 201);
 });
 
-app.post("/api/orders/consume", async (c) => {
-  const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody & { heldItemId?: unknown };
-  const result = orders.consumeHeldItem(
+// REMOVED (2026-11, Codex-found bug, Claude fix): this route used to
+// expose src/orders.ts's consumeHeldItem directly, with no seat or
+// eating-lock check of its own — a standing patron holding an item could
+// call it over plain HTTP and restore stamina instantly, with none of the
+// seated-eating feature's actual rules (a real dining/stool seat, the
+// ~8s server-controlled animation lock) ever applying. consumeHeldItem
+// itself is unchanged and still exactly what spec/orders.test.ts pins
+// down — it is startEating's own internal, already-authenticated
+// primitive (src/orders.ts), never meant to enforce the seat/lock rule on
+// its own, and that was always true. The bug was this route handing that
+// primitive to the public internet with nothing in front of it. Rather
+// than bolt a seat/lock check onto a second public entry point (which
+// would just be a second copy of startEating's own rule to keep in sync),
+// the route is gone outright: /api/orders/eat below is the one and only
+// public way to ever consume a held item, for every client, with no
+// other path left to bypass it. See CLAUDE.md's seated-eating correction
+// and spec/ordersHttp.test.ts's own regression test.
+
+// The actual seated-eating entry point (CLAUDE.md's seated-eating
+// section): requires a real dining/stool seat and consumes every
+// currently-held item in one call, starting the ~8s lock. Pushes a fresh
+// bar snapshot immediately — not just for this identity's own stamina
+// chip, but because `eating`/`holding` are public fields every
+// bystander's client also needs promptly, to render the same in-
+// progress animation and clear the overhead "holding" prompt.
+app.post("/api/orders/eat", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as BarAuthedBody & { idempotencyKey?: unknown };
+  const result = orders.startEating(
     db,
     barPlayerId(body),
     barSessionSecret(body),
-    typeof body.heldItemId === "string" ? body.heldItemId : "",
+    typeof body.idempotencyKey === "string" ? body.idempotencyKey : "",
   );
-  // Stamina just changed — push a fresh snapshot the same way every
-  // other bar mutation already does, so the HUD's stamina chip and the
-  // character panel update live for this identity's other open tabs too.
   const snap = barSnapshot(live.bumpBarSeq());
   live.publishBar(snap);
-  return c.json(result);
+  return c.json(result, 201);
 });
 
 // ---- Real-time push (Crit 9) — see CLAUDE.md for what this transport is

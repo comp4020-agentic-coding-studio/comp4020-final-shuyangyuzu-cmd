@@ -42,7 +42,11 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
 
   let dialog = null, previousFocus = null, session = null;
   let menu = null, held = [];
-  // stage: 'cover' | 'mixology' | 'list' | 'detail' | 'held'
+  // stage: 'cover' | 'mixology' | 'list' | 'detail' — the old 'held'
+  // stage/bookmark is gone (CLAUDE.md's seated-eating section): eating
+  // and drinking now happen from an overhead head-tag prompt in the
+  // tavern itself (public/tavern.js), never from a page inside this
+  // book, so there is no "Holding" page left to paginate to.
   let stage = 'cover';
   let listKind = 'meal';
   let cursor = 0; // index of the first page shown, within the current stage's flat page list
@@ -119,17 +123,6 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
       if (!isFlipping) setSlotsInstant(buildPagesContent());
     } catch (e) {
       statusEl.textContent = e.message || 'Could not place that order.';
-    }
-  }
-
-  async function doConsume(heldItem, statusEl) {
-    try {
-      await ordersApi.consumeHeld(session, heldItem.id);
-      await refreshHeld();
-      statusEl.textContent = `${heldItem.kind === 'meal' ? 'Ate' : 'Drank'} ${heldItem.itemName}. Stamina restored.`;
-      if (!isFlipping) setSlotsInstant(buildPagesContent());
-    } catch (e) {
-      statusEl.textContent = e.message || 'Could not finish that.';
     }
   }
 
@@ -214,7 +207,10 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
       el('h3', {}, item.kind === 'meal' ? 'Order this meal' : 'Order this drink'),
     ];
     if (activeHeld) {
-      body.push(el('p', {}, `You're already holding a ${item.kind} (${activeHeld.itemName}) — finish it from the "Holding" bookmark before ordering another.`));
+      // The old "Holding" bookmark/page is gone (CLAUDE.md's seated-eating
+      // section replaced it with an overhead head-tag prompt) — this just
+      // points at the real in-world entry point now.
+      body.push(el('p', {}, `You're already holding a ${item.kind} (${activeHeld.itemName}) — eat or drink it from your own head-tag prompt in the tavern before ordering another.`));
     } else {
       if (item.variants?.length && !item.variants.some((v) => v.label === selectedVariant)) selectedVariant = item.variants[0].label;
       const confirmLabel = () => item.name + (selectedVariant ? `, ${selectedVariant.toLowerCase()}` : '');
@@ -243,31 +239,12 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
     return el('div', { class: 'book-page' }, body.filter(Boolean));
   }
 
-  function heldPage() {
-    const status = el('p', { class: 'mix-storage', role: 'status' });
-    const list = !held.length
-      ? el('p', { class: 'mix-small' }, "You aren't holding anything yet.")
-      : el('ul', { class: 'order-held' }, held.map((h) => el('li', {}, [
-          el('span', {}, `${h.itemName}${h.variant ? `, ${h.variant.toLowerCase()}` : ''}`),
-          h.state === 'consumed'
-            ? el('small', {}, 'Already eaten/drunk')
-            : el('button', { class: 'mix-primary', onclick: () => doConsume(h, status) }, h.kind === 'meal' ? 'Eat' : 'Drink'),
-        ])));
-    return el('div', { class: 'book-page' }, [
-      el('p', { class: 'book-running-head' }, 'Holding'),
-      el('h2', {}, "What you're holding"),
-      el('p', { class: 'mix-subtitle' }, 'One meal and one drink at a time — eat or drink before ordering another of the same kind.'),
-      list, status,
-    ]);
-  }
-
   // ---- Flat page lists per stage, and the two-slot spread they fill ----
 
   function flatPages() {
     if (stage === 'cover') return [coverLeftPage, coverRightPage];
     if (stage === 'list') return itemsOfKind(listKind).map((item) => () => itemPage(item));
     if (stage === 'detail') return [() => detailLeftPage(detailItem), () => detailRightPage(detailItem)];
-    if (stage === 'held') return [heldPage];
     return []; // 'mixology' doesn't paginate — see buildPagesContent
   }
 
@@ -465,29 +442,20 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
     chapterFlip(() => { stage = 'cover'; cursor = 0; }, 'backward');
   }
 
-  function goHeld() {
-    if (isFlipping || stage === 'held') return;
-    chapterFlip(() => { stage = 'held'; cursor = 0; }, 'forward');
-  }
-
   // ---- Chrome: bookmarks, bottom nav cluster, corners, SR title ----
 
   function updateChrome() {
     const title = stage === 'cover' ? 'The Counter’s Book'
       : stage === 'mixology' ? 'The Mixology Book'
-      : stage === 'held' ? "What you're holding"
       : stage === 'detail' ? detailItem.name
       : listKind === 'meal' ? 'Meals' : 'Drinks';
     srTitle.textContent = title;
 
     for (const btn of bookmarksEl.querySelectorAll('[data-bookmark]')) {
       const key = btn.getAttribute('data-bookmark');
-      const active = (key === 'mixology' && stage === 'mixology') || (key === 'held' && stage === 'held') || (stage === 'list' && listKind === key);
+      const active = (key === 'mixology' && stage === 'mixology') || (stage === 'list' && listKind === key);
       btn.classList.toggle('is-active', active);
     }
-    const holdingCount = held.filter((h) => h.state === 'held').length;
-    const holdingBtn = bookmarksEl.querySelector('[data-bookmark="held"]');
-    if (holdingBtn) holdingBtn.textContent = holdingCount ? `Holding (${holdingCount})` : 'Holding';
 
     const paginated = stage === 'list' || stage === 'detail';
     if (!paginated) {
@@ -701,7 +669,6 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
       el('button', { class: 'book-bookmark', 'data-bookmark': 'mixology', onclick: () => goToChapter('mixology') }, 'The Mixology Book'),
       el('button', { class: 'book-bookmark', 'data-bookmark': 'meal', onclick: () => goToChapter('meal') }, 'Meals'),
       el('button', { class: 'book-bookmark', 'data-bookmark': 'drink', onclick: () => goToChapter('drink') }, 'Drinks'),
-      el('button', { class: 'book-bookmark book-bookmark--holding', 'data-bookmark': 'held', onclick: () => goHeld() }, 'Holding'),
     ]);
     pagesEl = el('div', {
       class: 'book-pages',
