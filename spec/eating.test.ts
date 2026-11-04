@@ -469,3 +469,44 @@ it("explicitly resuming an existing table binding (tables.resumeActiveTable / ro
   // call it directly, must independently refuse too.
   expect(() => resumeGame(db, created.code, created.playerId, created.sessionSecret)).toThrow(RoomError);
 });
+
+// ---- Regression: rooms.startGame itself lacked the eating guard
+// (Codex-found/reproduced, 2026-11-04 independent review) ----
+//
+// createTableRoom/joinTableRoom/startNpcGame refuse to seat someone new
+// while eating, and roll/place/resumeGame (above) refuse to act on an
+// ALREADY-STARTED game while eating — but a lobby that is fully ready
+// and waiting to start is neither of those: the host's own still-valid
+// room session (a second open tab) could call startGame while physically
+// seated and mid an eating/drinking lock, flipping the room straight from
+// "lobby" to "awaiting_roll" with the lock still active. Reproduced
+// directly before the fix: {eating:true, before:"lobby",
+// startResult:"accepted", after:"awaiting_roll"}.
+it("starting an already-ready lobby is refused while the host's eating lock is active, and succeeds once it ends", () => {
+  const host = joinBar(db, "Eating Host", "red", "warm");
+  const created = createTableRoom(db, "vegas-1", host.playerId, host.sessionSecret, "red");
+  const guestBar = joinBar(db, "Eating Guest", "blue", "warm");
+  const guest = joinTableRoom(db, "vegas-1", guestBar.playerId, guestBar.sessionSecret, "yellow");
+  approveJoin(db, created.code, created.playerId, created.sessionSecret, guest.playerId);
+  setReady(db, created.code, created.playerId, created.sessionSecret, true);
+  setReady(db, created.code, guest.playerId, guest.sessionSecret, true);
+
+  expect(getPublicState(db, created.code).phase).toBe("lobby");
+
+  seatPlayer(host.playerId, host.sessionSecret);
+  placeOrder(db, host.playerId, host.sessionSecret, "soda", null, "k1");
+  const action = startEating(db, host.playerId, host.sessionSecret, "eat-key-1");
+  expect(isEating(db, host.playerId)).toBe(true);
+
+  expect(() => startGame(db, created.code, created.playerId, created.sessionSecret)).toThrow(RoomError);
+  expect(getPublicState(db, created.code).phase).toBe("lobby"); // unchanged
+
+  // Once the lock naturally expires, the exact same start request succeeds.
+  db.prepare(`UPDATE bar_eating_actions SET ends_at = ? WHERE player_id = ?`).run(
+    new Date(action.startedAt).toISOString(),
+    host.playerId,
+  );
+  expect(isEating(db, host.playerId)).toBe(false);
+  startGame(db, created.code, created.playerId, created.sessionSecret);
+  expect(getPublicState(db, created.code).phase).toBe("awaiting_roll");
+});

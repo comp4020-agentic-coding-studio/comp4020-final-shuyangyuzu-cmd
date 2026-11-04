@@ -1172,6 +1172,12 @@ export function startGame(db: Database.Database, code: string, playerId: string,
   if (row.host_player_id !== playerId) {
     throw new RoomError("only the host can start the game", "not_host", 403);
   }
+  // 2026-11-04 Codex-found/reproduced bug: a fully-ready lobby is neither
+  // "joining something new" (already gated by createTableRoom/
+  // joinTableRoom/startNpcGame) nor "acting on an already-started game"
+  // (gated by refuseIfEating in roll/place/nextRound/resumeGame) — it's a
+  // third case startGame itself must gate directly.
+  refuseIfEating(db, playerId);
 
   transact(db, () => {
     const fresh = db
