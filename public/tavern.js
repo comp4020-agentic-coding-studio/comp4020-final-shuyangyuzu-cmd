@@ -51,33 +51,203 @@ export function eatingPhaseAt(kinds, progress) {
   return { kind, stage, localProgress: local };
 }
 
-// Continuous "lift it up -> consume it fully -> set it back down" curve
-// over one kind's own 0..1 local share (CLAUDE.md's seated-eating
-// correction: the plate/glass must visibly move and visibly empty, not
-// sit fixed while only a bite-counter or liquid-height snaps between a
-// couple of discrete values). LIFT_END/LOWER_START are shared between the
-// rise/fall interpolation and the consumption interpolation so the two
-// always agree: still rising/already lowering means "not yet eating/
-// drinking," fully raised means "actively consuming."
-const EAT_LIFT_END = 0.18;
-const EAT_LOWER_START = 0.82;
+// ---- The seated eating/drinking cutscene, redone 2026-11-04 after the
+// student's own review of the previous version: the figure had no face,
+// the "plate" was a flat rectangle, and the "glass" was a plain box —
+// none of it actually read as a plate, a glass, or a person eating.
+// This rewrite keeps eatingPhaseAt's own public contract (`{kind, stage,
+// localProgress}`, `stage` still exactly lift/active/down at the same
+// 0.25/0.75 split — spec/eatingAnimation.test.ts's existing assertions
+// are untouched) and only changes how drawEatingScene interprets
+// `localProgress` within a kind's own share, breaking it into the
+// seven sub-beats the student specifically asked to see:
+//   1. utensils + plate/glass down on the table, character holding fork+knife
+//   2. fork lifts a bite to the mouth, with visible chewing
+//   3. utensils set down, hand lifts the plate itself toward the face
+//   4. the plate continuously TILTS while rising — front visible, rotating
+//      to show its own underside — never a snap, never a whole-canvas zoom
+//   5. the now-empty plate lowers back down, un-tilting as it goes
+//   6. the stemmed glass lifts to the mouth and tilts, liquid visibly draining
+//   7. the empty glass lowers back to the table
+// A solo "meal" plays beats 1-5 across its own full local share; a solo
+// "drink" plays 1 + 6-7. A combined action is still exactly two
+// back-to-back per-kind cycles (meal's own full share, then drink's own
+// full share) — eatingPhaseAt already guarantees this split; nothing here
+// changes that boundary. ----
 
-/** 0 at the very start of this kind's share (still on the table), ramps
- * to 1 by EAT_LIFT_END (fully raised to mouth height), holds at 1 through
- * the active window, then ramps back to 0 after EAT_LOWER_START (back
- * down on the table, now empty). */
-function liftFactor(local) {
-  if (local <= EAT_LIFT_END) return local / EAT_LIFT_END;
-  if (local >= EAT_LOWER_START) return 1 - (local - EAT_LOWER_START) / (1 - EAT_LOWER_START);
-  return 1;
+// Fractions of ONE KIND's own local 0..1 share — tuned so "hold up the
+// bite, chew" and "tilt the plate/glass" both get a real, visible
+// window rather than being instantaneous. Meal: fork phase first, then
+// the plate-lift phase. Drink: a bare hold (no separate "fork" stage)
+// straight into the glass-lift.
+const MEAL_FORK_END = 0.34; // fork-to-mouth + chewing ends here
+const MEAL_PLATE_LIFT_END = 0.5; // plate fully risen+tilted by here
+const MEAL_PLATE_LOWER_START = 0.92; // plate starts descending here
+const DRINK_LIFT_END = 0.22;
+const DRINK_LOWER_START = 0.82;
+
+/** Smoothstep-style ease for every continuous motion below — a plain
+ * linear ramp reads as mechanical at this scale; this keeps every
+ * rise/tilt/lower feeling like an actual arm movement without needing a
+ * real physics/easing library for a handful of lerps. */
+function ease(t) {
+  const c = Math.max(0, Math.min(1, t));
+  return c * c * (3 - 2 * c);
 }
 
-/** 0 while still being lifted (nothing eaten/drunk yet), ramps linearly
- * to 1 across the actively-held window, then holds at 1 while being
- * lowered back down (already empty by the time it reaches the table). */
-function consumedFactor(local) {
-  const span = EAT_LOWER_START - EAT_LIFT_END;
-  return Math.max(0, Math.min(1, (local - EAT_LIFT_END) / span));
+/** All the derived sub-phase values drawEatingScene needs for a 'meal'
+ * kind, purely a function of localProgress — kept as one pure helper so
+ * the actual drawing code below just reads named fields instead of
+ * re-deriving thresholds inline. */
+function mealBeats(local) {
+  const forkRaise = ease(Math.min(1, local / (MEAL_FORK_END * 0.5)));
+  const forkLower = local > MEAL_FORK_END * 0.5 ? ease(Math.min(1, (local - MEAL_FORK_END * 0.5) / (MEAL_FORK_END * 0.5))) : 0;
+  const forkHeight = local <= MEAL_FORK_END ? forkRaise - forkLower : 0; // 0..1..0 bite arc
+  const chewing = local > MEAL_FORK_END * 0.25 && local < MEAL_FORK_END * 0.85;
+  const biteEaten = local >= MEAL_FORK_END * 0.6; // the one forked bite disappears from the plate partway through its own arc
+
+  let plateLift = 0, plateTilt = 0;
+  if (local <= MEAL_FORK_END) {
+    plateLift = 0; plateTilt = 0;
+  } else if (local < MEAL_PLATE_LIFT_END) {
+    const t = ease((local - MEAL_FORK_END) / (MEAL_PLATE_LIFT_END - MEAL_FORK_END));
+    plateLift = t; plateTilt = t; // rises and tilts together, continuously
+  } else if (local < MEAL_PLATE_LOWER_START) {
+    plateLift = 1; plateTilt = 1; // held up, tipped to the mouth, emptying
+  } else {
+    const t = ease((local - MEAL_PLATE_LOWER_START) / (1 - MEAL_PLATE_LOWER_START));
+    plateLift = 1 - t; plateTilt = 1 - t; // continuous un-tilt + lower, together
+  }
+  // Food remaining on the plate: the one forked bite goes first (a visible
+  // notch), then the rest drains away continuously while the plate itself
+  // is held up tilted (never instantly empty the moment it's lifted).
+  const plateEmptySpan = Math.max(0.0001, MEAL_PLATE_LOWER_START - MEAL_PLATE_LIFT_END);
+  const plateConsumed = local <= MEAL_PLATE_LIFT_END ? 0 : ease(Math.min(1, (local - MEAL_PLATE_LIFT_END) / plateEmptySpan));
+  return { forkHeight, chewing, biteEaten, plateLift, plateTilt, plateConsumed };
+}
+
+function drinkBeats(local) {
+  let lift = 0;
+  if (local <= DRINK_LIFT_END) lift = ease(local / DRINK_LIFT_END);
+  else if (local < DRINK_LOWER_START) lift = 1;
+  else lift = 1 - ease((local - DRINK_LOWER_START) / (1 - DRINK_LOWER_START));
+  const span = Math.max(0.0001, DRINK_LOWER_START - DRINK_LIFT_END);
+  const consumed = local <= DRINK_LIFT_END ? 0 : Math.min(1, (local - DRINK_LIFT_END) / span);
+  return { lift, consumed };
+}
+
+/** A filled ellipse — used for the plate rim/inner-circle and the
+ * glass's own rounded bowl, since a plate/glass drawn only from boxes
+ * reads as a slab, never as tableware (the student's own specific
+ * complaint about the previous version). */
+function ellipse(ctx, x, y, rx, ry, color) {
+  if (rx <= 0 || ry <= 0) return;
+  ctx.beginPath();
+  ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+}
+
+/** The plate, drawn with real thickness/rim/inner-circle so it reads as
+ * a dish rather than a rectangle. `tilt` (0..1) continuously rotates it
+ * from lying flat (an ellipse, food visible on top) to edge-on (a thin
+ * sliver — its own underside facing the viewer), via a vertical scale on
+ * the ellipse itself — this IS the "plate continuously flips to show its
+ * back" behaviour, expressed as geometry rather than a whole-canvas
+ * zoom/snap. `food` (0..1, 1 = full) draws the remaining portion only
+ * while the plate is still closer to flat than edge-on, since food on an
+ * edge-on plate wouldn't visibly sit on it anyway. */
+function drawPlate(ctx, x, y, w, tilt, food, biteNotch) {
+  const flatRy = w * 0.22;
+  const ry = flatRy * (1 - tilt * 0.92); // never fully to 0 — a hairline edge still reads as "a plate", not nothing
+  const rx = w / 2;
+  ellipse(ctx, x, y + ry * 0.12, rx * 1.02, ry * 1.1, '#00000022'); // soft shadow of the rim's own thickness
+  ellipse(ctx, x, y, rx, ry, '#efe3c9'); // plate body
+  ellipse(ctx, x, y, rx * 0.72, ry * 0.72, '#f8f1dd'); // inner well
+  ellipse(ctx, x, y, rx * 0.72, ry * 0.72, '#00000012'); // faint well shading
+  if (food > 0.02 && tilt < 0.6) {
+    const foodAlpha = Math.min(1, (0.6 - tilt) / 0.3);
+    ctx.save();
+    ctx.globalAlpha = foodAlpha;
+    const fw = rx * 0.95 * food;
+    const fh = ry * 0.5 * food;
+    ellipse(ctx, x - (biteNotch ? rx * 0.08 : 0), y, fw, fh, '#8a5f3f');
+    ellipse(ctx, x - (biteNotch ? rx * 0.08 : 0), y - fh * 0.2, fw * 0.7, fh * 0.55, '#a9754c');
+    ctx.restore();
+  }
+}
+
+/** A stemmed glass (bowl + stem + base), tilted continuously toward the
+ * mouth as it's lifted, with a visibly draining liquid level — the
+ * student's own specific request over the previous plain rectangle. */
+function drawGlass(ctx, x, y, h, tiltRad, liquidFrac) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(tiltRad);
+  const bowlW = h * 0.46, bowlH = h * 0.5, stemH = h * 0.32, baseW = h * 0.4;
+  // Base + stem, drawn first (lowest, behind the bowl).
+  ctx.fillStyle = '#d8d2c0';
+  ctx.fillRect(-baseW / 2, stemH + bowlH * 0.02, baseW, h * 0.05);
+  ctx.fillRect(-h * 0.035, 0, h * 0.07, stemH);
+  // The bowl: an outer glass shell (a rounded trapezoid via two ellipses
+  // and a connecting rect reads close enough at this scale) plus the
+  // liquid drawn only up to its own current, shrinking level from the
+  // bowl's own bottom.
+  const bowlTopY = -bowlH, bowlBottomY = 0;
+  ctx.fillStyle = '#f5ecd955';
+  ctx.beginPath();
+  ctx.moveTo(-bowlW * 0.32, bowlBottomY);
+  ctx.lineTo(-bowlW * 0.5, bowlTopY);
+  ctx.lineTo(bowlW * 0.5, bowlTopY);
+  ctx.lineTo(bowlW * 0.32, bowlBottomY);
+  ctx.closePath();
+  ctx.fill();
+  ellipse(ctx, 0, bowlTopY, bowlW * 0.5, bowlW * 0.14, '#f5ecd977'); // rim ellipse
+  if (liquidFrac > 0.01) {
+    const liquidTopY = bowlBottomY - (bowlBottomY - bowlTopY) * liquidFrac;
+    const liquidHalfW = bowlW * (0.32 + 0.18 * liquidFrac);
+    ctx.fillStyle = '#d99a4f';
+    ctx.beginPath();
+    ctx.moveTo(-bowlW * 0.32, bowlBottomY);
+    ctx.lineTo(-liquidHalfW, liquidTopY);
+    ctx.lineTo(liquidHalfW, liquidTopY);
+    ctx.lineTo(bowlW * 0.32, bowlBottomY);
+    ctx.closePath();
+    ctx.fill();
+    ellipse(ctx, 0, liquidTopY, liquidHalfW, bowlW * 0.1, '#e6b162');
+  }
+  ctx.restore();
+}
+
+/** A face drawn directly on the close-up head — eyes, eyebrows, nose,
+ * mouth — the student's own specific complaint about the previous
+ * version ("人物没有五官"). `chewing` animates the mouth between a
+ * closed line and a small open oval; otherwise a plain closed mouth.
+ * `headX/headY/headW/headH` are the already-positioned head box this is
+ * drawn relative to, so this needs no knowledge of the outer transform. */
+function drawFace(ctx, headX, headY, headW, headH, skin, chewing) {
+  const eyeY = headY + headH * 0.42, mouthY = headY + headH * 0.78;
+  const eyeDX = headW * 0.22, eyeW = headW * 0.1, eyeH = headH * 0.07;
+  // Eyebrows, just above the eyes.
+  ctx.fillStyle = '#4a3a30';
+  ctx.fillRect(headX + headW / 2 - eyeDX - eyeW * 0.6, eyeY - eyeH * 2.1, eyeW * 1.8, eyeH * 0.5);
+  ctx.fillRect(headX + headW / 2 + eyeDX - eyeW * 1.2, eyeY - eyeH * 2.1, eyeW * 1.8, eyeH * 0.5);
+  // Eyes — simple dark ellipses, legible at this close-up scale.
+  ellipse(ctx, headX + headW / 2 - eyeDX, eyeY, eyeW * 0.55, eyeH * 0.6, '#2b2320');
+  ellipse(ctx, headX + headW / 2 + eyeDX, eyeY, eyeW * 0.55, eyeH * 0.6, '#2b2320');
+  // Nose — a small vertical shading stroke, not a filled shape (reads as
+  // a nose bridge at this scale without looking like a growth).
+  ctx.strokeStyle = '#00000030'; ctx.lineWidth = Math.max(1, headW * 0.015);
+  ctx.beginPath(); ctx.moveTo(headX + headW / 2, eyeY + eyeH); ctx.lineTo(headX + headW / 2, mouthY - headH * 0.12); ctx.stroke();
+  // Mouth — animates open/closed while chewing, a plain closed line otherwise.
+  if (chewing) {
+    const openness = 0.4 + 0.6 * Math.abs(Math.sin(Date.now() / 140));
+    ellipse(ctx, headX + headW / 2, mouthY, headW * 0.16, headH * 0.07 * openness, '#6b3a34');
+  } else {
+    ctx.strokeStyle = '#6b3a34'; ctx.lineWidth = Math.max(1, headW * 0.03);
+    ctx.beginPath(); ctx.moveTo(headX + headW / 2 - headW * 0.14, mouthY); ctx.lineTo(headX + headW / 2 + headW * 0.14, mouthY); ctx.stroke();
+  }
+  void skin; // kept in the signature for symmetry/future use (e.g. a skin-toned nose highlight); not needed for the current strokes
 }
 
 // The seated eating/drinking cutscene (CLAUDE.md's seated-eating
@@ -89,23 +259,11 @@ function consumedFactor(local) {
 // function, not a method on the big closure below, since it only needs
 // its 2D context, the colour/skin hexes already in scope, and plain
 // numbers — nothing from the rest of createTavern's internal state.
-//
-// 2026-11 correction (Codex review): the plate/glass used to sit fixed in
-// one spot with only the arm/liquid-height snapping between a few
-// discrete poses — "pick up the plate, eat, put the empty plate down,
-// pick up the drink, drink it, put the glass down" wasn't actually
-// happening, just three still frames per item. Every prop that moves now
-// interpolates continuously from liftFactor/consumedFactor above: the
-// plate/glass itself visibly rises off the table to mouth height, the
-// food/liquid visibly shrinks away while it's held up there, and it
-// visibly lowers back down already empty — a real, continuous motion
-// rather than a snap between poses, matching the request's own
-// pick-up/finish/put-down wording exactly. `box(x, y, w, h, colour)` is
-// intentionally a 5-argument helper closing over this function's own
-// `ctx` — a prior round's bug was calling it with a stray leading `ctx`
-// argument copied from this file's OTHER `box(c, x, y, w, h, colour)`
-// helper (used for the live map canvas); every call site below passes
-// exactly five arguments, never six.
+// `box(x, y, w, h, colour)` is intentionally a 5-argument helper closing
+// over this function's own `ctx` — a prior round's bug was calling it
+// with a stray leading `ctx` argument copied from this file's OTHER
+// `box(c, x, y, w, h, colour)` helper (used for the live map canvas);
+// every call site below passes exactly five arguments, never six.
 function drawEatingScene(ctx, vw, vh, { color, skin, phase, seatKind, reduceMotion }) {
   const cx = vw / 2, cy = vh / 2;
   const box = (x, y, w, h, c) => { ctx.fillStyle = c; ctx.fillRect(x, y, w, h); };
@@ -132,48 +290,87 @@ function drawEatingScene(ctx, vw, vh, { color, skin, phase, seatKind, reduceMoti
   ctx.save();
   ctx.translate(cx, cy + s * 0.6);
   box(-s * 1.1, -s * 0.4, s * 2.2, s * 1.4, color); // torso
-  box(-s * 0.7, -s * 1.9, s * 1.4, s * 1.5, skin); // head
-  box(-s * 0.9, -s * 2.05, s * 1.8, s * 0.55, '#43302d'); // hair
+  const headX = -s * 0.7, headY = -s * 1.9, headW = s * 1.4, headH = s * 1.5;
+  box(headX, headY, headW, headH, skin); // head
+  box(headX - s * 0.2, headY - s * 0.15, headW + s * 0.4, s * 0.55, '#43302d'); // hair
   const tableY = -s * 0.15; // resting height on the table/counter top
   const local = Math.max(0, Math.min(1, phase.localProgress ?? 0));
-  const lift = liftFactor(local);
-  const consumed = consumedFactor(local);
-  // A small chewing/sipping wobble only while actually, actively holding
-  // the item up near the mouth (lift close to 1) and not mid the
-  // rise/lower transit — skipped entirely under prefers-reduced-motion
-  // (CLAUDE.md: a less-motion pose is fine, a frozen illusion of eating
-  // is not required to move).
-  const activelyHeld = local > EAT_LIFT_END && local < EAT_LOWER_START;
-  const wobble = reduceMotion || !activelyHeld ? 0 : Math.sin(Date.now() / 160) * s * 0.05;
+
+  const chewingNow = phase.kind === 'meal' && mealBeats(local).chewing;
+  drawFace(ctx, headX, headY, headW, headH, skin, reduceMotion ? false : chewingNow);
+
+  // A small sipping wobble only while actually holding something up near
+  // the mouth, skipped entirely under prefers-reduced-motion (CLAUDE.md:
+  // a less-motion pose is fine, a frozen illusion of eating is not
+  // required to move).
+  const wobble = reduceMotion ? 0 : Math.sin(Date.now() / 160) * s * 0.03;
+
+  // Utensils resting beside the plate whenever the plate itself hasn't
+  // been picked up yet — fork in the character's own RIGHT hand, knife
+  // in their own LEFT hand; since this is a front-facing close-up, the
+  // character's own right appears on the viewer's LEFT side of the
+  // screen (mirrored toward the camera), matching how a mirror — or a
+  // front-facing photo — always reads.
+  const plateCenterX = s * 0.1, plateCenterY = tableY;
+  const knifeX = plateCenterX + s * 0.95, forkRestX = plateCenterX - s * 0.95; // knife: character's own left -> screen right; fork: character's own right -> screen left
 
   if (phase.kind === 'meal') {
-    const liftedY = tableY - s * 0.85;
-    const plateY = tableY - (tableY - liftedY) * lift + wobble;
-    // The plate itself moves — from resting on the table, up to mouth
-    // height, and back down — rather than staying fixed while only an
-    // arm/bite-count changes elsewhere.
-    box(-s * 0.9, plateY, s * 1.8, s * 0.25, '#f5ecd9');
-    // The food remaining on the plate visibly shrinks away as it's eaten
-    // (a single shrinking portion, not a few discrete bite-marks) —
-    // centred on the plate, width scales from full down to nothing.
-    const foodW = s * 1.4 * (1 - consumed);
-    if (foodW > 0.5) box(-foodW / 2, plateY + s * 0.03, foodW, s * 0.12, '#8a5f3f');
-    // Forearm + fork, following the plate's own current height so the
-    // whole gesture reads as one continuous reach-up/reach-down motion.
-    box(s * 0.6, plateY - s * 0.35, s * 0.22, s * 0.55, skin);
-    box(s * 0.6 + s * 0.04, plateY - s * 0.47, s * 0.14, s * 0.14, '#cfd3d8'); // fork head
+    const { forkHeight, biteEaten, plateLift, plateTilt, plateConsumed } = mealBeats(local);
+    const platePickedUp = plateLift > 0.02;
+
+    // Knife stays resting on the table the whole meal segment — only the
+    // fork and the plate itself ever move.
+    if (!platePickedUp || plateTilt < 0.3) {
+      box(knifeX - s * 0.05, tableY - s * 0.5, s * 0.1, s * 0.5, '#cfd3d8');
+      box(knifeX - s * 0.09, tableY - s * 0.56, s * 0.18, s * 0.1, '#9aa0a8');
+    }
+
+    if (!platePickedUp) {
+      // Beat 1/2: plate flat on the table, fork lifts one bite to the mouth.
+      drawPlate(ctx, plateCenterX, plateCenterY, s * 1.9, 0, 1, biteEaten);
+      const mouthX = s * 0.0, mouthY = headY + headH * 0.78;
+      const forkTipX = forkRestX + (mouthX - forkRestX) * forkHeight + wobble;
+      const forkTipY = (tableY - s * 0.3) + (mouthY - (tableY - s * 0.3)) * forkHeight;
+      // Forearm from off-screen-ish shoulder height to the fork's own
+      // current position, then the fork itself — one continuous reach.
+      ctx.strokeStyle = skin; ctx.lineWidth = s * 0.22; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(forkRestX, tableY + s * 0.1); ctx.lineTo(forkTipX, forkTipY); ctx.stroke();
+      box(forkTipX - s * 0.06, forkTipY - s * 0.14, s * 0.12, s * 0.14, '#cfd3d8');
+    } else {
+      // Beats 3-5: utensils set down; the plate itself rises and
+      // continuously tilts toward the mouth, then un-tilts and lowers —
+      // a true rotation (scaled ellipse height), never a frozen frame.
+      // Target height is just below the mouth (headY + headH*0.78,
+      // ≈ -0.78s) — a real bug this round's own browser verification
+      // caught: the first version lifted all the way to ≈ -1.5s, well
+      // past the head's own top edge, which read as the plate floating
+      // above the character's hair rather than reaching their mouth.
+      const liftedY = headY + headH * 0.78 - s * 0.15;
+      const plateY = tableY - (tableY - liftedY) * plateLift + wobble * plateTilt;
+      const plateX = plateCenterX * (1 - plateTilt) + s * 0.05 * plateTilt;
+      drawPlate(ctx, plateX, plateY, s * 1.7, plateTilt, 1 - plateConsumed, false);
+      // Two hands holding the plate's own edges, following it up.
+      ctx.strokeStyle = skin; ctx.lineWidth = s * 0.2; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(plateX - s * 0.6, tableY + s * 0.15); ctx.lineTo(plateX - s * 0.55, plateY); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(plateX + s * 0.6, tableY + s * 0.15); ctx.lineTo(plateX + s * 0.55, plateY); ctx.stroke();
+    }
   } else {
-    const liftedY = tableY - s * 0.85;
-    const glassY = tableY - (tableY - liftedY) * lift + wobble;
-    const glassX = s * 0.72;
-    // Liquid level drops continuously as the glass is held up, rather
-    // than snapping between two heights — never fully to zero, so an
-    // "empty" glass still reads as a glass rather than disappearing.
-    const fullH = s * 0.3, emptyH = s * 0.04;
-    const liquidH = fullH - (fullH - emptyH) * consumed;
-    box(glassX, glassY, s * 0.28, s * 0.5, '#f5ecd988'); // glass outline/shell
-    box(glassX, glassY + (s * 0.5 - liquidH), s * 0.28, liquidH, '#e4bf7e'); // remaining liquid
-    box(glassX + s * 0.02, glassY - s * 0.55, s * 0.2, s * 0.55, skin); // arm holding it
+    const { lift, consumed } = drinkBeats(local);
+    // The glass rests on the table until lifted; tilts toward the mouth
+    // continuously as it rises, draining visibly as it's held up.
+    const glassRestX = s * 0.55, glassH = s * 1.1;
+    // Same mouth-height fix as the plate above — the glass's own base
+    // (where it meets the hand) lands just below the mouth, not above
+    // the head.
+    const liftedX = s * 0.0, liftedY = headY + headH * 0.78 - s * 0.1;
+    const glassX = glassRestX + (liftedX - glassRestX) * lift;
+    const glassBaseY = tableY + (liftedY - tableY) * lift + wobble * lift;
+    const tiltRad = -lift * 0.9; // tips toward the mouth as it's raised
+    if (lift > 0.02) {
+      ctx.strokeStyle = skin; ctx.lineWidth = s * 0.2; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(glassRestX, tableY + s * 0.15); ctx.lineTo(glassX + Math.sin(tiltRad) * glassH * 0.3, glassBaseY); ctx.stroke();
+    }
+    drawGlass(ctx, glassX, glassBaseY, glassH, tiltRad, 1 - consumed);
   }
   ctx.restore();
 }
@@ -227,11 +424,51 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
   let dispose = () => {};
   let enteredThisPage = false;
   const sessionKey = 'vegas:bar:session';
+  // A real, previously-undocumented weakness found this round: the eating
+  // cutscene's own client-side "has endsAt passed?" check originally
+  // compared the server's endsAt directly against this browser's own
+  // Date.now(), unconditionally assuming the two clocks agree. A real
+  // browser can run meaningfully ahead of or behind the server's own
+  // clock (an unsynced system clock, a VM, a phone with manual time set)
+  // — reproduced directly with a 6-second-fast simulated browser clock:
+  // the cutscene vanished roughly 5 seconds BEFORE the server's real lock
+  // actually ended. The server's own gating was never at risk (confirmed
+  // in the same test: a direct move attempt during that window was still
+  // correctly refused with eating_active — gameplay authority has always
+  // been server-only, CLAUDE.md's own standing rule, and this bug could
+  // never bypass it), but the player would be staring at the ordinary
+  // world with no visible reason they still can't act. `clockSkewMs` is a
+  // rolling estimate of (server time − this browser's own Date.now()),
+  // taken from the standard `Date` response header every ordinary bar
+  // request already receives for free (no new endpoint, no extra round
+  // trip) — `serverNow()` below is what the eating-expiry check now
+  // compares against instead of a bare `Date.now()`.
+  //
+  // The `Date` header is only second-precision (RFC 7231) — real
+  // measurement found this introduces up to roughly ±1s of its own noise
+  // even on a perfectly synced clock, which showed up as the cutscene
+  // lingering ~100ms past the true end in one real run. SKEW_DEADBAND_MS
+  // ignores any estimate smaller than that noise floor, so the overwhelmingly
+  // common well-synced-clock case stays exactly as accurate as a bare
+  // Date.now() comparison always was; only a genuinely large skew (several
+  // seconds, the actual bug this exists to fix) is ever corrected for.
+  const SKEW_DEADBAND_MS = 1500;
+  let clockSkewMs = 0;
+  function noteServerTime(res) {
+    const header = res.headers && res.headers.get && res.headers.get('date');
+    if (!header) return;
+    const serverMs = Date.parse(header);
+    if (Number.isNaN(serverMs)) return;
+    const estimate = serverMs - Date.now();
+    clockSkewMs = Math.abs(estimate) > SKEW_DEADBAND_MS ? estimate : 0;
+  }
+  function serverNow() { return Date.now() + clockSkewMs; }
   const post = async (path, body) => {
     const r = await fetch('/api/bar'+path,{ method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body) });
+    noteServerTime(r);
     const data = await r.json(); if(!r.ok) throw Object.assign(new Error(data.message),{status:r.status}); return data;
   };
-  const read = async path => { const r=await fetch('/api/bar'+path); if(!r.ok) throw new Error('Unable to connect to the tavern'); return r.json(); };
+  const read = async path => { const r=await fetch('/api/bar'+path); noteServerTime(r); if(!r.ok) throw new Error('Unable to connect to the tavern'); return r.json(); };
   function sprite(c,x,y,color,skin,scale=1,step=0,seated=false) {
     c.save(); c.translate(Math.round(x),Math.round(y)); c.scale(scale,scale);
     const rect=(a,b,w,h,t)=>{c.fillStyle=t;c.fillRect(a,b,w,h);};
@@ -334,6 +571,12 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     // resumes at the right point rather than restarting or losing it.
     // {kinds, startedAt, endsAt, seatKind} while active, else null.
     let eatingUI=null;
+    // Set to the endsAt timestamp (ms) we've already triggered a catch-up
+    // fetch for, so the 1-per-second animate() loop requests at most one
+    // extra /state read per actual eating action rather than spamming the
+    // server every frame once the local clock passes endsAt. Reset to null
+    // whenever a genuinely new eatingUI is reconciled (reconcile() below).
+    let eatingExpiryFetchedFor=null;
     const holdCleanups=[];
     // Same-browser, multiple-tabs logout sync: `localStorage.removeItem`
     // fires a `storage` event in every OTHER tab of the same origin (never
@@ -720,6 +963,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       if(mine?.eating){
         if(!eatingUI||eatingUI.startedAt!==mine.eating.startedAt){
           eatingUI={kinds:mine.eating.kinds,startedAt:mine.eating.startedAt,endsAt:mine.eating.endsAt,seatKind:mySeatKind()};
+          eatingExpiryFetchedFor=null;
         }
       }else if(eatingUI){
         eatingUI=null;
@@ -1825,11 +2069,41 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       // expiry) — nothing here ever decides on its own that the action
       // is "done"; the server's state is what ends it.
       if(mine&&eatingUI){
-        eatCanvas.style.display='block';
         const startMs=new Date(eatingUI.startedAt).getTime(), endMs=new Date(eatingUI.endsAt).getTime();
-        const progress=endMs>startMs?(Date.now()-startMs)/(endMs-startMs):1;
-        const phase=eatingPhaseAt(eatingUI.kinds,progress);
-        drawEatingScene(eatCtx,vw,vh,{color:colors[mine.color]||colors.green,skin:skins[mine.skin]||skins.warm,phase,seatKind:eatingUI.seatKind,reduceMotion:eatReduceMotion.matches});
+        // serverNow(), not a bare Date.now() — see noteServerTime's own
+        // comment above for the real bug this closes (a fast/slow browser
+        // clock made the cutscene vanish before, or linger after, the
+        // server's own real window).
+        if(serverNow()>=endMs){
+          // The local (clock-skew-corrected) estimate has reached the
+          // server's own endsAt. Never decide on our own that the action
+          // is actually over — only the server's next reported `eating`
+          // (null once its lazy expiry check sees it) does that, via
+          // reconcile() above — but don't keep drawing a cutscene for a
+          // window that's visibly finished either, and don't just sit
+          // waiting for an opportunistic SSE push or a seq-gated poll that
+          // might not carry a bumped seq for this specific transition (the
+          // lock's own expiry writes nothing to the DB, so nothing bumps
+          // bar_seq on its own until the presence ticker's signature-diff
+          // happens to notice it). One extra direct fetchAndApply() per
+          // action, deduped by endsAt so a slow network/frame-rate can't
+          // fire it twice, forces exactly the same authoritative re-check
+          // a refresh would already trigger — gameplay gating is still
+          // entirely the server's call via `mine.eating`/isEating, never
+          // this timer; a real clock-skew test confirmed a direct move
+          // attempt during this exact window is still correctly refused
+          // server-side even though the local canvas already hid.
+          eatCanvas.style.display='none';
+          if(eatingExpiryFetchedFor!==eatingUI.endsAt){
+            eatingExpiryFetchedFor=eatingUI.endsAt;
+            fetchAndApply();
+          }
+        }else{
+          eatCanvas.style.display='block';
+          const progress=(serverNow()-startMs)/(endMs-startMs);
+          const phase=eatingPhaseAt(eatingUI.kinds,progress);
+          drawEatingScene(eatCtx,vw,vh,{color:colors[mine.color]||colors.green,skin:skins[mine.skin]||skins.warm,phase,seatKind:eatingUI.seatKind,reduceMotion:eatReduceMotion.matches});
+        }
       }else{
         eatCanvas.style.display='none';
       }

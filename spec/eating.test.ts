@@ -174,6 +174,36 @@ it("the lock expires naturally after its own duration, unlocking every gated act
   expect(after.seatId).toBeNull();
 });
 
+// 2026-11-05 regression: after one eating action's lock naturally expires,
+// a genuinely NEW order+eat cycle for the SAME identity must start and
+// restore stamina again — the durable bar_eating_requests table
+// (src/eating.ts's 2026-11 correction) must never mistake a brand-new
+// idempotency key + a brand-new held item for a retry of the first
+// action, and the now-expired lock must never block a fresh one.
+it("a second eat/drink cycle, after the first's lock naturally expires, starts cleanly and restores stamina again", () => {
+  const p = joinBar(db, "SecondHelping", "red", "warm");
+  seatPlayer(p.playerId, p.sessionSecret);
+  db.prepare(`UPDATE bar_stamina SET value = 10 WHERE player_id = ?`).run(p.playerId);
+
+  placeOrder(db, p.playerId, p.sessionSecret, "soda", null, "cycle1");
+  const first = startEating(db, p.playerId, p.sessionSecret, "e-cycle1");
+  expect(currentStamina(db, p.playerId)).toBeCloseTo(40, 2); // 10 + soda's 30
+
+  // Expire the first lock, the same lazy-expiry technique the test above uses.
+  db.prepare(`UPDATE bar_eating_actions SET ends_at = ? WHERE player_id = ?`).run(
+    new Date(Date.now() - 1000).toISOString(),
+    p.playerId,
+  );
+  expect(isEating(db, p.playerId)).toBe(false);
+
+  // A genuinely new order + a genuinely new idempotency key.
+  placeOrder(db, p.playerId, p.sessionSecret, "coffee", null, "cycle2");
+  const second = startEating(db, p.playerId, p.sessionSecret, "e-cycle2");
+  expect(second.startedAt).not.toBe(first.startedAt);
+  expect(isEating(db, p.playerId)).toBe(true);
+  expect(currentStamina(db, p.playerId)).toBeCloseTo(70, 2); // 40 + coffee's 30, not a re-application of the first restore
+});
+
 it("a refresh/reconnect recovers the lock from server state — no client 'I'm done' call required", () => {
   const p = joinBar(db, "Refreshed", "red", "warm");
   seatPlayer(p.playerId, p.sessionSecret);
