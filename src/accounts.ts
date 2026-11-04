@@ -181,17 +181,32 @@ export interface AccountSessionInfo {
  * shape every other requireXSession in this codebase throws, so
  * src/server.ts's existing app.onError handles it without a new case,
  * once AccountError is added to that instanceof list. */
+// 30 days — matches the cookie's own maxAge (src/accountRoutes.ts), so a
+// session that outlives its cookie never has a chance to be presented
+// anyway; this is the server-side enforcement that doesn't depend on
+// the browser actually honoring the cookie's expiry. Evaluated lazily on
+// every read, the same "now minus last activity, recomputed fresh, no
+// sweep" shape this codebase already uses for the lobby disconnect grace
+// and every other time-based expiry (CLAUDE.md) — a session simply stops
+// verifying once its own window passes, nothing else has to notice or
+// clean it up for that to become true.
+const ACCOUNT_SESSION_MAX_AGE_MS = Number(process.env.ACCOUNT_SESSION_MAX_AGE_MS ?? 30 * 24 * 60 * 60 * 1000);
+
 export function verifyAccountSession(db: Database.Database, token: string | undefined): AccountSessionInfo {
   if (!token) throw new AccountError("not logged in", "unauthorized", 401);
   const row = db
     .prepare(
-      `SELECT s.account_id AS accountId, a.username AS username FROM account_sessions s
+      `SELECT s.account_id AS accountId, a.username AS username, s.created_at AS createdAt FROM account_sessions s
        JOIN accounts a ON a.id = s.account_id WHERE s.token = ?`,
     )
-    .get(token) as AccountSessionInfo | undefined;
+    .get(token) as (AccountSessionInfo & { createdAt: string }) | undefined;
   if (!row) throw new AccountError("your session has ended — please log in again", "unauthorized", 401);
+  if (Date.now() - new Date(row.createdAt).getTime() > ACCOUNT_SESSION_MAX_AGE_MS) {
+    db.prepare(`DELETE FROM account_sessions WHERE token = ?`).run(token);
+    throw new AccountError("your session has ended — please log in again", "unauthorized", 401);
+  }
   db.prepare(`UPDATE account_sessions SET last_seen_at = ? WHERE token = ?`).run(new Date().toISOString(), token);
-  return row;
+  return { accountId: row.accountId, username: row.username };
 }
 
 /** The bar identity this account currently controls, or null if it has

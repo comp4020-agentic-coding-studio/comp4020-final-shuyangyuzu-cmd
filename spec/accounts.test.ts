@@ -98,6 +98,24 @@ it("logout revokes exactly the given token", () => {
   expect(() => verifyAccountSession(db, session.token)).toThrow(/session has ended/);
 });
 
+it("an account session expires after its own max age, evaluated lazily (no sweep) exactly like every other time-based grace in this codebase", () => {
+  register(db, "Grant", "correct horse battery staple", null);
+  const session = login(db, "Grant", "correct horse battery staple");
+  expect(() => verifyAccountSession(db, session.token)).not.toThrow();
+  // Backdate created_at past the max age directly, the same technique
+  // spec/eating.test.ts/spec/stamina.test.ts already use for their own
+  // time-based checks — no real waiting required.
+  db.prepare(`UPDATE account_sessions SET created_at = ? WHERE token = ?`).run(
+    new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString(),
+    session.token,
+  );
+  expect(() => verifyAccountSession(db, session.token)).toThrow(/session has ended/);
+  // The expired row is actually gone, not just rejected this one time —
+  // confirms it's a real expiry, not a cached decision.
+  const row = db.prepare(`SELECT 1 FROM account_sessions WHERE token = ?`).get(session.token);
+  expect(row).toBeUndefined();
+});
+
 it("changing nickname does not switch identity, and logging back in does not reset stamina to 80%", () => {
   const result = register(db, "Grace", "correct horse battery staple", null);
   // Decay stamina below 80 by simulating elapsed online time directly —
