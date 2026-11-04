@@ -147,6 +147,17 @@ it("Vegas: device B's login takeover can continue the legal in-progress turn; de
   expect(finalState.body.players).toHaveLength(2);
   expect(finalState.body.closed).toBeFalsy();
 
+  // Voice has no credential of its own (src/voice.ts's requirePresentHuman
+  // calls rooms.requireSeatedHumanPlayer, the same sessions table
+  // rooms.rotateSession already rotated above) — folded into this same
+  // test rather than a separate one, to avoid consuming a third of this
+  // project's only 2 real online Vegas tables.
+  const oldVoiceAttempt = await postJson(`/api/rooms/${code}/voice/start`, hostRoomSession);
+  expect(oldVoiceAttempt.status).toBe(403);
+  const newHostForVoice = { playerId: hostRoomSession.playerId, sessionSecret: deviceB.body.vegasRoom.sessionSecret };
+  const newVoiceAttempt = await postJson(`/api/rooms/${code}/voice/start`, newHostForVoice);
+  expect(newVoiceAttempt.status).toBe(200);
+
   // Free the online Vegas table back up for later tests in this same
   // run — this project only has 2 real online Vegas tables total
   // (spec/tables.test.ts's own header comment). activeVegasRoomPlayerId
