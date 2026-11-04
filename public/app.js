@@ -27,6 +27,7 @@ const { createPokerUI } = await import(`./poker.js?v=${assetVersion}`);
 const pokerUI = createPokerUI({el,navigate});
 const { createDominoUI } = await import(`./domino.js?v=${assetVersion}`);
 const dominoUI = createDominoUI({el,navigate});
+const accountsApi = await import(`./accounts.js?v=${assetVersion}`);
 const COLORS = ["red", "blue", "green", "yellow", "purple"];
 const HEARTBEAT_MS = 5000; // comfortably under the server's default PRESENCE_STALE_MS (15s)
 let activeRoomCode = null;
@@ -1235,5 +1236,5 @@ function hexBoard(code, session, state, isMyTurn) {
 
 // ---- Boot -------------------------------------------------------------
 
-const tavern = createTavern({ el, render, navigate, buildClassicPanel, saveSession, shouldApplyLiveUpdate, createMenuBook, mixologyModule, ordersApi });
+const tavern = createTavern({ el, render, navigate, buildClassicPanel, saveSession, shouldApplyLiveUpdate, createMenuBook, mixologyModule, ordersApi, accountsApi });
 route();

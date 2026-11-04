@@ -178,7 +178,7 @@ function drawEatingScene(ctx, vw, vh, { color, skin, phase, seatKind, reduceMoti
   ctx.restore();
 }
 
-export function createTavern({ el, render, navigate, buildClassicPanel, saveSession, shouldApplyLiveUpdate, createMenuBook, mixologyModule, ordersApi }) {
+export function createTavern({ el, render, navigate, buildClassicPanel, saveSession, shouldApplyLiveUpdate, createMenuBook, mixologyModule, ordersApi, accountsApi }) {
   const menuBook=createMenuBook({el,mixologyModule,ordersApi});
   const colors = { red:'#c85e59', blue:'#6485bc', green:'#629e86', yellow:'#ddba65', purple:'#997cb5', teal:'#66b5b0', orange:'#cf8858', pink:'#cd88a3' };
   const skins = { fair:'#f3d7b6', warm:'#dcb58a', tan:'#ba875f', brown:'#906044', deep:'#614437' };
@@ -212,6 +212,28 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
   async function mount() {
     dispose(); document.body.classList.add('world-mode');
     let active=true, session=null, state={players:[],tables:[]}, mine=null, camera={x:0,y:0}, path=[], moving=false, frame=0, lowStaminaNotified=false;
+    // The logged-in account's own {id, username}, or null for a guest —
+    // refreshed from the server's own cookie-backed session (src/accountRoutes.ts's
+    // GET /me), never inferred from anything stored client-side. Purely
+    // a display/UI-gating concern: the actual bar identity this browser
+    // controls always flows through `session` above exactly as it did
+    // before accounts existed (CLAUDE.md:昵称只是显示名称... 不能把"换昵称"
+    // 等同于换玩家 — likewise, logging in/out is a different thing from
+    // "which bar identity is this browser currently acting as").
+    let account=null;
+    // A short poll (ACCOUNT_POLL_MS) for "did my account session get
+    // replaced elsewhere" — the multi-device takeover's own explicit
+    // requirement ("旧设备明确显示...") needs *some* way to notice a
+    // revoked cookie without the user taking any action first. Reusing
+    // the existing SSE/heartbeat channels would conflate two different
+    // identity layers (account vs bar); a small dedicated interval is
+    // simpler and correct, matching this file's own existing fallback-poll
+    // pattern (the 10s state fetch below).
+    let accountCheckTimer=null, loggedOutElsewhereShown=false;
+    async function refreshAccount(){
+      try{account=(await accountsApi.whoAmI()).account;}catch{account=null;}
+      return account;
+    }
     // This identity's own currently-bound table seat, if any —
     // {tableId, roomCode} or null, re-validated server-side on every
     // join/rejoin/appearance response (src/tables.ts's getActiveSeat),
@@ -868,6 +890,131 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     speechSend.onclick=doSay;
     speechInput.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();doSay();}});
     scene.append(speechBar,speechToggle);
+    // Revokes the server-side account session (the cookie itself is
+    // cleared by the server's own Set-Cookie response — see
+    // src/accountRoutes.ts's logout route), then clears every piece of
+    // THIS browser's own cached identity for the character that account
+    // controlled: the bar session, every room session this tab might
+    // still be holding, and voice/game credentials are covered
+    // transitively since they're never cached independently of those —
+    // a late response to any in-flight request for the OLD identity
+    // naturally 403s once this has run, never silently resurrecting the
+    // old UI (CLAUDE.md: "迟到的响应不能恢复旧账号界面"). Logging out
+    // itself never calls exitGame/fold/disband — CLAUDE.md's own
+    // "退出登录... 不能把旧玩家座位交给新账号" is about NOT silently
+    // reassigning a seat, not about forcing an exit; an active game seat
+    // simply keeps running exactly as the existing disconnect-tolerant
+    // policy already handles any other disconnect.
+    async function doLogout(){
+      if(activeSeat&&!confirm("You're still seated at a game table. Logging out won't exit it — your seat is handled by the normal disconnect rules, exactly like closing this tab would be. Log out anyway?")){
+        return false;
+      }
+      try{await accountsApi.logout();}catch{}
+      account=null;
+      session=null;
+      try{localStorage.removeItem(sessionKey);}catch{}
+      activeSeat=null;
+      if(returnGameButton){returnGameButton.remove();returnGameButton=null;}
+      // This browser no longer controls any identity at all — clear the
+      // just-logged-out character's own cached view (nickname tag,
+      // sprite, stamina chip) rather than leaving it rendered stale
+      // behind the auth overlay until some future server response
+      // happens to overwrite it (CLAUDE.md: "退出/切换...不能把...界面
+      // 恢复"). `mine` stays null until a fresh join/login repopulates it.
+      mine=null;
+      staminaFill.style.width='0%';staminaLabel.textContent='—';
+      enteredThisPage=false;
+      return true;
+    }
+    // The floating Log in / Sign up / Continue as guest entry point
+    // (CLAUDE.md's account section) — shown over the existing character
+    // editor rather than replacing it, since "continue as guest" is
+    // exactly today's existing chooseCharacter() flow with nothing new
+    // required of it.
+    function openAuthOverlay(startMode='menu'){
+      let mode=startMode; // 'menu' | 'login' | 'register'
+      const error=el('p',{class:'error',role:'alert'});
+      function renderMenu(){
+        error.textContent='';
+        overlay.replaceChildren(el('section',{class:'world-dialog auth-dialog',role:'dialog','aria-label':'Log in or sign up'},[
+          el('button',{class:'dialog-close','aria-label':'Close',onclick:()=>{overlay.replaceChildren();chooseCharacter();}},'×'),
+          el('p',{class:'eyebrow'},'Las Vegas · OPEN ALL EVENING'),el('h1',{},'Welcome back — or welcome in.'),
+          el('div',{class:'auth-menu'},[
+            el('button',{type:'button',class:'enter-world',onclick:()=>{mode='login';renderForm();}},'Log in'),
+            el('button',{type:'button',class:'enter-world',onclick:()=>{mode='register';renderForm();}},'Sign up'),
+            el('button',{type:'button',class:'hud-button',onclick:()=>{overlay.replaceChildren();chooseCharacter();}},'Continue as guest'),
+          ]),
+          error,
+        ]));
+      }
+      function renderForm(){
+        error.textContent='';
+        const username=el('input',{placeholder:'Username',id:'auth-username',maxlength:'24',required:true,autocomplete:'username'});
+        const password=el('input',{type:'password',placeholder:'Password',id:'auth-password',required:true,autocomplete:mode==='login'?'current-password':'new-password'});
+        const confirmPassword=mode==='register'?el('input',{type:'password',placeholder:'Confirm password',id:'auth-confirm',required:true,autocomplete:'new-password'}):null;
+        // The optional "keep my current guest character" checkbox
+        // (CLAUDE.md: 服务器验证过的当前游客凭证进行一次性、事务性的绑定) —
+        // only offered when this browser actually has a guest character
+        // right now (`session` set) and only at signup; nothing is
+        // trusted here beyond the fact that this checkbox was ticked —
+        // the actual proof is session.playerId/sessionSecret, verified
+        // server-side exactly the way every other bar action already is.
+        const migrateCheckbox=(mode==='register'&&session)?el('input',{type:'checkbox',id:'auth-migrate',checked:true}):null;
+        const submit=el('button',{type:'submit',class:'enter-world'},mode==='login'?'Log in':'Create account');
+        const form=el('form',{class:'world-dialog auth-dialog',role:'dialog','aria-label':mode==='login'?'Log in':'Sign up',onsubmit:async e=>{
+          e.preventDefault();submit.disabled=true;error.textContent='';
+          try{
+            let result;
+            if(mode==='login'){
+              result=await accountsApi.login({username:username.value,password:password.value});
+            }else{
+              if(password.value!==confirmPassword.value){error.textContent='Passwords do not match';submit.disabled=false;return;}
+              result=await accountsApi.register({
+                username:username.value,password:password.value,confirmPassword:confirmPassword.value,
+                migrateGuest:(migrateCheckbox&&migrateCheckbox.checked&&session)?{playerId:session.playerId,sessionSecret:session.sessionSecret}:null,
+              });
+            }
+            account={id:result.accountId,username:result.username};
+            if(result.barPlayerId){
+              // A fresh bar secret is only reported for login (always,
+              // via the takeover rotation) or a brand-new register with
+              // no migration — a migrated-guest register deliberately
+              // reports none (the browser already holds the real one),
+              // so keep the existing local session in that case rather
+              // than overwriting it with undefined.
+              if(result.barSessionSecret){
+                session={playerId:result.barPlayerId,sessionSecret:result.barSessionSecret};
+                try{localStorage.setItem(sessionKey,JSON.stringify(session));}catch{}
+              }
+              // A Vegas room this account is actively bound to gets its
+              // own freshly-rotated credential too (the takeover design,
+              // CLAUDE.md) — update this tab's own cached room session so
+              // "Return to your game" and any already-open room view use
+              // the new credential rather than the one that was just
+              // revoked.
+              if(result.vegasRoom){
+                saveSession(result.vegasRoom.code,{playerId:result.barPlayerId,sessionSecret:result.vegasRoom.sessionSecret});
+              }
+            }
+            overlay.replaceChildren();
+            if(session){
+              try{const resp=await post('/rejoin',session);applyIncoming(resp);activeSeat=resp.activeSeat??null;}catch{}
+            }
+            chooseCharacter();
+          }catch(err){error.textContent=err.message||'Could not complete that request';submit.disabled=false;}
+        }},[
+          el('p',{class:'eyebrow'},'Las Vegas · OPEN ALL EVENING'),el('h1',{},mode==='login'?'Log in':'Sign up'),
+          el('label',{for:'auth-username'},'Username'),username,
+          el('label',{for:'auth-password'},'Password'),password,
+          ...(confirmPassword?[el('label',{for:'auth-confirm'},'Confirm password'),confirmPassword]:[]),
+          ...(migrateCheckbox?[el('div',{class:'auth-migrate-row'},[migrateCheckbox,el('label',{for:'auth-migrate'},'Keep my current guest character')])]:[]),
+          error,submit,
+          el('button',{type:'button',class:'hud-button',onclick:()=>{mode='menu';renderMenu();}},'Back'),
+          ...(mode==='register'?[el('p',{class:'dialog-footnote'},'No email is required, and there is no password-recovery option yet — write your password down somewhere safe.')]:[]),
+        ]);overlay.replaceChildren(form);username.focus();
+      }
+      if(mode==='menu')renderMenu();else renderForm();
+    }
     function chooseCharacter(){
       let color=mine?.color||'green',skin=mine?.skin||'warm';
       const preview=el('canvas',{width:'180',height:'180','aria-label':'Character preview'});
@@ -901,7 +1048,39 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
               el('p',{class:'stamina-note'},'Eating a meal restores +70%, a drink +30% — both cap at 100%, with nothing stored for later.'),
             ]),
           ]:[]),
-        ])]),error,enter,el('p',{class:'dialog-footnote'},'No account needed. Your character stays in this browser.'),
+          // Account status + Log out/Switch account — the one combined
+          // entry point this user's own design asked for ("Your character
+          // 面板显示当前账号/游客状态，提供 Log out / Switch account"),
+          // never a second place to look for this. A guest sees no
+          // account section at all here beyond the existing footnote
+          // below; only a logged-in browser sees this block.
+          ...(account?[
+            el('span',{class:'option-label'},'Account'),
+            el('div',{class:'account-panel'},[
+              el('p',{},[el('strong',{},account.username),' is logged in on this browser.']),
+              el('div',{class:'account-panel-actions'},[
+                el('button',{type:'button',class:'hud-button',onclick:async e=>{
+                  e.preventDefault();
+                  // Logging out leaves this browser with no character at
+                  // all (session cleared above) — the same choice as a
+                  // brand-new visitor gets, not a half-finished panel for
+                  // an identity that no longer exists.
+                  if(await doLogout())openAuthOverlay();
+                }},'Log out'),
+                el('button',{type:'button',class:'hud-button',onclick:async e=>{
+                  e.preventDefault();
+                  if(await doLogout())openAuthOverlay('login');
+                }},'Switch account'),
+              ]),
+            ]),
+          ]:[
+            el('span',{class:'option-label'},'Account'),
+            el('div',{class:'account-panel'},[
+              el('p',{},"You're playing as a guest — this character only exists in this browser."),
+              el('button',{type:'button',class:'hud-button',onclick:e=>{e.preventDefault();openAuthOverlay();}},'Log in or sign up'),
+            ]),
+          ]),
+        ])]),error,enter,el('p',{class:'dialog-footnote'},account?'':'No account needed — or log in above to keep this character across devices.'),
       ]);overlay.replaceChildren(form);update();input.focus();
     }
     function begin(){
@@ -917,7 +1096,29 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       timers.push(setInterval(()=>post('/heartbeat',session).then(resp=>{
         activeSeat=resp.activeSeat??null;
         if(!activeSeat&&returnGameButton){returnGameButton.remove();returnGameButton=null;}
-      }).catch(()=>{}),5000),setInterval(fetchAndApply,10000));
+      }).catch(async e=>{
+        // A 403 here is this identity's bar secret itself being revoked —
+        // the heartbeat's own natural ~5s cadence is what makes this the
+        // FASTEST place to notice an account takeover from elsewhere
+        // (CLAUDE.md's "旧设备明确显示" requirement), faster than the
+        // slower, dedicated 15s accountCheckTimer poll below, which
+        // exists for the case where this tab isn't even logged in to an
+        // account (so there'd be nothing for a rotated bar secret to
+        // mean) or hasn't acted in a while. Every other transient
+        // network error still silently retries next tick, unchanged.
+        if(e.status===403&&active&&!loggedOutElsewhereShown){
+          loggedOutElsewhereShown=true;
+          session=null;try{localStorage.removeItem(sessionKey);}catch{}
+          mine=null;staminaFill.style.width='0%';staminaLabel.textContent='—';
+          activeSeat=null;if(returnGameButton){returnGameButton.remove();returnGameButton=null;}
+          const wasLoggedIn=!!account;
+          await refreshAccount();
+          toast.textContent=wasLoggedIn
+            ?'Your account was signed in on another device. Please log in again.'
+            :'Your session could not be restored. Reload to rejoin.';
+          openAuthOverlay(wasLoggedIn?'login':'menu');
+        }
+      }),5000),setInterval(fetchAndApply,10000));
       visibilityHandler=()=>{
         if(document.visibilityState!=='visible')return;
         // A backgrounded tab can have its EventSource suspended by the
@@ -1444,10 +1645,54 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       }
     }
     frame=requestAnimationFrame(animate);
-    dispose=()=>{active=false;cancelAnimationFrame(frame);timers.forEach(clearInterval);holdCleanups.forEach(cleanup=>cleanup());window.removeEventListener('resize',resize);window.removeEventListener('keydown',keyDown);window.removeEventListener('keyup',keyUp);window.removeEventListener('blur',blur);document.body.classList.remove('world-mode');};
+    dispose=()=>{active=false;cancelAnimationFrame(frame);timers.forEach(clearInterval);holdCleanups.forEach(cleanup=>cleanup());if(accountCheckTimer)clearInterval(accountCheckTimer);window.removeEventListener('resize',resize);window.removeEventListener('keydown',keyDown);window.removeEventListener('keyup',keyUp);window.removeEventListener('blur',blur);document.body.classList.remove('world-mode');};
+    // A short, dedicated poll for "did my account session get revoked
+    // elsewhere" (the multi-device takeover's own "旧设备明确显示" —
+    // CLAUDE.md) — independent of whatever bar action this tab happens
+    // to be doing right now, since a device can sit idle in the bar for
+    // a long time with nothing else triggering a 403 to notice it by.
+    const ACCOUNT_POLL_MS=15000;
+    accountCheckTimer=setInterval(async()=>{
+      if(!active||!account||loggedOutElsewhereShown)return;
+      const was=account.id;
+      await refreshAccount();
+      if(active&&!account&&was&&!loggedOutElsewhereShown){
+        loggedOutElsewhereShown=true;
+        toast.textContent='Your account was signed in on another device. Please log in again.';
+      }
+    },ACCOUNT_POLL_MS);
+    await refreshAccount();
     try{session=JSON.parse(localStorage.getItem(sessionKey)||'null');}catch{}
-    if(session){try{const resp=await post('/rejoin',session);applyIncoming(resp);activeSeat=resp.activeSeat??null;if(active){if(enteredThisPage)begin();else chooseCharacter();}}catch(e){if(e.status===403){session=null;localStorage.removeItem(sessionKey);chooseCharacter();}else toast.textContent='Unable to reconnect. Reload to retry.';}}
-    else chooseCharacter();
+    if(session){
+      try{
+        const resp=await post('/rejoin',session);applyIncoming(resp);activeSeat=resp.activeSeat??null;
+        if(active){if(enteredThisPage)begin();else chooseCharacter();}
+      }catch(e){
+        if(e.status===403){
+          session=null;try{localStorage.removeItem(sessionKey);}catch{}
+          // Was this rejection because another device just logged into
+          // THIS account (rotating the bar secret out from under this
+          // tab), or an ordinary stale/forged session? refreshAccount()
+          // right before the attempt already told us whether an account
+          // was active; a 403 immediately after that is this tab's own
+          // signal of exactly the takeover scenario CLAUDE.md names.
+          if(account){
+            loggedOutElsewhereShown=true;
+            await refreshAccount(); // the cookie itself is still this tab's own, unaffected — only the bar secret was rotated
+            toast.textContent='Your account was signed in on another device. Please log in again.';
+            openAuthOverlay('login');
+          }else chooseCharacter();
+        }else toast.textContent='Unable to reconnect. Reload to retry.';
+      }
+    }
+    else if(account){
+      // A valid account cookie but no local bar session at all (e.g. a
+      // brand-new tab/device for an already-registered account, or local
+      // storage was cleared) — skip straight to the login form rather
+      // than the generic menu, since "which account" isn't in question.
+      openAuthOverlay('login');
+    }
+    else openAuthOverlay();
   }
   return {mount,stop:()=>{menuBook.close();dispose();}};
 }

@@ -367,6 +367,19 @@ button.stamina-chip { display:flex; align-items:center; gap:7px; padding:9px 12p
 .stamina-track-large { width:140px; height:12px; }
 .stamina-panel-pct { font-size:13px; font-weight:650; color:#453b3f; }
 .stamina-note { flex-basis:100%; margin:4px 0 0; font-size:11px; color:#877568; }
+/* Account status block inside the character panel, and the floating
+   Log in / Sign up / Continue as guest entry overlay — same visual
+   language as the stamina panel just above (a small bordered block
+   under its own .option-label), nothing new introduced. */
+.account-panel { display:flex; flex-direction:column; gap:8px; }
+.account-panel p { margin:0; font-size:12px; color:#453b3f; }
+.account-panel-actions { display:flex; gap:8px; flex-wrap:wrap; }
+.auth-dialog .auth-menu { display:flex; flex-direction:column; gap:10px; margin:18px 0; }
+.auth-dialog label { font-size:11px; font-weight:650; color:#776765; display:block; margin:10px 0 4px; }
+.auth-dialog input { background:#fffaf3; border:1px solid #d9cec0; color:#453b3f; padding:12px; width:100%; font-size:14px; box-sizing:border-box; }
+.auth-migrate-row { display:flex; align-items:center; gap:8px; margin:12px 0; }
+.auth-migrate-row label { margin:0; font-weight:400; color:#453b3f; }
+.auth-migrate-row input { width:auto; padding:0; }
 .world-toast { position:absolute; bottom:26px; left:50%; transform:translateX(-50%); max-width:calc(100% - 40px); text-align:center; color:#e8d7c1; padding:11px 22px; border:1px solid #d9b27b30; background:#272531ed; border-radius:30px; font-size:12px; pointer-events:none; }
 .world-overlay { position:absolute; inset:0; display:grid; place-items:center; pointer-events:none; padding:24px; }
 .world-overlay:has(> *) { background:#18151d65; backdrop-filter:blur(2px); pointer-events:auto; }
