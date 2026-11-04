@@ -315,7 +315,18 @@ export function register(
       // character — the user's own explicit rule: "新注册账号默认创建
       // 新角色", never silently inheriting whatever guest session
       // happens to be sitting in this browser's localStorage.
-      const joined = bar.joinBar(db, username, "red", "warm");
+      //
+      // Truncated to bar.ts's own 20-character nickname limit — a real
+      // bug caught via actual browser verification at the 390×844
+      // viewport: a username up to 24 characters (this module's own
+      // limit) passed straight through as the initial nickname used to
+      // throw bar.joinBar's unrelated, narrower "nickname must be 1–20
+      // characters" error, failing the whole registration for no reason
+      // the user could see coming from the signup form itself (which
+      // only validates the 24-character username field). The nickname
+      // is just a display default here anyway — the character-edit form
+      // already lets anyone change it afterward.
+      const joined = bar.joinBar(db, username.slice(0, 20), "red", "warm");
       barPlayerId = joined.playerId;
       freshBarSecret = joined.sessionSecret;
       bindCharacter(db, accountId, barPlayerId);

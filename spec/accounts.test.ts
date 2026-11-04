@@ -58,6 +58,23 @@ it("registers a brand-new account with a brand-new character, independent of any
   expect(currentStamina(db, result.barPlayerId)).toBeCloseTo(80, 2);
 });
 
+// Regression: a username longer than 20 characters (valid — usernames
+// allow up to 24) used to be passed straight to bar.joinBar as the
+// initial nickname, which has its own, narrower 20-character limit
+// (src/bar.ts) — a brand-new, no-migration registration with a 21-24
+// character username threw bar's own "nickname must be 1–20 characters"
+// error instead of ever creating the account, caught via real browser
+// verification at the 390×844 viewport (a long generated test username
+// surfaced the actual nickname-length validation error in the UI).
+it("registering with a username longer than the bar's own 20-character nickname limit still creates a working character", () => {
+  const longUsername = "a".repeat(24); // the username field's own max, well past bar's nickname limit
+  const result = register(db, longUsername, "correct horse battery staple", null);
+  expect(result.username).toBe(longUsername);
+  expect(result.barPlayerId).toBeTruthy();
+  const nickname = db.prepare(`SELECT nickname FROM bar_players WHERE id = ?`).get(result.barPlayerId) as { nickname: string };
+  expect(nickname.nickname.length).toBeLessThanOrEqual(20);
+});
+
 it("refuses a duplicate username, case/whitespace-insensitively, without revealing which account exists", () => {
   register(db, "Bob", "correct horse battery staple", null);
   const err = expectAccountError(() => register(db, "  bob  ", "another password entirely", null));
