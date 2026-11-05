@@ -368,23 +368,29 @@ export function mouthAnchor(headY, headH) {
   return { x: 0, y: headY + headH * 0.78 };
 }
 
-/** Lying flat on the table, oriented along the X axis — the student's own
- * explicit fix for the previous round's grey, vertically-standing utensil
- * that read as floating beside the character with nothing holding it. A
- * knife/fork at rest always has this one clear position and orientation;
- * it is never drawn standing on end. */
+/** Lying flat on the table, oriented along the Y axis — tines/blade tip
+ * pointing up the screen (away from the character, toward the back of
+ * the table), handle pointing down toward the character — a real place-
+ * setting pose, and the student's own explicit follow-up request over
+ * this same round's earlier horizontal pose (which itself replaced the
+ * previous round's actual bug: a grey, vertically-STANDING utensil
+ * floating beside the character with nothing holding it — this is a
+ * different thing from "standing on end," which remains wrong; lying
+ * flat but oriented vertically on the table is the correct, requested
+ * pose). A knife/fork at rest always has this one clear position and
+ * orientation. */
 function drawRestingFork(ctx, x, y, len) {
   ctx.fillStyle = '#cfd3d8';
-  ctx.fillRect(x - len / 2, y - len * 0.05, len * 0.6, len * 0.1); // handle
-  ctx.fillRect(x - len / 2 + len * 0.58, y - len * 0.09, len * 0.42, len * 0.18); // tine block
+  ctx.fillRect(x - len * 0.09, y - len / 2, len * 0.18, len * 0.42); // tine block (top, pointing away)
+  ctx.fillRect(x - len * 0.05, y - len / 2 + len * 0.4, len * 0.1, len * 0.6); // handle (bottom, nearest the character)
   ctx.fillStyle = '#9aa0a8';
-  for (let i = 0; i < 3; i++) ctx.fillRect(x - len / 2 + len * 0.64 + i * len * 0.12, y - len * 0.09, len * 0.045, len * 0.18);
+  for (let i = 0; i < 3; i++) ctx.fillRect(x - len * 0.09, y - len / 2 + i * 0.12 * len, len * 0.18, len * 0.045);
 }
 function drawRestingKnife(ctx, x, y, len) {
   ctx.fillStyle = '#cfd3d8';
-  ctx.fillRect(x - len / 2, y - len * 0.04, len * 0.68, len * 0.08); // blade
+  ctx.fillRect(x - len * 0.04, y - len / 2, len * 0.08, len * 0.68); // blade (top, pointing away)
   ctx.fillStyle = '#9aa0a8';
-  ctx.fillRect(x - len / 2 + len * 0.66, y - len * 0.07, len * 0.34, len * 0.14); // handle
+  ctx.fillRect(x - len * 0.07, y - len / 2 + len * 0.66, len * 0.14, len * 0.34); // handle (bottom, nearest the character)
 }
 
 // The seated eating/drinking cutscene (CLAUDE.md's seated-eating
