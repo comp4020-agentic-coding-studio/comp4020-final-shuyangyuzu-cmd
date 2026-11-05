@@ -50,6 +50,25 @@ export function createVoiceCall({ el }) {
   let ownStatus = "none"; // "none" | "invited" | "joined"
   let localStream = null;
   const peerConnections = new Map(); // remotePlayerId -> RTCPeerConnection
+  // A real bug found and reproduced directly (two rapid Reconnects, the
+  // first negotiation's answer deliberately delayed past the second):
+  // nothing previously distinguished "this offer/answer/ICE-candidate
+  // belongs to the CURRENT peer connection attempt for this remote" from
+  // "...belongs to a PREVIOUS, already-superseded attempt." A stale
+  // answer for an offer a since-closed pc already sent could still be
+  // applied to the new pc in its place — signalingState alone can't tell
+  // the two apart, since a fresh offer also leaves the new pc in
+  // "have-local-offer". The result: signalingState reaches "stable" (so
+  // nothing *looks* wrong) but the actual SDP/ICE credentials now
+  // mismatch what was really offered, and the connection can never
+  // establish media — audio silently never arrives, with no error until
+  // CONNECT_TIMEOUT_MS eventually notices. Fixed with a per-remote
+  // monotonic "attempt" tag carried in every outgoing offer/answer/
+  // ice-candidate signal (never anything sensitive — just this tab's own
+  // local counter) and checked on receipt; a signal whose attempt tag
+  // doesn't match the CURRENT attempt for that remote is dropped as
+  // stale, never applied.
+  const peerAttempt = new Map(); // remotePlayerId -> current attempt number
   const remoteAudioEls = new Map(); // remotePlayerId -> <audio>
   const pendingCandidates = new Map(); // remotePlayerId -> RTCIceCandidateInit[]
   const reconnectAttempts = new Map(); // remotePlayerId -> count
@@ -58,6 +77,19 @@ export function createVoiceCall({ el }) {
   const offersInFlight = new Map();
   const signalChains = new Map();
   let healthTimer = null;
+  // A short, bounded, privacy-safe negotiation log — never SDP, never the
+  // real IP/candidate string, never player ids beyond an 8-char prefix
+  // (the same truncation src/actionLog.ts already uses for this exact
+  // reason). Exists purely for the "Copy call diagnostics" button below,
+  // so two people hitting a real connection failure can each paste a
+  // short, aligned, shareable summary instead of guessing from the UI
+  // alone. Capped so a long call never grows this unboundedly.
+  const negotiationLog = [];
+  const NEGOTIATION_LOG_MAX = 60;
+  function logNegotiation(remoteId, text) {
+    negotiationLog.push({ t: Date.now(), remote: remoteId.slice(0, 8), text });
+    if (negotiationLog.length > NEGOTIATION_LOG_MAX) negotiationLog.shift();
+  }
 
   let panelExpanded = false;
   let busy = false; // true while a start/accept/decline/leave request is in flight — suppresses double-clicks
@@ -97,6 +129,9 @@ export function createVoiceCall({ el }) {
     panelExpanded = false;
     busy = false;
     joiningSignals = [];
+    negotiationLog.length = 0;
+    diagnosticsCopyStatus = null;
+    showDiagnosticsFallback = false;
   }
 
   async function api(path, body, keepalive = false) {
@@ -122,6 +157,7 @@ export function createVoiceCall({ el }) {
   function closePeer(remoteId) {
     const pc = peerConnections.get(remoteId);
     if (pc) {
+      logNegotiation(remoteId, `closing peer connection (was ${pc.connectionState}, attempt=${pc.__attempt})`);
       pc.close();
       peerConnections.delete(remoteId);
     }
@@ -136,6 +172,14 @@ export function createVoiceCall({ el }) {
     blockedAudio.delete(remoteId);
     peerHealth.delete(remoteId);
     offersInFlight.delete(remoteId);
+    // Deliberately NOT clearing peerAttempt here: closePeer is exactly
+    // what a reconnect calls right before creating the NEXT pc for this
+    // same remote, and the whole point of this counter is to keep
+    // increasing across that close/recreate so the new round's number
+    // never collides with the one it's superseding (see peerAttempt's
+    // own comment above). Only a full call teardown (teardownMedia,
+    // below) resets it — this remote is genuinely gone at that point,
+    // not just getting a fresh peer connection within the same call.
   }
 
   function teardownMedia() {
@@ -148,6 +192,7 @@ export function createVoiceCall({ el }) {
     pendingCandidates.clear();
     reconnectAttempts.clear();
     blockedAudio.clear(); peerHealth.clear(); offersInFlight.clear(); signalChains.clear();
+    peerAttempt.clear();
   }
 
   async function playRemote(remoteId, audio) {
@@ -174,13 +219,24 @@ export function createVoiceCall({ el }) {
         const health=peerHealth.get(id);if(!health||!pc.getStats)continue;
         try{
           const report=await pc.getStats();if(peerConnections.get(id)!==pc)continue;
-          let packets=0,level=null;
+          let packets=0,sent=0,level=null,pairType=null,pairNominated=null;
+          const candidates={};
+          report.forEach(s=>{
+            if(s.type==='local-candidate'||s.type==='remote-candidate')candidates[s.id]=s;
+          });
           report.forEach(s=>{
             if(s.type==='inbound-rtp'&&(s.kind==='audio'||s.mediaType==='audio'))packets+=s.packetsReceived||0;
+            if(s.type==='outbound-rtp'&&(s.kind==='audio'||s.mediaType==='audio'))sent+=s.packetsSent||0;
             if(s.type==='media-source'&&s.kind==='audio'&&typeof s.audioLevel==='number')level=s.audioLevel;
+            if(s.type==='candidate-pair'&&s.state==='succeeded'&&s.nominated){
+              pairNominated=true;
+              const local=candidates[s.localCandidateId];
+              pairType=local?.candidateType??null;
+            }
           });
           if(packets>health.packets)health.receivedAt=Date.now();
-          health.packets=packets;health.micLevel=level;
+          health.packets=packets;health.sent=sent;health.micLevel=level;
+          health.pairType=pairType;health.pairNominated=pairNominated;
         }catch{ /* Closed links are removed by the connection handler. */ }
         // A peer that never reaches "connected" has no guarantee it will
         // ever reach "failed" either (see CONNECT_TIMEOUT_MS's own comment
@@ -228,6 +284,11 @@ export function createVoiceCall({ el }) {
     if (!queued) return;
     pendingCandidates.delete(remoteId);
     for (const candidate of queued) {
+      // A candidate queued while waiting for a remote description can
+      // still be stale by the time it's flushed (queued during round N,
+      // flushed only after round N+1's own remoteDescription landed) —
+      // the same staleness check applied at receive time below.
+      if (candidate.attempt !== pc.__attempt) continue;
       try {
         await pc.addIceCandidate(candidate);
       } catch {
@@ -241,18 +302,37 @@ export function createVoiceCall({ el }) {
     const ctx = context(), id = callId, generation = mediaGeneration;
     const active = () => isCurrent(ctx) && id === callId && generation === mediaGeneration && ownStatus === 'joined' && peerConnections.get(remoteId) === pc;
     const pc = new RTCPeerConnection({ iceServers });
+    // This pc's own idea of "which negotiation round is current" — see
+    // the peerAttempt declaration's own comment above for the real bug
+    // this closes. Left unset here deliberately: only the code that
+    // actually SENDS a fresh offer (offerTo's first send, or
+    // attemptIceRestart) ever assigns a new value by drawing the next
+    // number from the shared peerAttempt map, and only the code that
+    // RECEIVES an offer adopts that offer's own attempt value — this is
+    // what keeps both sides' numbers in agreement for the same round
+    // without either side guessing the other's number independently.
+    pc.__attempt = 0;
     peerConnections.set(remoteId, pc);
-    peerHealth.set(remoteId,{started:Date.now(),packets:0,receivedAt:null,micLevel:null});
+    peerHealth.set(remoteId,{started:Date.now(),packets:0,sent:0,receivedAt:null,micLevel:null,pairType:null,pairNominated:null});
     if (localStream) {
       for (const track of localStream.getTracks()) pc.addTrack(track, localStream);
     }
     pc.onicecandidate = (ev) => {
       if (ev.candidate && active()) {
-        request(ctx, "/voice/signal", { callId: id, toPlayerId: remoteId, signalType: "ice-candidate", data: ev.candidate }).catch(() => {});
+        // `attempt` rides inside `data` itself, not as a sibling field —
+        // the server's own relaySignal forwards `data` opaquely and
+        // never reads a field beside it (src/server.ts's voice/signal
+        // route), so a sibling property would be silently dropped.
+        const c = ev.candidate;
+        logNegotiation(remoteId, `sent local ICE candidate (type=${c.type ?? '?'}) attempt=${pc.__attempt}`);
+        request(ctx, "/voice/signal", { callId: id, toPlayerId: remoteId, signalType: "ice-candidate", data: { candidate: c.candidate, sdpMid: c.sdpMid, sdpMLineIndex: c.sdpMLineIndex, usernameFragment: c.usernameFragment, attempt: pc.__attempt } }).catch(() => {});
+      } else if (!ev.candidate && active()) {
+        logNegotiation(remoteId, `local ICE gathering complete attempt=${pc.__attempt}`);
       }
     };
     pc.ontrack = (ev) => {
       if (!active()) return;
+      logNegotiation(remoteId, 'ontrack: remote audio track received');
       let audioEl = remoteAudioEls.get(remoteId);
       if (!audioEl) {
         audioEl = document.createElement("audio");
@@ -267,6 +347,7 @@ export function createVoiceCall({ el }) {
     };
     pc.onconnectionstatechange = () => {
       if (!active()) return;
+      logNegotiation(remoteId, `connectionState=${pc.connectionState} attempt=${pc.__attempt}`);
       if (pc.connectionState === "connected") {
         reconnectAttempts.set(remoteId, 0);
         if([...peerConnections.values()].every(p=>p.connectionState==='connected'))lastErrorMessage=null;
@@ -300,10 +381,15 @@ export function createVoiceCall({ el }) {
     try {
       await new Promise((r) => setTimeout(r, SIGNAL_RECONNECT_DELAY_MS));
       if (!isCurrent(ctx) || generation !== mediaGeneration || peerConnections.get(remoteId) !== pc) return;
+      // A fresh negotiation round — same reasoning as offerTo's own
+      // comment above: draw the next attempt number before offering.
+      pc.__attempt = (peerAttempt.get(remoteId) ?? 0) + 1;
+      peerAttempt.set(remoteId, pc.__attempt);
       const offer = await pc.createOffer({ iceRestart: true });
       await pc.setLocalDescription(offer);
       if (!isCurrent(ctx) || generation !== mediaGeneration) return;
-      await request(ctx, "/voice/signal", { callId: id, toPlayerId: remoteId, signalType: "offer", data: pc.localDescription });
+      logNegotiation(remoteId, `sent ICE-restart offer attempt=${pc.__attempt}`);
+      await request(ctx, "/voice/signal", { callId: id, toPlayerId: remoteId, signalType: "offer", data: { type: pc.localDescription.type, sdp: pc.localDescription.sdp, attempt: pc.__attempt } });
     } catch {
       // Will be retried on the next failed transition, up to the cap above.
     }
@@ -334,12 +420,22 @@ export function createVoiceCall({ el }) {
     const pending=(async()=>{
       if(pc.connectionState==='connected'&&!restart)return;
       if(pc.signalingState!=='have-local-offer'){
+        // A genuinely NEW offer starts a new negotiation round — draw the
+        // next attempt number from the shared, per-remote counter so this
+        // tab's own next offer/answer/ICE-candidate for THIS round is
+        // distinguishable from whatever round preceded it (see
+        // peerAttempt's own comment above). Resending an EXISTING,
+        // still-pending local offer below (the `else` of this branch)
+        // deliberately does NOT draw a new number — it's the same round.
+        pc.__attempt=(peerAttempt.get(remoteId)??0)+1;
+        peerAttempt.set(remoteId,pc.__attempt);
         const offer=await pc.createOffer(restart?{iceRestart:true}:{});
         if(!isCurrent(ctx)||generation!==mediaGeneration||peerConnections.get(remoteId)!==pc)return;
         await pc.setLocalDescription(offer);
       }
       if(!isCurrent(ctx)||generation!==mediaGeneration||peerConnections.get(remoteId)!==pc)return;
-      await request(ctx,'/voice/signal',{callId:id,toPlayerId:remoteId,signalType:'offer',data:pc.localDescription});
+      logNegotiation(remoteId,`sent offer${restart?' (restart)':''} attempt=${pc.__attempt}`);
+      await request(ctx,'/voice/signal',{callId:id,toPlayerId:remoteId,signalType:'offer',data:{type:pc.localDescription.type,sdp:pc.localDescription.sdp,attempt:pc.__attempt}});
     })();
     offersInFlight.set(remoteId,pending);
     pending.finally(()=>{if(offersInFlight.get(remoteId)===pending)offersInFlight.delete(remoteId);}).catch(()=>{});
@@ -384,31 +480,62 @@ export function createVoiceCall({ el }) {
         if (!active()) return;
         pc = createPeer(from, iceServers);
       }
+      // The answerer ADOPTS the offerer's own attempt number for this
+      // round rather than generating its own — this is what lets both
+      // sides agree on "which round is this" with no coordinator (see
+      // peerAttempt's own comment above). A duplicate resend of the
+      // SAME offer (same attempt, already answered) still short-circuits
+      // to resending the existing answer, unchanged from before.
       if(pc.remoteDescription?.sdp===data.sdp&&pc.localDescription?.type==='answer'){
-        await request(ctx,'/voice/signal',{callId:id,toPlayerId:from,signalType:'answer',data:pc.localDescription});return;
+        logNegotiation(from,`received duplicate offer attempt=${data.attempt} — resent existing answer`);
+        await request(ctx,'/voice/signal',{callId:id,toPlayerId:from,signalType:'answer',data:{type:pc.localDescription.type,sdp:pc.localDescription.sdp,attempt:pc.__attempt}});return;
       }
+      pc.__attempt=data.attempt??pc.__attempt;
+      logNegotiation(from,`received offer, applying attempt=${pc.__attempt}`);
       await pc.setRemoteDescription(data);
       if (!active()) return;
       await flushPendingCandidates(from, pc);
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       if (!active()) return;
-      await request(ctx, "/voice/signal", { callId: id, toPlayerId: from, signalType: "answer", data: pc.localDescription });
+      logNegotiation(from,`sent answer attempt=${pc.__attempt}`);
+      await request(ctx, "/voice/signal", { callId: id, toPlayerId: from, signalType: "answer", data: { type: pc.localDescription.type, sdp: pc.localDescription.sdp, attempt: pc.__attempt } });
     } else if (signalType === "answer") {
-      // A resent offer can produce a duplicate answer. Once stable,
-      // applying it again throws even though audio is already connected.
-      if (pc && pc.signalingState === 'have-local-offer') {
+      // The real bug this round fixed, reproduced directly: a stale
+      // answer for a PREVIOUS negotiation round must never be applied to
+      // the CURRENT one just because signalingState happens to still say
+      // "have-local-offer" (a fresh offer leaves it in that same state).
+      // data.attempt is the round the SENDER (the answerer) was actually
+      // answering; pc.__attempt is the round THIS side most recently
+      // offered — only a match is the real, current answer.
+      if (pc && pc.signalingState === 'have-local-offer' && data.attempt === pc.__attempt) {
+        logNegotiation(from,`received answer, applying attempt=${data.attempt}`);
         await pc.setRemoteDescription(data);
         await flushPendingCandidates(from, pc);
+      } else if (pc) {
+        logNegotiation(from,`DROPPED stale/mismatched answer: msg.attempt=${data.attempt} current=${pc.__attempt} signalingState=${pc.signalingState}`);
       }
     } else if (signalType === "ice-candidate") {
       if (pc && pc.remoteDescription) {
+        // A stale candidate for a round this pc has already moved past
+        // (remoteDescription is set, but for a DIFFERENT attempt) is
+        // simply discarded — queuing it would only ever apply it to the
+        // wrong round once some later remoteDescription lands.
+        if (data.attempt !== pc.__attempt) {
+          logNegotiation(from,`DROPPED stale ICE candidate: msg.attempt=${data.attempt} current=${pc.__attempt}`);
+          return;
+        }
         try {
           await pc.addIceCandidate(data);
         } catch {
           // Benign — a candidate that no longer applies.
         }
       } else {
+        // pc doesn't exist yet, or its remoteDescription hasn't landed
+        // yet — queue it; flushPendingCandidates (above) re-checks
+        // data.attempt against pc.__attempt at flush time, once pc
+        // actually exists, so a candidate queued for a round that's
+        // since been superseded still never gets misapplied.
         const queue = pendingCandidates.get(from) ?? [];
         queue.push(data);
         pendingCandidates.set(from, queue);
@@ -594,6 +721,66 @@ export function createVoiceCall({ el }) {
     return localStream.getAudioTracks().every((t) => !t.enabled);
   }
 
+  // Everything below is deliberately plain English and truncated/derived
+  // ids only — never SDP, never a real IP/candidate string, never a
+  // session secret, never a full player id (CLAUDE.md: signaling detail
+  // never belongs in a log; the same reasoning applies here). The
+  // "alignment id" is the call's own server-generated UUID (callId),
+  // truncated the same way src/actionLog.ts already truncates ids for
+  // exactly this reason — it lets two people compare notes on the SAME
+  // call/negotiation without exposing a credential, since callId is not
+  // a secret (it's already visible in the public room state everyone in
+  // the call already has).
+  function diagnosticsText() {
+    const lines = [];
+    lines.push(`Las Vegas voice-call diagnostics — ${new Date().toISOString()}`);
+    lines.push(`room ${code ?? '?'} · call ${(callId ?? '?').slice(0, 8)} · you ${(session?.playerId ?? '?').slice(0, 8)} · own status ${ownStatus}`);
+    const relay = (iceServersCache?.servers || []).some(s => [].concat(s.urls).some(u => /^turns?:/.test(u)));
+    lines.push(`TURN configured on this call: ${relay ? 'yes' : 'no'}`);
+    lines.push('');
+    lines.push('Peers:');
+    for (const p of latestVoiceCall.participants) {
+      if (p.playerId === session?.playerId) continue;
+      const pc = peerConnections.get(p.playerId);
+      const health = peerHealth.get(p.playerId);
+      const short = p.playerId.slice(0, 8);
+      if (!pc) { lines.push(`  ${short}: no peer connection yet`); continue; }
+      lines.push(`  ${short}: connectionState=${pc.connectionState} iceConnectionState=${pc.iceConnectionState} signalingState=${pc.signalingState} attempt=${pc.__attempt}`);
+      if (health) {
+        lines.push(`    candidate pair: ${health.pairType ?? 'none selected yet'}${health.pairNominated ? ' (nominated)' : ''}`);
+        lines.push(`    audio packets: received=${health.packets} sent=${health.sent} mic-level=${health.micLevel == null ? 'n/a' : health.micLevel.toFixed(4)}`);
+        lines.push(`    last audio received: ${health.receivedAt ? new Date(health.receivedAt).toISOString() : 'never'}`);
+      }
+    }
+    lines.push('');
+    lines.push('Negotiation log (most recent last):');
+    if (!negotiationLog.length) lines.push('  (empty — nothing has happened yet this call)');
+    for (const entry of negotiationLog) {
+      lines.push(`  [+${((entry.t - (negotiationLog[0]?.t ?? entry.t)) / 1000).toFixed(1)}s] ${entry.remote}: ${entry.text}`);
+    }
+    return lines.join('\n');
+  }
+
+  let diagnosticsCopyStatus = null; // transient feedback text, or null
+
+  async function copyDiagnostics() {
+    const text = diagnosticsText();
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
+      await navigator.clipboard.writeText(text);
+      diagnosticsCopyStatus = 'Copied — paste it wherever you share results.';
+    } catch {
+      // Honest fallback, matching this app's existing clipboard-failure
+      // pattern (public/mixology.js, public/tavern.js's recovery codes):
+      // never claim success when the clipboard genuinely failed.
+      diagnosticsCopyStatus = 'Could not copy automatically — select and copy the text below.';
+      showDiagnosticsFallback = true;
+    }
+    onNeedsRedraw();
+  }
+
+  let showDiagnosticsFallback = false;
+
   // ---- Public surface ---------------------------------------------------
 
   function enterRoom(newCode, newSession, redraw) {
@@ -686,10 +873,17 @@ export function createVoiceCall({ el }) {
       const hangupBtn = el("button", { type: "button", class: "danger", onclick: hangUp }, "Hang up");
       const relay=(iceServersCache?.servers||[]).some(s=>[].concat(s.urls).some(u=>/^turns?:/.test(u)));
       const health=[...peerHealth.values()].find(h=>h.micLevel!==null);
+      const diagnosticsBtn = el('button',{class:'secondary',onclick:copyDiagnostics},'Copy call diagnostics');
+      const diagnosticsBits = [diagnosticsCopyStatus ? el('p',{class:'voice-network-note',role:'status'},diagnosticsCopyStatus) : null];
+      if (showDiagnosticsFallback) {
+        diagnosticsBits.push(el('textarea',{readonly:true,rows:6,style:'width:100%;font-size:10px;','aria-label':'Call diagnostics to copy'},diagnosticsText()));
+      }
       items.push(el("div", { class: "voice-call-panel" }, [list,
         el('p',{class:'voice-network-note'},relay?'Relay available when needed':'Direct connection only · some networks need a TURN relay'),
         ...(health?[el('p',{class:'voice-network-note'},isMutedLocally()?'Microphone muted':health.micLevel>.005?'Microphone: sound detected':'Microphone: quiet')]:[]),
         el('button',{class:'secondary',onclick:reconnectAudio},'Reconnect audio'),
+        diagnosticsBtn,
+        ...diagnosticsBits.filter(Boolean),
         el("div", { class: "voice-call-actions" }, [muteBtn, hangupBtn])]));
     }
 

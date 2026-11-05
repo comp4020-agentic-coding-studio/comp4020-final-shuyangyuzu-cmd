@@ -26,7 +26,8 @@ function setup() {
   vi.stubGlobal('document',dom.window.document);
   const play=vi.spyOn(dom.window.HTMLMediaElement.prototype,'play').mockResolvedValue();
   vi.stubGlobal('MediaStream',class {constructor(public tracks:any[]){}getTracks(){return this.tracks;}getAudioTracks(){return this.tracks;}});
-  vi.stubGlobal('navigator',{mediaDevices:{getUserMedia:mic}});
+  const clipboardWriteText=vi.fn(async(_text:string)=>{});
+  vi.stubGlobal('navigator',{mediaDevices:{getUserMedia:mic},clipboard:{writeText:clipboardWriteText}});
   vi.stubGlobal('fetch',transport);
   vi.stubGlobal('EventSource',class {constructor(){events.push(this);}close(){} });
   const rtc=vi.fn(function(){const pc:any={connectionState:'new',signalingState:'stable',close:vi.fn(),addTrack:vi.fn(),setRemoteDescription:vi.fn(async(d:any)=>{pc.remoteDescription=d;}),createOffer:vi.fn(async()=>({type:'offer',sdp:'offer'})),createAnswer:vi.fn(async()=>({type:'answer',sdp:'test'})),setLocalDescription:vi.fn(async(d:any)=>{pc.localDescription=d;pc.signalingState=d.type==='offer'?'have-local-offer':'stable';}),addIceCandidate:vi.fn(async()=>{}),getStats:vi.fn(async()=>new Map())};return pc;});vi.stubGlobal('RTCPeerConnection',rtc);
@@ -41,7 +42,7 @@ function setup() {
   const click=()=>widget().querySelector('button')!.click();
   client.enterRoom('ABCDEF',session,()=>{});
   cleanups.push(()=>{client.leaveRoom();dom.window.close();});
-  return {client,widget,click,tracks,events,requests,mic,rtc,transport,summary,makeStream,play,document:dom.window.document,setOthers(v:any[]){others=v;},setJoined(v:boolean){joined=v;active=v;},invite(){invited=true;active=true;events[0].onmessage?.({data:JSON.stringify({type:'invited',callId:'call-1',inviterNickname:'Bob'})});}};
+  return {client,widget,click,tracks,events,requests,mic,rtc,transport,summary,makeStream,play,clipboardWriteText,document:dom.window.document,setOthers(v:any[]){others=v;},setJoined(v:boolean){joined=v;active=v;},invite(){invited=true;active=true;events[0].onmessage?.({data:JSON.stringify({type:'invited',callId:'call-1',inviterNickname:'Bob'})});}};
 }
 
 it('keeps Hang up and the active microphone through private-channel reconnection',async()=>{
@@ -236,3 +237,109 @@ it('never flags an ordinary, promptly-connecting peer as stuck',async()=>{
   dateSpy.mockRestore();
   expect(t.widget().textContent).not.toContain('could not be established');
 },10000);
+
+// A second real bug, found by reproducing it directly with two real
+// browsers and a deliberately-delayed answer: nothing previously
+// distinguished a stale answer/ICE-candidate belonging to a PREVIOUS,
+// since-superseded negotiation round from the CURRENT one — a fresh
+// offer leaves signalingState at 'have-local-offer' exactly like the
+// old one did, so that alone couldn't tell them apart. A stale answer
+// got applied anyway, leaving signalingState looking "stable" while the
+// actual SDP/ICE credentials mismatched what was really offered — media
+// could never establish, with no error surfaced. This pins down the fix:
+// every offer/answer/ICE-candidate now carries a per-remote "attempt"
+// tag, and a reconnect's fresh offer draws a new one.
+it('ignores a stale answer from a superseded negotiation round, and applies the real one',async()=>{
+  const t=setup();await flush();
+  t.setOthers([{playerId:'zzz',nickname:'Bob',color:'blue',muted:false}]);
+  t.click();await flush();t.click(); // second click expands the panel (reveals Reconnect audio)
+  const firstOfferReq=t.requests.find(r=>r.url.endsWith('/signal')&&r.body.signalType==='offer')!;
+  const firstAttempt=firstOfferReq.body.data.attempt;
+  expect(firstAttempt).toBeTruthy();
+  const firstPc=t.rtc.mock.results[0].value;
+
+  // Reconnect: closes the first pc, creates a second, sends a NEW offer —
+  // this must draw a NEW attempt number distinct from the first.
+  (Array.from(t.widget().querySelectorAll('button')).find(b=>b.textContent==='Reconnect audio')!).click();
+  await flush();
+  const secondOfferReq=[...t.requests].reverse().find(r=>r.url.endsWith('/signal')&&r.body.signalType==='offer')!;
+  const secondAttempt=secondOfferReq.body.data.attempt;
+  expect(secondAttempt).not.toBe(firstAttempt);
+  const secondPc=t.rtc.mock.results[1].value;
+  expect(secondPc).not.toBe(firstPc);
+  secondPc.signalingState='have-local-offer';
+  secondPc.setRemoteDescription.mockClear();
+
+  // The STALE answer, tagged with the FIRST (superseded) attempt, arrives
+  // late — must be ignored, not applied to the second pc.
+  t.events[0].onmessage?.({data:JSON.stringify({type:'signal',callId:'call-1',from:'zzz',signalType:'answer',data:{type:'answer',sdp:'stale-answer',attempt:firstAttempt}})});
+  await flush();
+  expect(secondPc.setRemoteDescription).not.toHaveBeenCalled();
+
+  // The REAL answer, correctly tagged with the second attempt, arrives
+  // afterward — must be applied normally.
+  t.events[0].onmessage?.({data:JSON.stringify({type:'signal',callId:'call-1',from:'zzz',signalType:'answer',data:{type:'answer',sdp:'real-answer',attempt:secondAttempt}})});
+  await flush();
+  expect(secondPc.setRemoteDescription).toHaveBeenCalledTimes(1);
+  expect(secondPc.setRemoteDescription).toHaveBeenCalledWith(expect.objectContaining({sdp:'real-answer'}));
+});
+
+it('ignores a stale ICE candidate tagged with a superseded attempt, after the remote description has already landed',async()=>{
+  const t=setup();await flush();
+  t.setOthers([{playerId:'zzz',nickname:'Bob',color:'blue',muted:false}]);
+  t.click();await flush();t.click(); // second click expands the panel (reveals Reconnect audio)
+  const firstOfferReq=t.requests.find(r=>r.url.endsWith('/signal')&&r.body.signalType==='offer')!;
+  const firstAttempt=firstOfferReq.body.data.attempt;
+  (Array.from(t.widget().querySelectorAll('button')).find(b=>b.textContent==='Reconnect audio')!).click();
+  await flush();
+  const secondOfferReq=[...t.requests].reverse().find(r=>r.url.endsWith('/signal')&&r.body.signalType==='offer')!;
+  const secondAttempt=secondOfferReq.body.data.attempt;
+  const secondPc=t.rtc.mock.results[1].value;
+  secondPc.remoteDescription={type:'answer',sdp:'real-answer'};
+  secondPc.addIceCandidate.mockClear();
+
+  // A candidate tagged with the FIRST, superseded attempt must not be
+  // applied to the second pc even though its remoteDescription is set.
+  t.events[0].onmessage?.({data:JSON.stringify({type:'signal',callId:'call-1',from:'zzz',signalType:'ice-candidate',data:{candidate:'stale',attempt:firstAttempt}})});
+  await flush();
+  expect(secondPc.addIceCandidate).not.toHaveBeenCalled();
+
+  // A candidate tagged with the CURRENT attempt is applied normally.
+  t.events[0].onmessage?.({data:JSON.stringify({type:'signal',callId:'call-1',from:'zzz',signalType:'ice-candidate',data:{candidate:'current',attempt:secondAttempt}})});
+  await flush();
+  expect(secondPc.addIceCandidate).toHaveBeenCalledTimes(1);
+  expect(secondPc.addIceCandidate).toHaveBeenCalledWith(expect.objectContaining({candidate:'current'}));
+});
+
+// "Copy call diagnostics" (the user's own requested step-2 tool): must
+// produce a shareable plain-text summary without ever including SDP, a
+// real IP/candidate string, or a full (un-truncated) player id.
+it('copies call diagnostics to the clipboard, with no SDP/candidate/IP content and only truncated ids',async()=>{
+  const t=setup();await flush();
+  t.setOthers([{playerId:'zzz-full-id-should-never-appear-in-full',nickname:'Bob',color:'blue',muted:false}]);
+  t.click();await flush();t.click(); // join, then expand the panel
+  const diagBtn=Array.from(t.widget().querySelectorAll('button')).find(b=>b.textContent==='Copy call diagnostics')!;
+  expect(diagBtn).toBeDefined();
+  diagBtn.click();
+  await flush();
+  expect(t.clipboardWriteText).toHaveBeenCalledTimes(1);
+  const text=t.clipboardWriteText.mock.calls[0][0] as string;
+  expect(text).toContain('alice'.slice(0,8));
+  expect(text).not.toContain('zzz-full-id-should-never-appear-in-full');
+  expect(text.toLowerCase()).not.toContain('v=0'); // no raw SDP
+  expect(text).not.toMatch(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/); // no bare IPv4
+  expect(text).toContain('Negotiation log');
+  expect(t.widget().textContent).toContain('Copied');
+});
+
+it('shows an honest fallback textarea when the clipboard write fails',async()=>{
+  const t=setup();await flush();
+  t.setOthers([{playerId:'zzz',nickname:'Bob',color:'blue',muted:false}]);
+  t.click();await flush();t.click();
+  t.clipboardWriteText.mockRejectedValueOnce(new Error('denied'));
+  const diagBtn=Array.from(t.widget().querySelectorAll('button')).find(b=>b.textContent==='Copy call diagnostics')!;
+  diagBtn.click();
+  await flush();
+  expect(t.widget().querySelector('textarea[aria-label="Call diagnostics to copy"]')).toBeTruthy();
+  expect(t.widget().textContent).toContain('Could not copy automatically');
+});
