@@ -311,6 +311,43 @@ it('ignores a stale ICE candidate tagged with a superseded attempt, after the re
   expect(secondPc.addIceCandidate).toHaveBeenCalledWith(expect.objectContaining({candidate:'current'}));
 });
 
+// A real bug found by reproducing it against two real browsers (a
+// deliberately delayed offer whose own ICE candidates are NOT delayed):
+// the offer and its candidates are two independently-raced HTTP
+// requests, so a candidate for a brand-new round can genuinely arrive
+// BEFORE the offer that starts that round does. The previous code
+// treated any attempt mismatch — older OR newer — as "stale" and
+// dropped it outright, silently discarding real candidates a round
+// would actually need rather than merely rejecting ones that no longer
+// applied. This pins down the fix: a NEWER attempt is queued (not
+// dropped) and applied once that round's own remoteDescription lands.
+it('queues (never drops) an ICE candidate for a round NEWER than the current one, and applies it once that round\'s offer lands',async()=>{
+  const t=setup();await flush();
+  t.setOthers([{playerId:'zzz',nickname:'Bob',color:'blue',muted:false}]);
+  t.click();await flush();
+  const firstPc=t.rtc.mock.results[0].value;
+  const firstOfferReq=t.requests.find(r=>r.url.endsWith('/signal')&&r.body.signalType==='offer')!;
+  const firstAttempt=firstOfferReq.body.data.attempt;
+
+  // A candidate tagged with a NEWER attempt than anything this pc has
+  // seen arrives early — must be queued, not dropped, even though the
+  // CURRENT pc's remoteDescription is already set (for the OLDER round).
+  firstPc.remoteDescription={type:'offer',sdp:'first-offer'};
+  const earlyAttempt=firstAttempt+1;
+  t.events[0].onmessage?.({data:JSON.stringify({type:'signal',callId:'call-1',from:'zzz',signalType:'ice-candidate',data:{candidate:'early-for-next-round',attempt:earlyAttempt}})});
+  await flush();
+  expect(firstPc.addIceCandidate).not.toHaveBeenCalled();
+
+  // Now the NEW round's own offer actually arrives (a real offer bumps
+  // this pc's own __attempt via handleSignal's offer branch) — the
+  // earlier-queued candidate must be flushed and applied, not lost.
+  firstPc.addIceCandidate.mockClear();
+  t.events[0].onmessage?.({data:JSON.stringify({type:'signal',callId:'call-1',from:'zzz',signalType:'offer',data:{type:'offer',sdp:'next-round-offer',attempt:earlyAttempt}})});
+  await flush();
+  expect(firstPc.addIceCandidate).toHaveBeenCalledTimes(1);
+  expect(firstPc.addIceCandidate).toHaveBeenCalledWith(expect.objectContaining({candidate:'early-for-next-round'}));
+});
+
 // "Copy call diagnostics" (the user's own requested step-2 tool): must
 // produce a shareable plain-text summary without ever including SDP, a
 // real IP/candidate string, or a full (un-truncated) player id.
@@ -342,4 +379,34 @@ it('shows an honest fallback textarea when the clipboard write fails',async()=>{
   await flush();
   expect(t.widget().querySelector('textarea[aria-label="Call diagnostics to copy"]')).toBeTruthy();
   expect(t.widget().textContent).toContain('Could not copy automatically');
+});
+
+// Per-round ICE-candidate delivery counters — the user's own explicit
+// step-1 request: "按 peer 和 attempt 分别记录候选生成、信令 POST 成功/
+// 失败...优先给 Copy call diagnostics 增加每轮的汇总计数". Confirms the
+// summary line actually reflects real generated/sent/received/applied
+// counts rather than just existing.
+it('summarizes ICE candidates per round in the diagnostics text: generated, sent-ok, received, applied',async()=>{
+  const t=setup();await flush();
+  t.setOthers([{playerId:'zzz',nickname:'Bob',color:'blue',muted:false}]);
+  t.click();await flush();
+  const pc=t.rtc.mock.results[0].value;
+  // The mock pc doesn't fire a real onicecandidate event on its own —
+  // simulate one real local candidate being generated and sent.
+  pc.onicecandidate?.({candidate:{candidate:'candidate:1 1 udp ...',type:'host',sdpMid:'0',sdpMLineIndex:0}});
+  await flush();
+  // And one real candidate arriving from the remote for the same round.
+  const offerReq=t.requests.find(r=>r.url.endsWith('/signal')&&r.body.signalType==='offer')!;
+  const attempt=offerReq.body.data.attempt;
+  pc.remoteDescription={type:'answer',sdp:'answer'};
+  t.events[0].onmessage?.({data:JSON.stringify({type:'signal',callId:'call-1',from:'zzz',signalType:'ice-candidate',data:{candidate:'remote-candidate',attempt}})});
+  await flush();
+  t.click();await flush(); // expand panel
+  const diagBtn=Array.from(t.widget().querySelectorAll('button')).find(b=>b.textContent==='Copy call diagnostics')!;
+  diagBtn.click();
+  await flush();
+  const text=t.clipboardWriteText.mock.calls[0][0] as string;
+  expect(text).toContain('ICE candidates by round');
+  expect(text).toMatch(new RegExp(`attempt=${attempt}:.*generated=1 sent-ok=1`));
+  expect(text).toMatch(new RegExp(`attempt=${attempt}:.*received=1.*applied=1`));
 });

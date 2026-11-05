@@ -90,6 +90,28 @@ export function createVoiceCall({ el }) {
     negotiationLog.push({ t: Date.now(), remote: remoteId.slice(0, 8), text });
     if (negotiationLog.length > NEGOTIATION_LOG_MAX) negotiationLog.shift();
   }
+  // Per (remote, attempt) ICE-candidate counters — a real production
+  // trace showed dozens of individual candidate log lines crowding out
+  // the handful of events (offer/answer sent/received, connectionState
+  // changes) that actually explain a failure, so candidates are counted
+  // here instead of logged one-by-one. Tracks exactly what the user
+  // asked to see on each side: how many this tab generated locally, how
+  // many of its own signaling POSTs for them actually succeeded/failed
+  // (by HTTP status — a POST failure here is a real, previously-silent
+  // delivery gap, not assumed-delivered), and — for candidates received
+  // FROM the remote — how many arrived, were queued, were successfully
+  // applied, were dropped as genuinely stale (an older round), or failed
+  // to apply (by error name only, never the candidate/SDP itself).
+  const candidateStats = new Map(); // key `${remoteId}:${attempt}` -> stats object
+  function candStat(remoteId, attempt) {
+    const key = `${remoteId}:${attempt}`;
+    let s = candidateStats.get(key);
+    if (!s) {
+      s = { generated: 0, sentOk: 0, sentFailed: 0, sentFailedStatuses: new Set(), received: 0, queued: 0, appliedOk: 0, appliedFailed: 0, appliedFailedErrors: new Set(), droppedStale: 0 };
+      candidateStats.set(key, s);
+    }
+    return s;
+  }
 
   let panelExpanded = false;
   let busy = false; // true while a start/accept/decline/leave request is in flight — suppresses double-clicks
@@ -130,6 +152,7 @@ export function createVoiceCall({ el }) {
     busy = false;
     joiningSignals = [];
     negotiationLog.length = 0;
+    candidateStats.clear();
     diagnosticsCopyStatus = null;
     showDiagnosticsFallback = false;
   }
@@ -154,10 +177,18 @@ export function createVoiceCall({ el }) {
     return latestVoiceCall.participants.some((p) => p.playerId === playerId);
   }
 
-  function closePeer(remoteId) {
+  function closePeer(remoteId, reason = 'unspecified') {
     const pc = peerConnections.get(remoteId);
     if (pc) {
-      logNegotiation(remoteId, `closing peer connection (was ${pc.connectionState}, attempt=${pc.__attempt})`);
+      // `reason` closes a real diagnostic gap: a production trace showed
+      // a peer closed mid-"connecting" with no prior "failed" and no
+      // explanation of WHY — this distinguishes a genuinely-exhausted
+      // retry budget (attemptIceRestart's own cap) from reconcilePeerMesh
+      // simply no longer finding this remote in the call's own
+      // participant list (e.g. a presence hiccup on the SERVER's own
+      // "connected" check — src/voice.ts's reconcileParticipants — rather
+      // than anything actually wrong with the WebRTC link itself).
+      logNegotiation(remoteId, `closing peer connection (was ${pc.connectionState}, attempt=${pc.__attempt}, reason=${reason})`);
       pc.close();
       peerConnections.delete(remoteId);
     }
@@ -184,7 +215,7 @@ export function createVoiceCall({ el }) {
 
   function teardownMedia() {
     clearInterval(healthTimer); healthTimer = null;
-    for (const remoteId of [...peerConnections.keys()]) closePeer(remoteId);
+    for (const remoteId of [...peerConnections.keys()]) closePeer(remoteId, 'teardown');
     if (localStream) {
       for (const track of localStream.getTracks()) track.stop();
       localStream = null;
@@ -288,11 +319,14 @@ export function createVoiceCall({ el }) {
       // still be stale by the time it's flushed (queued during round N,
       // flushed only after round N+1's own remoteDescription landed) —
       // the same staleness check applied at receive time below.
-      if (candidate.attempt !== pc.__attempt) continue;
+      const stat = candStat(remoteId, candidate.attempt);
+      if (candidate.attempt !== pc.__attempt) { stat.droppedStale++; continue; }
       try {
         await pc.addIceCandidate(candidate);
-      } catch {
-        // A late/invalid candidate after the connection moved on — not fatal.
+        stat.appliedOk++;
+      } catch (err) {
+        stat.appliedFailed++;
+        stat.appliedFailedErrors.add(err?.name ?? 'unknown');
       }
     }
   }
@@ -323,9 +357,19 @@ export function createVoiceCall({ el }) {
         // the server's own relaySignal forwards `data` opaquely and
         // never reads a field beside it (src/server.ts's voice/signal
         // route), so a sibling property would be silently dropped.
-        const c = ev.candidate;
-        logNegotiation(remoteId, `sent local ICE candidate (type=${c.type ?? '?'}) attempt=${pc.__attempt}`);
-        request(ctx, "/voice/signal", { callId: id, toPlayerId: remoteId, signalType: "ice-candidate", data: { candidate: c.candidate, sdpMid: c.sdpMid, sdpMLineIndex: c.sdpMLineIndex, usernameFragment: c.usernameFragment, attempt: pc.__attempt } }).catch(() => {});
+        const c = ev.candidate, attempt = pc.__attempt;
+        const stat = candStat(remoteId, attempt);
+        stat.generated++;
+        // A real gap a production trace's own evidence couldn't rule out
+        // (raised explicitly): the previous code's `.catch(() => {})` on
+        // this POST meant a delivery FAILURE (a real HTTP error — rate
+        // limited, the recipient momentarily not "connected" per
+        // src/voice.ts's own requirePresentHuman check, etc.) looked
+        // identical to a successful send with nothing logged either way.
+        // Tracked by HTTP status now, never by assuming success.
+        request(ctx, "/voice/signal", { callId: id, toPlayerId: remoteId, signalType: "ice-candidate", data: { candidate: c.candidate, sdpMid: c.sdpMid, sdpMLineIndex: c.sdpMLineIndex, usernameFragment: c.usernameFragment, attempt } })
+          .then(() => { stat.sentOk++; })
+          .catch((err) => { stat.sentFailed++; stat.sentFailedStatuses.add(err?.status ?? 'network'); });
       } else if (!ev.candidate && active()) {
         logNegotiation(remoteId, `local ICE gathering complete attempt=${pc.__attempt}`);
       }
@@ -370,7 +414,7 @@ export function createVoiceCall({ el }) {
     if (!pc) return;
     const attempts = reconnectAttempts.get(remoteId) ?? 0;
     if (attempts >= MAX_SIGNAL_RECONNECT_ATTEMPTS) {
-      closePeer(remoteId);
+      closePeer(remoteId, 'reconnect-attempts-exhausted');
       onNeedsRedraw();
       return;
     }
@@ -445,7 +489,7 @@ export function createVoiceCall({ el }) {
   function reconnectAudio() {
     if(ownStatus!=='joined')return;
     mediaGeneration++;lastErrorMessage=null;
-    for(const id of [...peerConnections.keys()])closePeer(id);
+    for(const id of [...peerConnections.keys()])closePeer(id,'manual-reconnect');
     reconcilePeerMesh();announceReady(true).catch(reportConnectionError);
     onNeedsRedraw();
   }
@@ -455,7 +499,16 @@ export function createVoiceCall({ el }) {
     const others = latestVoiceCall.participants.map((p) => p.playerId).filter((id) => id !== session.playerId);
     for (const id of others) connectToParticipant(id).catch(reportConnectionError);
     for (const id of [...peerConnections.keys()]) {
-      if (!others.includes(id)) closePeer(id);
+      // A real, previously-unexplained symptom this provenance tag
+      // closes: this is the SERVER's own public participant list no
+      // longer naming this remote — which can happen either because they
+      // genuinely left/hung up, OR because src/voice.ts's own
+      // reconcileParticipants dropped them for failing its `connected`
+      // (presence-staleness) check, a cause entirely separate from
+      // anything wrong with the actual WebRTC link. Tagged so a
+      // diagnostics trace can tell "the call ended this peer" apart from
+      // "ICE itself never worked."
+      if (!others.includes(id)) closePeer(id,'not-in-call-roster');
     }
   }
 
@@ -516,26 +569,49 @@ export function createVoiceCall({ el }) {
         logNegotiation(from,`DROPPED stale/mismatched answer: msg.attempt=${data.attempt} current=${pc.__attempt} signalingState=${pc.signalingState}`);
       }
     } else if (signalType === "ice-candidate") {
-      if (pc && pc.remoteDescription) {
-        // A stale candidate for a round this pc has already moved past
-        // (remoteDescription is set, but for a DIFFERENT attempt) is
-        // simply discarded — queuing it would only ever apply it to the
-        // wrong round once some later remoteDescription lands.
-        if (data.attempt !== pc.__attempt) {
-          logNegotiation(from,`DROPPED stale ICE candidate: msg.attempt=${data.attempt} current=${pc.__attempt}`);
-          return;
-        }
+      // A real bug found by reproducing it directly, matching exactly
+      // what a production diagnostics trace showed: the offer and its
+      // own ICE candidates are two separate, independently-raced HTTP
+      // requests (onicecandidate fires candidates as they're gathered,
+      // concurrently with the offer's own POST) — a candidate for a
+      // BRAND NEW round can genuinely arrive at the answerer before the
+      // offer that starts that round does. The previous code compared
+      // only `data.attempt !== pc.__attempt` and dropped every mismatch
+      // as "stale," which silently discarded candidates for a round that
+      // hadn't happened yet rather than one that already had — those
+      // candidates never came back, so the connection could be missing
+      // real candidates it needed, depending only on the slower
+      // health-check watchdog and a full ICE restart to recover rather
+      // than ever using the ones that were actually sent. Older than the
+      // current attempt is genuinely stale (drop it); newer is early for
+      // a round not yet active (queue it — handleSignal's own "offer"
+      // branch flushes this same queue once that round's own
+      // remoteDescription lands, already attempt-checked there).
+      const stat = candStat(from, data.attempt);
+      stat.received++;
+      if (pc && pc.remoteDescription && data.attempt === pc.__attempt) {
         try {
           await pc.addIceCandidate(data);
-        } catch {
-          // Benign — a candidate that no longer applies.
+          stat.appliedOk++;
+        } catch (err) {
+          // Benign in practice (a late/invalid candidate) — but now
+          // actually counted, never silently assumed fine.
+          stat.appliedFailed++;
+          stat.appliedFailedErrors.add(err?.name ?? 'unknown');
         }
+      } else if (pc && pc.remoteDescription && data.attempt < pc.__attempt) {
+        stat.droppedStale++;
       } else {
-        // pc doesn't exist yet, or its remoteDescription hasn't landed
-        // yet — queue it; flushPendingCandidates (above) re-checks
+        // Either pc doesn't exist yet, its remoteDescription hasn't
+        // landed yet, or (the real bug above) this candidate is for a
+        // NEWER round whose offer hasn't arrived/been applied yet —
+        // queue it. flushPendingCandidates (above) re-checks
         // data.attempt against pc.__attempt at flush time, once pc
         // actually exists, so a candidate queued for a round that's
-        // since been superseded still never gets misapplied.
+        // since been superseded still never gets misapplied, and one
+        // queued ahead of its own round's offer gets applied the moment
+        // that offer's remoteDescription actually lands.
+        stat.queued++;
         const queue = pendingCandidates.get(from) ?? [];
         queue.push(data);
         pendingCandidates.set(from, queue);
@@ -751,6 +827,15 @@ export function createVoiceCall({ el }) {
         lines.push(`    audio packets: received=${health.packets} sent=${health.sent} mic-level=${health.micLevel == null ? 'n/a' : health.micLevel.toFixed(4)}`);
         lines.push(`    last audio received: ${health.receivedAt ? new Date(health.receivedAt).toISOString() : 'never'}`);
       }
+    }
+    lines.push('');
+    lines.push('ICE candidates by round (generated/sent-ok/sent-failed locally; received/queued/applied/dropped-stale/apply-failed from the remote):');
+    if (!candidateStats.size) lines.push('  (none yet)');
+    for (const [key, s] of candidateStats) {
+      const [remote, attempt] = key.split(':');
+      const sentFailNote = s.sentFailedStatuses.size ? ` (http ${[...s.sentFailedStatuses].join(',')})` : '';
+      const applyFailNote = s.appliedFailedErrors.size ? ` (${[...s.appliedFailedErrors].join(',')})` : '';
+      lines.push(`  ${remote.slice(0, 8)} attempt=${attempt}: generated=${s.generated} sent-ok=${s.sentOk} sent-failed=${s.sentFailed}${sentFailNote} | received=${s.received} queued=${s.queued} applied=${s.appliedOk} dropped-stale=${s.droppedStale} apply-failed=${s.appliedFailed}${applyFailNote}`);
     }
     lines.push('');
     lines.push('Negotiation log (most recent last):');
