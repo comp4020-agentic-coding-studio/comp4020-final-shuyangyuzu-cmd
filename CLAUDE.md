@@ -1236,7 +1236,10 @@ exactly the race this found. `public/voiceCall.js`'s own `peerAttempt`
 map comment has the full reasoning; `spec/voiceClient.test.ts` pins the
 exact scenario down directly (a stale answer dropped, the real one
 applied; a stale ICE candidate dropped after `remoteDescription` has
-already landed for a newer attempt).
+already landed for a newer attempt). **Superseded in part, 2026-11-06**:
+this entry's own "any mismatch is dropped as stale" was itself
+incomplete — see the entry below for the real bug that left in, found
+from an actual production diagnostics trace.
 
 A "Copy call diagnostics" button (same expanded call panel) was added
 alongside this fix — a bounded, privacy-safe per-call negotiation log
@@ -1247,6 +1250,70 @@ paste to compare notes on a real failed call, rather than guessing from
 the UI's own summary text alone. Confirmed via two dedicated tests that
 the copied text never contains an SDP marker, a bare IPv4 address, or an
 un-truncated id.
+
+### An early ICE candidate wrongly treated as stale, found from a real production diagnostics trace (Claude, 2026-11-06)
+
+The prior entry's own "attempt" tagging correctly rejected an answer or
+candidate from an OLDER, already-superseded round, but its
+`data.attempt !== pc.__attempt` check also rejected a candidate for a
+NEWER round whose own offer simply hadn't arrived or been applied yet —
+treating "not yet active" the same as "already superseded." This matters
+because `onicecandidate` fires its own independent signaling POST as
+candidates are gathered, entirely unordered with respect to the offer's
+own POST; a candidate for a brand-new round can genuinely reach the
+other side first. Reproduced directly (delayed only the offer by 3s
+while letting its own candidates go out immediately) and confirmed: the
+answerer received four real candidates for the new round, all
+permanently discarded as "stale" before that round's own offer ever
+landed — exactly the shape of a real pasted production diagnostics trace
+from the user's own failed call (`iceConnectionState: checking` forever,
+zero candidate pair ever nominated, zero audio packets either
+direction). Fixed by distinguishing the two cases in `handleSignal`'s
+`ice-candidate` branch and `flushPendingCandidates`: strictly OLDER than
+the current attempt is genuinely stale (dropped); anything else (pc not
+yet created, its `remoteDescription` not yet set, or a NEWER attempt) is
+queued and flushed once that round's own offer actually lands.
+
+Also found and fixed, from the same pasted trace: `onicecandidate`'s own
+signaling POST was fire-and-forget (`.catch(() => {})`), so a real
+delivery failure (a 409 from `src/voice.ts`'s own `not_in_call` check, a
+rate limit, a network error) was indistinguishable from a successful
+send — raised directly by an independent review that correctly pointed
+out the existing evidence couldn't prove a candidate had actually
+reached the other side. Every candidate send is now tracked by its own
+`.then`/`.catch`, recording real HTTP status on failure, never assumed
+delivered. `public/voiceCall.js`'s new `candidateStats` map keeps a
+compact per-(remote, attempt) summary — generated/sent-ok/sent-failed
+locally, received/queued/applied/dropped-stale/apply-failed from the
+remote — printed as one line per round in "Copy call diagnostics"
+instead of a line per candidate, which a real trace across several
+reconnect rounds would otherwise bury in noise. `closePeer` now also
+carries an explicit reason (`teardown` / `manual-reconnect` /
+`reconnect-attempts-exhausted` / `not-in-call-roster`), closing a
+related gap the same trace exposed: a peer closing mid-`connecting` with
+no prior `failed` event previously gave no way to tell "ICE itself gave
+up" from "the server's own call membership no longer lists this
+remote."
+
+**A second real mechanism found in the same trace, reproduced directly,
+and left unchanged because it is this app's own documented, deliberate
+design, not a new bug.** `src/voice.ts`'s `reconcileParticipants` evicts
+a joined call participant using the room's ordinary `PRESENCE_STALE_MS`
+(15s) "connected" threshold — the exact same signal the room already
+uses everywhere else, with no additional grace specific to an active
+voice negotiation (CLAUDE.md's own voice-call section already states
+this is intentional: "reusing `connected`... is deliberate: no second,
+voice-specific liveness signal to keep in sync with the first").
+Reproduced directly: blocking one side's ordinary room heartbeat for 17
+seconds while its WebRTC link was fully `connected` and healthy still
+tore the peer connection down, tagged `reason=not-in-call-roster` in the
+new diagnostics — the underlying media link itself never failed at all.
+This is a real, concrete explanation for repeated reconnect churn on any
+network with occasional brief hiccups (a phone switching networks, a
+backgrounded tab's timer throttled), stated here plainly rather than
+silently left unexplained, but not something this round changes — it is
+the existing, intentional tradeoff this file's own voice-call section
+already documents.
 
 ## Hold’em scope and authority (Codex, 2026-10-22)
 
