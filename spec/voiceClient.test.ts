@@ -29,7 +29,7 @@ function setup() {
   vi.stubGlobal('navigator',{mediaDevices:{getUserMedia:mic}});
   vi.stubGlobal('fetch',transport);
   vi.stubGlobal('EventSource',class {constructor(){events.push(this);}close(){} });
-  const rtc=vi.fn(function(){const pc:any={connectionState:'new',signalingState:'stable',close:vi.fn(),addTrack:vi.fn(),setRemoteDescription:vi.fn(async(d:any)=>{pc.remoteDescription=d;}),createOffer:vi.fn(async()=>({type:'offer',sdp:'offer'})),createAnswer:vi.fn(async()=>({type:'answer',sdp:'test'})),setLocalDescription:vi.fn(async(d:any)=>{pc.localDescription=d;pc.signalingState=d.type==='offer'?'have-local-offer':'stable';}),addIceCandidate:vi.fn(async()=>{})};return pc;});vi.stubGlobal('RTCPeerConnection',rtc);
+  const rtc=vi.fn(function(){const pc:any={connectionState:'new',signalingState:'stable',close:vi.fn(),addTrack:vi.fn(),setRemoteDescription:vi.fn(async(d:any)=>{pc.remoteDescription=d;}),createOffer:vi.fn(async()=>({type:'offer',sdp:'offer'})),createAnswer:vi.fn(async()=>({type:'answer',sdp:'test'})),setLocalDescription:vi.fn(async(d:any)=>{pc.localDescription=d;pc.signalingState=d.type==='offer'?'have-local-offer':'stable';}),addIceCandidate:vi.fn(async()=>{}),getStats:vi.fn(async()=>new Map())};return pc;});vi.stubGlobal('RTCPeerConnection',rtc);
   const el=(tag:string,attrs:Record<string,any>={},children:any=[]):any=>{
     const node=dom.window.document.createElement(tag);
     for(const[k,v]of Object.entries(attrs)){if(k==='onclick')node.onclick=v;else node.setAttribute(k,v);}
@@ -191,3 +191,48 @@ it('ignores duplicate answers after negotiation has returned to stable',async()=
   t.events[0].onmessage?.({data:JSON.stringify({type:'signal',callId:'call-1',from:'zzz',signalType:'answer',data:{type:'answer',sdp:'duplicate'}})});await flush();
   expect(pc.setRemoteDescription).not.toHaveBeenCalled();
 });
+
+// A real bug found by reproducing it against two live browsers (not
+// assumed from the code): WebRTC's connectionState has no guarantee of
+// ever reaching "failed" when ICE simply never finds a usable candidate
+// pair (two peers behind symmetric NATs / restrictive Wi-Fi, no TURN
+// configured) — it can sit at "new" forever. The previous code only
+// reacted to the "failed" transition, so this showed "Connecting
+// audio…" with no error and no retry, indefinitely. This test pins down
+// the fix: a peer stuck off "connected" past CONNECT_TIMEOUT_MS is
+// treated the same as a "failed" one.
+it('surfaces a clear error and retries a peer stuck off "connected" with no failed transition ever firing',async()=>{
+  const t=setup();await flush();
+  t.setOthers([{playerId:'zzz',nickname:'Bob',color:'blue',muted:false}]);
+  t.click();await flush();
+  const pc=t.rtc.mock.results[0].value;
+  // Never transitions to "failed" — exactly the real-world stuck case
+  // (connectionState stays "new"/"checking" with no event ever firing).
+  expect(pc.connectionState).toBe('new');
+  // Backdate the health record's own clock instead of waiting out the
+  // real 2s poll interval * CONNECT_TIMEOUT_MS — proves the same
+  // comparison the real code makes (now - started > CONNECT_TIMEOUT_MS)
+  // without a slow or fake-timer-fragile real wait.
+  const dateSpy=vi.spyOn(Date,'now').mockReturnValue(Date.now()+20000);
+  await new Promise(r=>setTimeout(r,2100)); // one real health-check tick
+  await flush();
+  dateSpy.mockRestore();
+  expect(t.widget().textContent).toContain('Audio connection could not be established');
+  expect(t.widget().textContent).toContain('Retry');
+  // Bounded, not silent forever: the offerer side (alice < zzz) issues a
+  // fresh ICE-restart offer in response.
+  expect(t.requests.some(r=>r.url.endsWith('/signal')&&r.body.signalType==='offer')).toBe(true);
+},10000);
+
+it('never flags an ordinary, promptly-connecting peer as stuck',async()=>{
+  const t=setup();await flush();
+  t.setOthers([{playerId:'zzz',nickname:'Bob',color:'blue',muted:false}]);
+  t.click();await flush();
+  const pc=t.rtc.mock.results[0].value;
+  pc.connectionState='connected';
+  const dateSpy=vi.spyOn(Date,'now').mockReturnValue(Date.now()+20000);
+  await new Promise(r=>setTimeout(r,2100));
+  await flush();
+  dateSpy.mockRestore();
+  expect(t.widget().textContent).not.toContain('could not be established');
+},10000);

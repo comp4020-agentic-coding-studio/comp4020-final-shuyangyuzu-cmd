@@ -18,6 +18,20 @@
 
 const MAX_SIGNAL_RECONNECT_ATTEMPTS = 3;
 const SIGNAL_RECONNECT_DELAY_MS = 1500;
+// A real bug found by reproducing it directly, not assumed from the code:
+// WebRTC's own `connectionState` is NOT guaranteed to ever reach "failed"
+// in bounded time. When ICE genuinely cannot find a working candidate pair
+// (two peers behind symmetric NATs or AP/client-isolated Wi-Fi, no TURN
+// configured), Chrome can sit at "new"/"checking" forever — confirmed with
+// a forced iceTransportPolicy:"relay" + no TURN servers repro that stayed
+// at connectionState "new" for 60+ seconds straight. The previous code
+// only ever reacted to the "failed" transition, so this case showed
+// "Connecting audio…" with no error and no retry, indefinitely — exactly
+// the reported symptom. This timeout is the fix: a peer stuck off
+// "connected" this long is treated the same as a "failed" one (one more
+// bounded ICE-restart attempt, surfaced as a clear error), so nothing can
+// hang forever silently.
+const CONNECT_TIMEOUT_MS = 15000;
 
 function micErrorMessage(err) {
   if (err && err.name === "NotAllowedError") return "Microphone permission was denied. Allow it in your browser's site settings, then try again.";
@@ -168,6 +182,19 @@ export function createVoiceCall({ el }) {
           if(packets>health.packets)health.receivedAt=Date.now();
           health.packets=packets;health.micLevel=level;
         }catch{ /* Closed links are removed by the connection handler. */ }
+        // A peer that never reaches "connected" has no guarantee it will
+        // ever reach "failed" either (see CONNECT_TIMEOUT_MS's own comment
+        // above) — this bounded watchdog is what actually detects that
+        // real-world stuck case, since onconnectionstatechange alone does
+        // not fire for a connection that simply never changes state.
+        // Retries at the same CONNECT_TIMEOUT_MS cadence, bounded by
+        // attemptIceRestart's own MAX_SIGNAL_RECONNECT_ATTEMPTS cap (which
+        // closes a genuinely dead link rather than retrying forever).
+        if(pc.connectionState!=='connected'&&pc.connectionState!=='closed'&&Date.now()-(health.lastRestartAt??health.started)>CONNECT_TIMEOUT_MS){
+          health.lastRestartAt=Date.now();
+          reportConnectionError();
+          attemptIceRestart(id);
+        }
       }
       if(ownStatus==='joined')onNeedsRedraw();
     },2000);
