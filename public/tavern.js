@@ -25,18 +25,653 @@ export function bindDirectionHold(button, { onPress, onRelease, onTap }) {
     win.removeEventListener('blur', release); button.ownerDocument.removeEventListener('visibilitychange', hidden);
   };
 }
-export function createTavern({ el, render, navigate, buildClassicPanel, saveSession, shouldApplyLiveUpdate, createMenuBook, mixologyModule, ordersApi }) {
+// Splits the server's own [startedAt, endsAt) window evenly across
+// however many kinds are actually being eaten/drunk (one or two — never
+// more), each kind getting an equal share and the same lift/active/down
+// sub-stages within its own share, so a solo meal and the "meal" half of
+// a combined action look identical — only the window they sit inside
+// differs. Pure function of (kinds, progress 0..1), independently
+// testable without a real clock or a running animation frame.
+//
+// `localProgress` (2026-11 addition, Codex-reviewed "the plate just sits
+// there" gap) is the same 0..1 value `local` always was internally, now
+// exposed so drawEatingScene can interpolate a CONTINUOUS pick-up/eat/
+// put-down motion instead of only three discrete snapshots — `stage`
+// itself is unchanged and still exactly "lift" | "active" | "down" at the
+// same 0.25/0.75 thresholds, so nothing that only reads `.kind`/`.stage`
+// breaks.
+export function eatingPhaseAt(kinds, progress) {
+  const n = kinds.length;
+  if (n === 0) return null;
+  const clamped = Math.max(0, Math.min(1, progress));
+  const index = Math.min(n - 1, Math.floor(clamped * n));
+  const kind = kinds[index];
+  const local = clamped * n - index; // 0..1 within this kind's own share
+  const stage = local < 0.25 ? 'lift' : local < 0.75 ? 'active' : 'down';
+  return { kind, stage, localProgress: local };
+}
+
+// ---- The seated eating/drinking cutscene, redone 2026-11-04 after the
+// student's own review of the previous version: the figure had no face,
+// the "plate" was a flat rectangle, and the "glass" was a plain box —
+// none of it actually read as a plate, a glass, or a person eating.
+// This rewrite keeps eatingPhaseAt's own public contract (`{kind, stage,
+// localProgress}`, `stage` still exactly lift/active/down at the same
+// 0.25/0.75 split — spec/eatingAnimation.test.ts's existing assertions
+// are untouched) and only changes how drawEatingScene interprets
+// `localProgress` within a kind's own share, breaking it into the
+// seven sub-beats the student specifically asked to see:
+//   1. utensils + plate/glass down on the table, character holding fork+knife
+//   2. fork lifts a bite to the mouth, with visible chewing
+//   3. utensils set down, hand lifts the plate itself toward the face
+//   4. the plate continuously TILTS while rising — front visible, rotating
+//      to show its own underside — never a snap, never a whole-canvas zoom
+//   5. the now-empty plate lowers back down, un-tilting as it goes
+//   6. the stemmed glass lifts to the mouth and tilts, liquid visibly draining
+//   7. the empty glass lowers back to the table
+// A solo "meal" plays beats 1-5 across its own full local share; a solo
+// "drink" plays 1 + 6-7. A combined action is still exactly two
+// back-to-back per-kind cycles (meal's own full share, then drink's own
+// full share) — eatingPhaseAt already guarantees this split; nothing here
+// changes that boundary. ----
+
+// Fractions of ONE KIND's own local 0..1 share — tuned so "hold up the
+// bite, chew" and "tilt the plate/glass" both get a real, visible
+// window rather than being instantaneous. Meal: fork phase first, then
+// the plate-lift phase. Drink: a bare hold (no separate "fork" stage)
+// straight into the glass-lift.
+const MEAL_FORK_END = 0.34; // fork-to-mouth + chewing ends here
+const MEAL_PLATE_LIFT_END = 0.5; // plate fully risen+tilted by here
+const MEAL_PLATE_LOWER_START = 0.86; // plate starts descending here
+const MEAL_PLATE_LANDED_BY = 0.96; // plate is fully back on the table by here — see the REST_BUFFER note below
+const DRINK_LIFT_END = 0.22;
+const DRINK_LOWER_START = 0.74;
+const DRINK_LANDED_BY = 0.92; // glass is fully back on the table by here
+
+// 2026-11-05 manual-acceptance correction: the lowering phase previously
+// finished landing EXACTLY at local=1.0 — the same instant the server's
+// own lock naturally expires. With zero buffer between "finished landing"
+// and "the window is actually over," ordinary SSE/poll round-trip latency
+// (confirmed directly: the client's own clear typically lands 100-600ms
+// after the true local=1.0, not before — a real, measured range, not
+// assumed) meant the viewer's own LAST SEEN frame was still mid-descent,
+// the plate/glass genuinely hanging in front of the chest when the scene
+// vanished — exactly the "空盘不悬在胸前" (the empty plate must not hang
+// in front of the chest) the student's own playtest called out. Giving
+// the lowering phase its own earlier finish line (*_LANDED_BY, well
+// before 1.0) means the prop is provably resting ON the table for a real,
+// visible span before the window — and any ordinary network jitter on
+// top of it — ever ends, confirmed by re-running the same burst-
+// screenshot timing check this correction was itself found with.
+
+/** Smoothstep-style ease for every continuous motion below — a plain
+ * linear ramp reads as mechanical at this scale; this keeps every
+ * rise/tilt/lower feeling like an actual arm movement without needing a
+ * real physics/easing library for a handful of lerps. */
+function ease(t) {
+  const c = Math.max(0, Math.min(1, t));
+  return c * c * (3 - 2 * c);
+}
+
+/** All the derived sub-phase values drawEatingScene needs for a 'meal'
+ * kind, purely a function of localProgress — kept as one pure helper so
+ * the actual drawing code below just reads named fields instead of
+ * re-deriving thresholds inline. */
+function mealBeats(local) {
+  const forkRaise = ease(Math.min(1, local / (MEAL_FORK_END * 0.5)));
+  const forkLower = local > MEAL_FORK_END * 0.5 ? ease(Math.min(1, (local - MEAL_FORK_END * 0.5) / (MEAL_FORK_END * 0.5))) : 0;
+  const forkHeight = local <= MEAL_FORK_END ? forkRaise - forkLower : 0; // 0..1..0 bite arc
+  const chewing = local > MEAL_FORK_END * 0.25 && local < MEAL_FORK_END * 0.85;
+  const biteEaten = local >= MEAL_FORK_END * 0.6; // the one forked bite disappears from the plate partway through its own arc
+
+  let plateLift = 0, plateTilt = 0;
+  if (local <= MEAL_FORK_END) {
+    plateLift = 0; plateTilt = 0;
+  } else if (local < MEAL_PLATE_LIFT_END) {
+    const t = ease((local - MEAL_FORK_END) / (MEAL_PLATE_LIFT_END - MEAL_FORK_END));
+    plateLift = t; plateTilt = t; // rises and tilts together, continuously
+  } else if (local < MEAL_PLATE_LOWER_START) {
+    plateLift = 1; plateTilt = 1; // held up, tipped to the mouth, emptying
+  } else if (local < MEAL_PLATE_LANDED_BY) {
+    const t = ease((local - MEAL_PLATE_LOWER_START) / (MEAL_PLATE_LANDED_BY - MEAL_PLATE_LOWER_START));
+    plateLift = 1 - t; plateTilt = 1 - t; // continuous un-tilt + lower, together
+  } else {
+    // Genuinely resting on the table for the remainder of the window —
+    // this real, visible rest span (not just a mathematical instant at
+    // local=1.0) is what the fix above is actually for.
+    plateLift = 0; plateTilt = 0;
+  }
+  // Food remaining on the plate: the one forked bite goes first (a visible
+  // notch), then the rest drains away continuously while the plate itself
+  // is held up tilted (never instantly empty the moment it's lifted).
+  const plateEmptySpan = Math.max(0.0001, MEAL_PLATE_LOWER_START - MEAL_PLATE_LIFT_END);
+  const plateConsumed = local <= MEAL_PLATE_LIFT_END ? 0 : ease(Math.min(1, (local - MEAL_PLATE_LIFT_END) / plateEmptySpan));
+  return { forkHeight, chewing, biteEaten, plateLift, plateTilt, plateConsumed };
+}
+
+function drinkBeats(local) {
+  let lift = 0;
+  if (local <= DRINK_LIFT_END) lift = ease(local / DRINK_LIFT_END);
+  else if (local < DRINK_LOWER_START) lift = 1;
+  else if (local < DRINK_LANDED_BY) lift = 1 - ease((local - DRINK_LOWER_START) / (DRINK_LANDED_BY - DRINK_LOWER_START));
+  else lift = 0; // genuinely resting on the table for the remainder of the window
+  const span = Math.max(0.0001, DRINK_LOWER_START - DRINK_LIFT_END);
+  const consumed = local <= DRINK_LIFT_END ? 0 : Math.min(1, (local - DRINK_LIFT_END) / span);
+  return { lift, consumed };
+}
+
+/** A filled ellipse — used for the plate rim/inner-circle and the
+ * glass's own rounded bowl, since a plate/glass drawn only from boxes
+ * reads as a slab, never as tableware (the student's own specific
+ * complaint about the previous version). */
+function ellipse(ctx, x, y, rx, ry, color) {
+  if (rx <= 0 || ry <= 0) return;
+  ctx.beginPath();
+  ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+}
+
+// ---- 2026-11-05 manual-acceptance correction ----
+//
+// The student's own real-browser playtest rejected the previous round's
+// contact geometry outright: the glass's rim reached up near the eyes
+// instead of the mouth, the plate's CENTRE (not its near rim) was being
+// driven toward the mouth, and a grey, vertically-standing utensil was
+// left floating beside the character with nothing holding it. All three
+// traced to the same root cause — every prop computed its own ad hoc
+// offset toward a loosely-shared "mouth height" number, rather than every
+// prop being placed from one single shared anchor set (MOUTH/TABLE/hand
+// rests below) via the actual geometry of what "contact" means for that
+// prop's own shape (a flat-vs-tilted ellipse for the plate, a rotated
+// local point for the glass). This section replaces that ad hoc approach
+// with exactly one coordinate system and two small, independently
+// testable pure geometry functions (plateCenterForRim/glassOriginForRim)
+// that every prop's placement is derived from — see spec/eatingAnimation.test.ts's
+// own geometry checks, which re-run the SAME forward transform these
+// functions are built from and assert the resulting rim/rotated point
+// actually lands within a small pixel tolerance of the mouth, rather than
+// re-asserting the formula's own output (the student's own explicit
+// instruction: verify the transformed contact point, don't just restate
+// the implementation).
+
+/** The plate's own vertical half-extent at a given tilt — the single
+ * source of truth both drawPlate itself and this file's own rim-contact
+ * math read from, so "how flat is the plate right now" can never silently
+ * drift between the two. */
+function plateRy(w, tilt) {
+  return w * 0.22 * (1 - tilt * 0.92); // never fully to 0 — a hairline edge still reads as "a plate", not nothing
+}
+
+/** Given the on-screen point the plate's own NEAR rim — the edge closest
+ * to the mouth, the point that actually makes contact, never the plate's
+ * centre — must land at, returns the ellipse centre drawPlate itself must
+ * be given. The near rim sits at local (0, -ry) relative to the centre in
+ * this scene's own up-is-negative-y convention, so centre = rim + (0, ry).
+ * Exported as its own pure function specifically so it can be verified
+ * directly: feed it a rim target and a tilt, and the rim of the ellipse
+ * drawPlate would actually draw at the returned centre is provably at
+ * that exact target, not merely "close by construction." */
+export function plateCenterForRim(rimX, rimY, ry) {
+  return { x: rimX, y: rimY + ry };
+}
+
+/** Rotates the point (px,py) by `theta` radians — canvas's own rotation
+ * convention (ctx.rotate), used below so the glass's contact math matches
+ * exactly what ctx.rotate will actually do to its local geometry, not an
+ * approximation of it. */
+export function rotatePoint(px, py, theta) {
+  const c = Math.cos(theta), sn = Math.sin(theta);
+  return { x: px * c - py * sn, y: px * sn + py * c };
+}
+
+/** Given the desired on-screen contact point for the glass's own rim
+ * (local point (0, -bowlH), the top of its bowl before any rotation) at a
+ * given tilt `theta`, returns the untransformed (x, y) drawGlass must be
+ * called with so that ctx.translate(x,y); ctx.rotate(theta) places that
+ * exact local rim point at (contactX, contactY) on screen — "compute the
+ * rim's actual position from the rotation angle, then derive the
+ * translation" (the student's own explicit instruction), rather than
+ * guessing a translation and hoping the rim lands near the target. This
+ * is the exact inverse of the forward transform
+ * (origin + rotate(localPoint, theta) = onScreenPoint), so any caller can
+ * verify correctness by re-applying the forward transform to the
+ * returned origin and checking it reproduces the requested contact point
+ * (spec/eatingAnimation.test.ts does exactly this, not just re-stating
+ * this formula). */
+export function glassOriginForRim(contactX, contactY, bowlH, theta) {
+  const rimLocal = rotatePoint(0, -bowlH, theta);
+  return { x: contactX - rimLocal.x, y: contactY - rimLocal.y };
+}
+
+/** The plate, drawn with real thickness/rim/inner-circle so it reads as
+ * a dish rather than a rectangle. `tilt` (0..1) continuously rotates it
+ * from lying flat (an ellipse, food visible on top) to edge-on (a thin
+ * sliver — its own underside facing the viewer), via a vertical scale on
+ * the ellipse itself — this IS the "plate continuously flips to show its
+ * back" behaviour, expressed as geometry rather than a whole-canvas
+ * zoom/snap. `food` (0..1, 1 = full) draws the remaining portion only
+ * while the plate is still closer to flat than edge-on, since food on an
+ * edge-on plate wouldn't visibly sit on it anyway. `x,y` is always this
+ * plate's own ELLIPSE CENTRE (as returned by plateCenterForRim) — never
+ * the contact/rim point directly, which is what caused the previous
+ * round's "centre aimed at the mouth" bug. */
+function drawPlate(ctx, x, y, w, tilt, food, biteNotch) {
+  const ry = plateRy(w, tilt);
+  const rx = w / 2;
+  ellipse(ctx, x, y + ry * 0.12, rx * 1.02, ry * 1.1, '#00000022'); // soft shadow of the rim's own thickness
+  ellipse(ctx, x, y, rx, ry, '#efe3c9'); // plate body
+  ellipse(ctx, x, y, rx * 0.72, ry * 0.72, '#f8f1dd'); // inner well
+  ellipse(ctx, x, y, rx * 0.72, ry * 0.72, '#00000012'); // faint well shading
+  if (food > 0.02 && tilt < 0.6) {
+    const foodAlpha = Math.min(1, (0.6 - tilt) / 0.3);
+    ctx.save();
+    ctx.globalAlpha = foodAlpha;
+    const fw = rx * 0.95 * food;
+    const fh = ry * 0.5 * food;
+    ellipse(ctx, x - (biteNotch ? rx * 0.08 : 0), y, fw, fh, '#8a5f3f');
+    ellipse(ctx, x - (biteNotch ? rx * 0.08 : 0), y - fh * 0.2, fw * 0.7, fh * 0.55, '#a9754c');
+    ctx.restore();
+  }
+}
+
+/** A stemmed glass (bowl + stem + base), tilted continuously toward the
+ * mouth as it's lifted, with a visibly draining liquid level. `x,y` is
+ * always this glass's own untransformed TRANSLATE ORIGIN, as returned by
+ * glassOriginForRim — never a guessed "roughly near the mouth" point,
+ * which is what let the rim drift up near the eyes in the previous
+ * round. */
+function drawGlass(ctx, x, y, h, tiltRad, liquidFrac) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(tiltRad);
+  const bowlW = h * 0.46, bowlH = h * 0.5, stemH = h * 0.32, baseW = h * 0.4;
+  // Base + stem, drawn first (lowest, behind the bowl).
+  ctx.fillStyle = '#d8d2c0';
+  ctx.fillRect(-baseW / 2, stemH + bowlH * 0.02, baseW, h * 0.05);
+  ctx.fillRect(-h * 0.035, 0, h * 0.07, stemH);
+  // The bowl: an outer glass shell (a rounded trapezoid via two ellipses
+  // and a connecting rect reads close enough at this scale) plus the
+  // liquid drawn only up to its own current, shrinking level from the
+  // bowl's own bottom.
+  const bowlTopY = -bowlH, bowlBottomY = 0;
+  ctx.fillStyle = '#f5ecd955';
+  ctx.beginPath();
+  ctx.moveTo(-bowlW * 0.32, bowlBottomY);
+  ctx.lineTo(-bowlW * 0.5, bowlTopY);
+  ctx.lineTo(bowlW * 0.5, bowlTopY);
+  ctx.lineTo(bowlW * 0.32, bowlBottomY);
+  ctx.closePath();
+  ctx.fill();
+  ellipse(ctx, 0, bowlTopY, bowlW * 0.5, bowlW * 0.14, '#f5ecd977'); // rim ellipse — the contact point glassOriginForRim solves for
+  if (liquidFrac > 0.01) {
+    const liquidTopY = bowlBottomY - (bowlBottomY - bowlTopY) * liquidFrac;
+    const liquidHalfW = bowlW * (0.32 + 0.18 * liquidFrac);
+    ctx.fillStyle = '#d99a4f';
+    ctx.beginPath();
+    ctx.moveTo(-bowlW * 0.32, bowlBottomY);
+    ctx.lineTo(-liquidHalfW, liquidTopY);
+    ctx.lineTo(liquidHalfW, liquidTopY);
+    ctx.lineTo(bowlW * 0.32, bowlBottomY);
+    ctx.closePath();
+    ctx.fill();
+    ellipse(ctx, 0, liquidTopY, liquidHalfW, bowlW * 0.1, '#e6b162');
+  }
+  ctx.restore();
+}
+
+/** A face drawn directly on the close-up head — eyes, eyebrows, nose,
+ * mouth — the student's own specific complaint about the previous
+ * version ("人物没有五官"). `chewing` animates the mouth between a
+ * closed line and a small open oval; otherwise a plain closed mouth.
+ * `headX/headY/headW/headH` are the already-positioned head box this is
+ * drawn relative to, so this needs no knowledge of the outer transform.
+ * `mouthY` is always computed by `mouthAnchor` below — kept as a passed-in
+ * value rather than recomputed here so the face and every prop reaching
+ * toward it can never silently use two different formulas for the same
+ * point. */
+function drawFace(ctx, headX, headY, headW, headH, mouthY, skin, chewing) {
+  const eyeY = headY + headH * 0.42;
+  const eyeDX = headW * 0.22, eyeW = headW * 0.1, eyeH = headH * 0.07;
+  // Eyebrows, just above the eyes.
+  ctx.fillStyle = '#4a3a30';
+  ctx.fillRect(headX + headW / 2 - eyeDX - eyeW * 0.6, eyeY - eyeH * 2.1, eyeW * 1.8, eyeH * 0.5);
+  ctx.fillRect(headX + headW / 2 + eyeDX - eyeW * 1.2, eyeY - eyeH * 2.1, eyeW * 1.8, eyeH * 0.5);
+  // Eyes — simple dark ellipses, legible at this close-up scale.
+  ellipse(ctx, headX + headW / 2 - eyeDX, eyeY, eyeW * 0.55, eyeH * 0.6, '#2b2320');
+  ellipse(ctx, headX + headW / 2 + eyeDX, eyeY, eyeW * 0.55, eyeH * 0.6, '#2b2320');
+  // Nose — a small vertical shading stroke, not a filled shape (reads as
+  // a nose bridge at this scale without looking like a growth).
+  ctx.strokeStyle = '#00000030'; ctx.lineWidth = Math.max(1, headW * 0.015);
+  ctx.beginPath(); ctx.moveTo(headX + headW / 2, eyeY + eyeH); ctx.lineTo(headX + headW / 2, mouthY - headH * 0.12); ctx.stroke();
+  // Mouth — animates open/closed while chewing, a plain closed line otherwise.
+  if (chewing) {
+    const openness = 0.4 + 0.6 * Math.abs(Math.sin(Date.now() / 140));
+    ellipse(ctx, headX + headW / 2, mouthY, headW * 0.16, headH * 0.07 * openness, '#6b3a34');
+  } else {
+    ctx.strokeStyle = '#6b3a34'; ctx.lineWidth = Math.max(1, headW * 0.03);
+    ctx.beginPath(); ctx.moveTo(headX + headW / 2 - headW * 0.14, mouthY); ctx.lineTo(headX + headW / 2 + headW * 0.14, mouthY); ctx.stroke();
+  }
+  void skin; // kept in the signature for symmetry/future use (e.g. a skin-toned nose highlight); not needed for the current strokes
+}
+
+/** The ONE shared anchor the entire scene places every prop relative to —
+ * exported so spec/eatingAnimation.test.ts can compute it exactly once
+ * and reuse it to verify every other prop's own contact point against the
+ * same value, rather than each test re-deriving its own copy of "where is
+ * the mouth" and silently drifting from what the drawing code actually
+ * uses. `headX` only matters for drawFace's own horizontal centring;
+ * every prop below reaches for x=0 (the character's own horizontal
+ * centre line in this scene's translated coordinate space), matching
+ * drawFace's own `headX + headW/2`. */
+export function mouthAnchor(headY, headH) {
+  return { x: 0, y: headY + headH * 0.78 };
+}
+
+/** Lying flat on the table, oriented along the Y axis — tines/blade tip
+ * pointing up the screen (away from the character, toward the back of
+ * the table), handle pointing down toward the character — a real place-
+ * setting pose, and the student's own explicit follow-up request over
+ * this same round's earlier horizontal pose (which itself replaced the
+ * previous round's actual bug: a grey, vertically-STANDING utensil
+ * floating beside the character with nothing holding it — this is a
+ * different thing from "standing on end," which remains wrong; lying
+ * flat but oriented vertically on the table is the correct, requested
+ * pose). A knife/fork at rest always has this one clear position and
+ * orientation.
+ *
+ * The fork is a real three-tine fork, not a solid block with faint
+ * stripes painted over it — three separate rectangles with actual gaps
+ * of background colour between them, each individually rounded at the
+ * tip, so it reads as tines rather than a single prong (the student's
+ * own explicit "不想叉子，做成三叉的那种叉子" — make it look like an
+ * actual three-pronged fork). `gapColor` is the surface the fork is
+ * resting on (so the gaps between tines show that colour, not a
+ * hardcoded one that would mismatch a different background). */
+function drawRestingFork(ctx, x, y, len, gapColor) {
+  const tineW = len * 0.05, tineGap = len * 0.025, tineLen = len * 0.42;
+  const totalTineW = tineW * 3 + tineGap * 2;
+  ctx.fillStyle = '#cfd3d8';
+  ctx.fillRect(x - totalTineW / 2, y - len / 2, totalTineW, tineLen); // tine block footprint (top, pointing away)
+  ctx.fillStyle = gapColor;
+  ctx.fillRect(x - totalTineW / 2 + tineW, y - len / 2, tineGap, tineLen * 0.82); // gap between tine 1 and 2
+  ctx.fillRect(x - totalTineW / 2 + tineW * 2 + tineGap, y - len / 2, tineGap, tineLen * 0.82); // gap between tine 2 and 3
+  ctx.fillStyle = '#cfd3d8';
+  ctx.fillRect(x - len * 0.05, y - len / 2 + len * 0.4, len * 0.1, len * 0.6); // handle (bottom, nearest the character)
+  ctx.fillStyle = '#9aa0a8';
+  ctx.fillRect(x - totalTineW / 2, y - len / 2 + tineLen * 0.82, totalTineW, tineLen * 0.18); // shank joining the tines to the handle
+}
+function drawRestingKnife(ctx, x, y, len) {
+  ctx.fillStyle = '#cfd3d8';
+  ctx.fillRect(x - len * 0.04, y - len / 2, len * 0.08, len * 0.68); // blade (top, pointing away)
+  ctx.fillStyle = '#9aa0a8';
+  ctx.fillRect(x - len * 0.07, y - len / 2 + len * 0.66, len * 0.14, len * 0.34); // handle (bottom, nearest the character)
+}
+
+// The seated eating/drinking cutscene (CLAUDE.md's seated-eating
+// section) — a third-person close-up drawn with the viewer's own
+// clothing colour/skin tone, over a dining-table or counter/back-bar
+// background depending on where they're seated. Pure canvas drawing,
+// code-authored like the rest of this file's art (CLAUDE.md: original or
+// clearly licensed, never copied). Kept as its own module-level
+// function, not a method on the big closure below, since it only needs
+// its 2D context, the colour/skin hexes already in scope, and plain
+// numbers — nothing from the rest of createTavern's internal state.
+// `box(x, y, w, h, colour)` is intentionally a 5-argument helper closing
+// over this function's own `ctx` — a prior round's bug was calling it
+// with a stray leading `ctx` argument copied from this file's OTHER
+// `box(c, x, y, w, h, colour)` helper (used for the live map canvas);
+// every call site below passes exactly five arguments, never six.
+function drawEatingScene(ctx, vw, vh, { color, skin, phase, seatKind, reduceMotion }) {
+  const cx = vw / 2, cy = vh / 2;
+  const box = (x, y, w, h, c) => { ctx.fillStyle = c; ctx.fillRect(x, y, w, h); };
+  // Background: the counter/back-bar (dark cabinet, bottles) for a bar
+  // stool, a dining-table close-up (warm wood, a plate) otherwise —
+  // CLAUDE.md's two required backgrounds, reusing this file's existing
+  // warm pixel palette (the same cabinetBottle/rug colours drawn
+  // elsewhere in this module for the live map).
+  if (seatKind === 'stool') {
+    box(0, 0, vw, vh, '#2e211d');
+    box(0, vh * 0.55, vw, vh * 0.45, '#6b4635');
+    box(0, vh * 0.55, vw, 6, '#8a5f3f');
+    for (let i = 0; i < 5; i++) box(vw * 0.08 + i * vw * 0.18, vh * 0.12, vw * 0.07, vh * 0.3, ['#729f80', '#9c6848', '#b78a59', '#5e7d9e', '#8a594c'][i % 5]);
+  } else {
+    box(0, 0, vw, vh, '#473943');
+    box(0, vh * 0.58, vw, vh * 0.42, '#8d4545');
+    box(vw * 0.08, vh * 0.6, vw * 0.84, vh * 0.06, '#ad7054');
+  }
+  if (!phase) return;
+  // The seated figure, large and centred — reuses this scene's own
+  // skin/colour swatches, not the shared world sprite() primitive (that
+  // one is tuned for a small top-down tile, not a close-up).
+  const s = Math.min(vw, vh) / 7;
+  ctx.save();
+  ctx.translate(cx, cy + s * 0.6);
+  box(-s * 1.1, -s * 0.4, s * 2.2, s * 1.4, color); // torso
+  const headX = -s * 0.7, headY = -s * 1.9, headW = s * 1.4, headH = s * 1.5;
+  box(headX, headY, headW, headH, skin); // head
+  box(headX - s * 0.2, headY - s * 0.15, headW + s * 0.4, s * 0.55, '#43302d'); // hair
+  const tableY = -s * 0.15; // resting height on the table/counter top
+  const local = Math.max(0, Math.min(1, phase.localProgress ?? 0));
+
+  // ONE shared coordinate system every prop below reaches toward or rests
+  // on — the student's own explicit requirement. No prop computes its own
+  // independent "approximately near the mouth/table" offset; every
+  // contact point is derived from MOUTH/TABLE plus that prop's own real
+  // geometry (plateCenterForRim for the plate, glassOriginForRim's actual
+  // rotation math for the glass).
+  const MOUTH = mouthAnchor(headY, headH);
+  const TABLE = { x: s * 0.1, y: tableY };
+  // Pushed further out from the plate than the hands' own rest points
+  // below — the student's own follow-up: the utensils previously sat
+  // exactly on top of where the reaching-arm lines are drawn, so a
+  // resting fork/knife looked fused with the forearm. UTENSIL_REST is a
+  // real, separate position outside the arm's own reach line, not the
+  // hands' own anchor.
+  const HAND_L_REST = { x: TABLE.x - s * 0.95, y: TABLE.y }; // character's own right hand -> screen-left (fork)
+  const HAND_R_REST = { x: TABLE.x + s * 0.95, y: TABLE.y }; // character's own left hand -> screen-right (knife/glass)
+  const UTENSIL_L_REST = { x: TABLE.x - s * 1.35, y: TABLE.y };
+  const UTENSIL_R_REST = { x: TABLE.x + s * 1.35, y: TABLE.y };
+  const tableSurfaceColor = seatKind === 'stool' ? '#6b4635' : '#8d4545';
+
+  const chewingNow = phase.kind === 'meal' && mealBeats(local).chewing;
+  drawFace(ctx, headX, headY, headW, headH, MOUTH.y, skin, reduceMotion ? false : chewingNow);
+
+  // A small sipping/chewing wobble only while actually holding something
+  // up near the mouth, skipped entirely under prefers-reduced-motion
+  // (CLAUDE.md: a less-motion pose is fine, a frozen illusion of eating is
+  // not required to move). Applied only to the MOUTH-side end of a lerp
+  // below, scaled by how close the prop currently is to the mouth, so it
+  // never pulls a resting prop off the table and never moves the verified
+  // contact point by more than this small amplitude.
+  const wobbleAmp = reduceMotion ? 0 : s * 0.025;
+  const wobble = reduceMotion ? 0 : Math.sin(Date.now() / 160) * wobbleAmp;
+
+  const lerp = (a, b, t) => a + (b - a) * t;
+
+  if (phase.kind === 'meal') {
+    const { forkHeight, biteEaten, plateLift, plateTilt, plateConsumed } = mealBeats(local);
+    const PLATE_W = s * 1.8;
+    const UTENSIL_LEN = s * 0.9;
+
+    // Fork: rests flat on the table until its own bite beat raises it;
+    // the FOOD END (the tine block, drawn at the tip) is what travels to
+    // MOUTH — never just "the hand" — and lowers back to its exact
+    // resting pose afterward (forkHeight returns to 0 by construction).
+    if (forkHeight > 0.02) {
+      const forkTip = { x: lerp(HAND_L_REST.x, MOUTH.x, forkHeight) + wobble * forkHeight, y: lerp(HAND_L_REST.y, MOUTH.y, forkHeight) };
+      ctx.strokeStyle = skin; ctx.lineWidth = s * 0.22; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(HAND_L_REST.x, HAND_L_REST.y + s * 0.1); ctx.lineTo(forkTip.x, forkTip.y); ctx.stroke();
+      // The food end: a small tine block plus, while still near the
+      // plate, a visible morsel riding on it — this is the "food reaches
+      // the mouth" beat, not a bare rectangle standing in for a hand.
+      box(forkTip.x - s * 0.06, forkTip.y - s * 0.07, s * 0.12, s * 0.14, '#cfd3d8');
+      if (forkHeight < 0.75) ellipse(ctx, forkTip.x, forkTip.y - s * 0.02, s * 0.07 * (1 - forkHeight / 0.75), s * 0.05 * (1 - forkHeight / 0.75), '#8a5f3f');
+    } else {
+      drawRestingFork(ctx, UTENSIL_L_REST.x, UTENSIL_L_REST.y, UTENSIL_LEN, tableSurfaceColor);
+    }
+    // Knife: always resting, flat, on its own clear table position —
+    // never drawn standing on end, never left floating once the plate is
+    // lifted (the actual bug the student's screenshot caught: a grey,
+    // vertical, unheld shape beside the character). Positioned at
+    // UTENSIL_R_REST, outside the hand/arm reach line, per the student's
+    // follow-up that the utensils previously overlapped the forearm.
+    drawRestingKnife(ctx, UTENSIL_R_REST.x, UTENSIL_R_REST.y, UTENSIL_LEN);
+
+    if (plateLift > 0.02) {
+      // Beats 3-5: the plate's own NEAR RIM — not its centre — travels
+      // continuously from just above the table to MOUTH as plateLift
+      // goes 0..1, while plateTilt independently rotates it (via
+      // plateRy's own vertical squish) from flat to edge-on. The two are
+      // driven by the same mealBeats() values as before (unchanged
+      // timing contract); only the contact-point math changed.
+      const restRy = plateRy(PLATE_W, 0);
+      const restContact = { x: TABLE.x, y: TABLE.y - restRy };
+      const contact = { x: lerp(restContact.x, MOUTH.x, plateLift) + wobble * plateLift, y: lerp(restContact.y, MOUTH.y, plateLift) };
+      const ry = plateRy(PLATE_W, plateTilt);
+      const center = plateCenterForRim(contact.x, contact.y, ry);
+      const rx = PLATE_W / 2;
+      drawPlate(ctx, center.x, center.y, PLATE_W, plateTilt, 1 - plateConsumed, false);
+      // Two hands holding the plate's own ACTUAL edges (± rx from its
+      // real current centre) — they move with the plate because they are
+      // computed from the plate's own current geometry every frame, not
+      // from a separately-guessed offset.
+      ctx.strokeStyle = skin; ctx.lineWidth = s * 0.2; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(HAND_L_REST.x, HAND_L_REST.y + s * 0.15); ctx.lineTo(center.x - rx * 0.85, center.y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(HAND_R_REST.x, HAND_R_REST.y + s * 0.15); ctx.lineTo(center.x + rx * 0.85, center.y); ctx.stroke();
+    } else {
+      // Beats 1/2: plate flat on the table — drawn at TABLE itself, tilt
+      // 0, so its centre and its rim coincide with no lift applied yet.
+      drawPlate(ctx, TABLE.x, TABLE.y, PLATE_W, 0, 1, biteEaten);
+    }
+  } else {
+    const { lift, consumed } = drinkBeats(local);
+    const GLASS_H = s * 1.1;
+    const bowlH = GLASS_H * 0.5;
+    const GLASS_REST = { x: TABLE.x + s * 0.45, y: TABLE.y };
+    // The rim's own resting contact point, computed FORWARD from the
+    // glass's real resting origin/geometry (theta=0) rather than assumed —
+    // this is what keeps the lifted trajectory continuous with the
+    // glass's own true resting pose instead of snapping at lift=0.
+    const restContact = { x: GLASS_REST.x, y: GLASS_REST.y - bowlH };
+    const contact = { x: lerp(restContact.x, MOUTH.x, lift) + wobble * lift, y: lerp(restContact.y, MOUTH.y, lift) };
+    const theta = -lift * 0.9; // tips toward the mouth as it's raised
+    // The actual fix: compute the translation FROM the rotation and the
+    // desired rim position, not the other way around (CLAUDE.md's own
+    // instruction this round, taken literally) — glassOriginForRim is the
+    // exact algebraic inverse of what ctx.translate+ctx.rotate will do to
+    // the glass's own local rim point.
+    const origin = glassOriginForRim(contact.x, contact.y, bowlH, theta);
+    if (lift > 0.02) {
+      // The grip point is a REAL point on the glass's own stem (local
+      // (0, stemH/2) before rotation, transformed the same way as the
+      // rim) — the hand is drawn to that exact transformed point, so it
+      // can never read as detached from the glass regardless of tilt.
+      const stemH = GLASS_H * 0.32;
+      const gripLocal = rotatePoint(0, stemH * 0.55, theta);
+      const grip = { x: origin.x + gripLocal.x, y: origin.y + gripLocal.y };
+      ctx.strokeStyle = skin; ctx.lineWidth = s * 0.2; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(HAND_R_REST.x, HAND_R_REST.y + s * 0.15); ctx.lineTo(grip.x, grip.y); ctx.stroke();
+    }
+    drawGlass(ctx, origin.x, origin.y, GLASS_H, theta, 1 - consumed);
+  }
+  ctx.restore();
+}
+
+// A password <input> plus its own independent show/hide eye toggle
+// (2026-11-04) — used by every password field in the account forms
+// (login, register, confirm, and the later reset-password form), so the
+// behavior is defined once rather than copied per field. Returns
+// {wrapper, input}: `wrapper` is what the caller actually appends to the
+// DOM (an input-and-button pair), `input` is the real <input> element
+// for reading .value / calling .focus().
+//
+// - type="button" on the toggle, never type="submit" — clicking it must
+//   never submit the enclosing <form> (a real risk here specifically,
+//   since every caller of this helper sits inside a form whose own
+//   submit handler does real work).
+// - Each instance owns its own closed-over `visible` flag — toggling one
+//   field never touches any other field's own visibility, content, or
+//   focus; clicking the eye re-focuses the input afterward so the next
+//   keystroke lands where the user expects rather than on the button.
+// - aria-label text and aria-pressed both flip with the state ("Show
+//   password" / "Hide password"), so a screen reader announces the
+//   actual current action, not a static label.
+// - Nothing here writes the password anywhere (no console.log, no
+//   storage) — toggling visibility only ever changes the input's own
+//   `type` attribute, which the browser already renders; this helper
+//   introduces no new place a password value could end up persisted.
+function passwordField(el, { id, placeholder, autocomplete, required=true }) {
+  let visible=false;
+  const input=el('input',{type:'password',id,placeholder,autocomplete,required:required||undefined});
+  const eye=el('button',{
+    type:'button',class:'password-toggle','aria-label':'Show password','aria-pressed':'false',
+    'aria-controls':id,tabindex:'0',
+  },[el('span',{'aria-hidden':'true',class:'password-toggle-icon'},'👁')]);
+  eye.onclick=()=>{
+    visible=!visible;
+    input.type=visible?'text':'password';
+    eye.setAttribute('aria-label',visible?'Hide password':'Show password');
+    eye.setAttribute('aria-pressed',String(visible));
+    eye.classList.toggle('password-toggle-active',visible);
+    input.focus();
+  };
+  const wrapper=el('div',{class:'password-field'},[input,eye]);
+  return {wrapper,input};
+}
+
+export function createTavern({ el, render, navigate, buildClassicPanel, saveSession, shouldApplyLiveUpdate, createMenuBook, mixologyModule, ordersApi, accountsApi }) {
   const menuBook=createMenuBook({el,mixologyModule,ordersApi});
   const colors = { red:'#c85e59', blue:'#6485bc', green:'#629e86', yellow:'#ddba65', purple:'#997cb5', teal:'#66b5b0', orange:'#cf8858', pink:'#cd88a3' };
   const skins = { fair:'#f3d7b6', warm:'#dcb58a', tan:'#ba875f', brown:'#906044', deep:'#614437' };
   let dispose = () => {};
   let enteredThisPage = false;
   const sessionKey = 'vegas:bar:session';
+  // A real, previously-undocumented weakness found this round: the eating
+  // cutscene's own client-side "has endsAt passed?" check originally
+  // compared the server's endsAt directly against this browser's own
+  // Date.now(), unconditionally assuming the two clocks agree. A real
+  // browser can run meaningfully ahead of or behind the server's own
+  // clock (an unsynced system clock, a VM, a phone with manual time set)
+  // — reproduced directly with a 6-second-fast simulated browser clock:
+  // the cutscene vanished roughly 5 seconds BEFORE the server's real lock
+  // actually ended. The server's own gating was never at risk (confirmed
+  // in the same test: a direct move attempt during that window was still
+  // correctly refused with eating_active — gameplay authority has always
+  // been server-only, CLAUDE.md's own standing rule, and this bug could
+  // never bypass it), but the player would be staring at the ordinary
+  // world with no visible reason they still can't act. `clockSkewMs` is a
+  // rolling estimate of (server time − this browser's own Date.now()),
+  // taken from the standard `Date` response header every ordinary bar
+  // request already receives for free (no new endpoint, no extra round
+  // trip) — `serverNow()` below is what the eating-expiry check now
+  // compares against instead of a bare `Date.now()`.
+  //
+  // The `Date` header is only second-precision (RFC 7231) — real
+  // measurement found this introduces up to roughly ±1s of its own noise
+  // even on a perfectly synced clock, which showed up as the cutscene
+  // lingering ~100ms past the true end in one real run. SKEW_DEADBAND_MS
+  // ignores any estimate smaller than that noise floor, so the overwhelmingly
+  // common well-synced-clock case stays exactly as accurate as a bare
+  // Date.now() comparison always was; only a genuinely large skew (several
+  // seconds, the actual bug this exists to fix) is ever corrected for.
+  const SKEW_DEADBAND_MS = 1500;
+  let clockSkewMs = 0;
+  function noteServerTime(res) {
+    const header = res.headers && res.headers.get && res.headers.get('date');
+    if (!header) return;
+    const serverMs = Date.parse(header);
+    if (Number.isNaN(serverMs)) return;
+    const estimate = serverMs - Date.now();
+    clockSkewMs = Math.abs(estimate) > SKEW_DEADBAND_MS ? estimate : 0;
+  }
+  function serverNow() { return Date.now() + clockSkewMs; }
   const post = async (path, body) => {
     const r = await fetch('/api/bar'+path,{ method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body) });
+    noteServerTime(r);
     const data = await r.json(); if(!r.ok) throw Object.assign(new Error(data.message),{status:r.status}); return data;
   };
-  const read = async path => { const r=await fetch('/api/bar'+path); if(!r.ok) throw new Error('Unable to connect to the tavern'); return r.json(); };
+  const read = async path => { const r=await fetch('/api/bar'+path); noteServerTime(r); if(!r.ok) throw new Error('Unable to connect to the tavern'); return r.json(); };
   function sprite(c,x,y,color,skin,scale=1,step=0,seated=false) {
     c.save(); c.translate(Math.round(x),Math.round(y)); c.scale(scale,scale);
     const rect=(a,b,w,h,t)=>{c.fillStyle=t;c.fillRect(a,b,w,h);};
@@ -59,6 +694,28 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
   async function mount() {
     dispose(); document.body.classList.add('world-mode');
     let active=true, session=null, state={players:[],tables:[]}, mine=null, camera={x:0,y:0}, path=[], moving=false, frame=0, lowStaminaNotified=false;
+    // The logged-in account's own {id, username}, or null for a guest —
+    // refreshed from the server's own cookie-backed session (src/accountRoutes.ts's
+    // GET /me), never inferred from anything stored client-side. Purely
+    // a display/UI-gating concern: the actual bar identity this browser
+    // controls always flows through `session` above exactly as it did
+    // before accounts existed (CLAUDE.md:昵称只是显示名称... 不能把"换昵称"
+    // 等同于换玩家 — likewise, logging in/out is a different thing from
+    // "which bar identity is this browser currently acting as").
+    let account=null;
+    // A short poll (ACCOUNT_POLL_MS) for "did my account session get
+    // replaced elsewhere" — the multi-device takeover's own explicit
+    // requirement ("旧设备明确显示...") needs *some* way to notice a
+    // revoked cookie without the user taking any action first. Reusing
+    // the existing SSE/heartbeat channels would conflate two different
+    // identity layers (account vs bar); a small dedicated interval is
+    // simpler and correct, matching this file's own existing fallback-poll
+    // pattern (the 10s state fetch below).
+    let accountCheckTimer=null, loggedOutElsewhereShown=false;
+    async function refreshAccount(){
+      try{account=(await accountsApi.whoAmI()).account;}catch{account=null;}
+      return account;
+    }
     // This identity's own currently-bound table seat, if any —
     // {tableId, roomCode} or null, re-validated server-side on every
     // join/rejoin/appearance response (src/tables.ts's getActiveSeat),
@@ -109,11 +766,41 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     // someone instead of into them" — the original, chat-independent part
     // 2 rule.
     let approachTarget=null;
+    // The seated eating/drinking lock (CLAUDE.md's seated-eating
+    // section) — mirrors exactly what the public snapshot's own
+    // mine.eating field says, never a locally-invented duration: the
+    // cutscene's progress is always computed from the server's own
+    // startedAt/endsAt, so a refresh or a reconnect mid-animation simply
+    // resumes at the right point rather than restarting or losing it.
+    // {kinds, startedAt, endsAt, seatKind} while active, else null.
+    let eatingUI=null;
+    // Set to the endsAt timestamp (ms) we've already triggered a catch-up
+    // fetch for, so the 1-per-second animate() loop requests at most one
+    // extra /state read per actual eating action rather than spamming the
+    // server every frame once the local clock passes endsAt. Reset to null
+    // whenever a genuinely new eatingUI is reconciled (reconcile() below).
+    let eatingExpiryFetchedFor=null;
     const holdCleanups=[];
+    // Same-browser, multiple-tabs logout sync: `localStorage.removeItem`
+    // fires a `storage` event in every OTHER tab of the same origin (never
+    // the tab that made the change) — exactly the signal needed for "I
+    // logged out in tab 1, tab 2 should reflect that immediately" without
+    // waiting for either poll below. A late response already in flight
+    // for the old identity still can't resurrect this UI: `session` is
+    // cleared here before any such response could land, and every bar
+    // route re-checks the (now-gone) session_secret server-side anyway.
+    const storageHandler=e=>{
+      if(e.key!==sessionKey||e.newValue!==null||!active)return;
+      session=null;mine=null;staminaFill.style.width='0%';staminaLabel.textContent='—';
+      activeSeat=null;if(returnGameButton){returnGameButton.remove();returnGameButton=null;}
+      overlay.replaceChildren();openAuthOverlay();
+    };
+    window.addEventListener('storage',storageHandler);
     dispose=()=>{
       active=false;holdCleanups.forEach(cleanup=>cleanup());document.body.classList.remove('world-mode');
       if(eventSource){eventSource.close();eventSource=null;}
       if(visibilityHandler){document.removeEventListener('visibilitychange',visibilityHandler);window.removeEventListener('focus',visibilityHandler);visibilityHandler=null;}
+      window.removeEventListener('storage',storageHandler);
     };
     const displayPositions=new Map();
     const timers=[];
@@ -149,13 +836,42 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     for(const [label,dx,dy] of [['↑',0,-1],['←',-1,0],['↓',0,1],['→',1,0]]) {
       const b=el('button',{'aria-label':`Walk ${label}`},label);directions.appendChild(b);
       holdCleanups.push(bindDirectionHold(b, {
-        onPress:()=>{ if(!mine||overlay.childElementCount)return;path=[];heldDirection={dx,dy};queueStep(dx,dy); },
+        onPress:()=>{ if(!mine||overlay.childElementCount||eatingUI)return;path=[];heldDirection={dx,dy};queueStep(dx,dy); },
         onRelease:({cancelled})=>{ if(heldDirection?.dx===dx&&heldDirection?.dy===dy){heldDirection=null;if(cancelled)path=[];} },
         onTap:()=>queueStep(dx,dy),
       }));
     }
     const seatLayer=el('div',{class:'seat-layer'});
-    const scene=el('div',{class:'tavern-world'},[canvas,seatLayer,hud,toast,directions]); render(scene);
+    // The overhead holding/eat/drink prompt (CLAUDE.md's seated-eating
+    // section) — a single DOM button layered over the canvas, following
+    // this patron's own head position every frame exactly like
+    // menuBookButton/seat-target buttons already do, rather than a
+    // canvas-drawn label (which can't be a real click target). Hidden
+    // whenever there's nothing to show; its own text is set per-frame
+    // from holdingLabelFor() below. Only ever rendered — let alone
+    // clickable — for `mine`; a bystander's own holding/eating status is
+    // drawn as a plain, non-interactive canvas tag in animate() instead
+    // (CLAUDE.md: others can see it, but never click it for someone else).
+    const eatPromptBtn=el('button',{class:'seat-target eat-prompt-target',onclick:async()=>{
+      if(!mine||overlay.childElementCount||eatingUI)return;
+      try{
+        const idempotencyKey=`${session.playerId}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+        const resp=await ordersApi.startEating(session,idempotencyKey);
+        eatingUI={kinds:resp.kinds,startedAt:resp.startedAt,endsAt:resp.endsAt,seatKind:mySeatKind()};
+      }catch(e){toast.textContent=e.message||'Could not start eating.';}
+    }});
+    seatLayer.appendChild(eatPromptBtn);
+    // The eating cutscene's own full-screen canvas — a separate layer
+    // above everything else in the scene (including the HUD/toast),
+    // shown only while eatingUI is set. Kept as a second canvas rather
+    // than reusing the map's own one: the map canvas keeps rendering the
+    // live world underneath at its own resolution/camera, which this
+    // scene has no use for and would have to fight for context state
+    // with (fillStyle/transform) every frame.
+    const eatCanvas=el('canvas',{class:'eating-cutscene','aria-hidden':'true'});
+    const eatCtx=eatCanvas.getContext('2d');
+    const eatReduceMotion=typeof matchMedia==='function'?matchMedia('(prefers-reduced-motion: reduce)'):{matches:false};
+    const scene=el('div',{class:'tavern-world'},[canvas,seatLayer,hud,toast,directions,eatCanvas]); render(scene);
     const overlay=el('div',{class:'world-overlay'});scene.appendChild(overlay);
     // The counter's own physical menu book (public/menuBook.js) — one
     // in-scene entry point replacing the old "Mixology book"/"Meals/
@@ -164,9 +880,36 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     // stops held movement the same way every other overlay dialog here
     // already does.
     function openMenuBook(){
-      if(!mine||overlay.childElementCount)return;
+      if(!mine||overlay.childElementCount||eatingUI)return;
       path=[];destination=null;keys.clear();heldDirection=null;pendingSitSeat=null;approachTarget=null;
       menuBook.open(overlay,session,menuBookButton.getBoundingClientRect());
+    }
+    // Which background the cutscene should show — a stool (counter/
+    // back-bar) or a dining-table seat — read from the real seat/
+    // furniture layout, the same `layout.seats`/fixtures data every
+    // other seat-aware function here already uses, never guessed from
+    // position alone.
+    function mySeatKind(){
+      if(!mine?.seatId)return 'dining';
+      const seat=(layout.seats||[]).find(s=>s.id===mine.seatId);
+      const f=seat&&fixtures.find(x=>x.id===seat.furnitureId);
+      return f?.kind==='stool'?'stool':'dining';
+    }
+    // "Eat" / "Drink" / "Eat & Drink", from this patron's own currently-
+    // held kinds (CLAUDE.md: the prompt names the action, never the
+    // specific dish) — null when there is nothing to hold/eat yet, which
+    // hides the prompt entirely rather than showing an empty button.
+    function holdingLabelFor(p){
+      if(!p)return null;
+      const seated=p.seatId!=null;
+      const meal=p.holding?.meal, drink=p.holding?.drink;
+      if(!meal&&!drink)return null;
+      const what=meal&&drink?'Eat & Drink':meal?'Eat':'Drink';
+      // Standing: a plain, non-clickable "holding" tag — can carry food/
+      // a drink around, but can't consume it until actually seated
+      // (CLAUDE.md: server already refuses this; the prompt just never
+      // invites the click it would be refused anyway).
+      return seated?{label:what,actionable:true}:{label:'Holding',actionable:false};
     }
     let layout;
     try { layout=await read('/layout'); } catch(e) {toast.textContent=e.message;return;}
@@ -255,7 +998,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       const f=fixtures.find(f=>f.id===s.furnitureId);
       const label=`Sit — ${f?.kind==='stool'?'bar stool':'dining chair'} ${s.id}`;
       const button=el('button',{class:'seat-target','aria-label':label,'data-hint':'Sit down',title:'Sit down',onclick:()=>{
-        if(!mine||overlay.childElementCount)return;
+        if(!mine||overlay.childElementCount||eatingUI)return;
         // A seat-target button is a separate DOM element layered over the
         // canvas — it never goes through the canvas's own click handler,
         // so the same player-click-takes-priority rule (part 2) has to be
@@ -270,7 +1013,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     for(const s of layout.gameChairs||[]){
       const f=fixtures.find(f=>f.id===s.tableId);
       const button=el('button',{class:'seat-target','aria-label':`Choose ${s.color} seat — ${f.label}`,'data-hint':f.available?`Choose ${s.color} seat`:'Not yet open',title:f.available?`Choose ${s.color} seat`:'Not yet open',onclick:()=>{
-        if(!mine||overlay.childElementCount)return;
+        if(!mine||overlay.childElementCount||eatingUI)return;
         // A present game occupant's effective position is this exact
         // chair tile (src/position.ts) — clicking it walks up to them
         // (part 2's "real chair position, not a hidden lobby coordinate"
@@ -297,13 +1040,17 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     // `<button>`) and by a plain tap on mobile (CLAUDE.md: "must not
     // require hover to be discoverable").
     const menuBookButton=el('button',{class:'seat-target menu-book-target','aria-label':'Open the counter’s book','data-hint':'Open the book','title':'Open the book',onclick:()=>{
-      if(!mine||overlay.childElementCount)return;
+      if(!mine||overlay.childElementCount||eatingUI)return;
       openMenuBook();
     }});
     seatLayer.appendChild(menuBookButton);
     const ctx=canvas.getContext('2d');
     let vw=window.innerWidth,vh=window.innerHeight;
-    const resize=()=>{vw=window.innerWidth;vh=window.innerHeight;const dpr=Math.min(devicePixelRatio||1,2);canvas.width=vw*dpr;canvas.height=vh*dpr;canvas.style.width=vw+'px';canvas.style.height=vh+'px';ctx.setTransform(dpr,0,0,dpr,0,0);};resize();
+    const resize=()=>{
+      vw=window.innerWidth;vh=window.innerHeight;const dpr=Math.min(devicePixelRatio||1,2);
+      canvas.width=vw*dpr;canvas.height=vh*dpr;canvas.style.width=vw+'px';canvas.style.height=vh+'px';ctx.setTransform(dpr,0,0,dpr,0,0);
+      eatCanvas.width=vw*dpr;eatCanvas.height=vh*dpr;eatCanvas.style.width=vw+'px';eatCanvas.style.height=vh+'px';eatCtx.setTransform(dpr,0,0,dpr,0,0);
+    };resize();
     window.addEventListener('resize',resize);
     // Mirrors src/barLayout.ts's isWalkingFloor, from the same
     // FURNITURE list (fetched via GET /api/bar/layout) — a fixture with
@@ -336,7 +1083,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       }
       if(!prev.has(end))return [];const result=[];let key=end;while(key!==start){result.unshift(key.split(',').map(Number));key=prev.get(key);}return result;
     }
-    function queueStep(dx,dy){if(!mine||moving||overlay.childElementCount)return;const x=mine.x+dx,y=mine.y+dy;if(canStep(x,y)){pendingSitSeat=null;approachTarget=null;path=[[x,y]];destination={x,y};}}
+    function queueStep(dx,dy){if(!mine||moving||overlay.childElementCount||eatingUI)return;const x=mine.x+dx,y=mine.y+dy;if(canStep(x,y)){pendingSitSeat=null;approachTarget=null;path=[[x,y]];destination={x,y};}}
     // The one free-adjacent-tile picker behind both "click an occupied
     // floor tile" (part 2) and "click a nearby player to chat" (part 3):
     // among the up to 4 cardinal neighbours of (tx,ty) that are actually
@@ -361,7 +1108,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     // (ordinary, server-validated step by step) and let step() below
     // finish the gesture once it confirms arrival.
     function beginSit(seat){
-      if(!mine||overlay.childElementCount)return;
+      if(!mine||overlay.childElementCount||eatingUI)return;
       if(manhattan(mine.x,mine.y,seat.x,seat.y)<=1){
         path=[];destination=null;pendingSitSeat=null;
         post(`/seats/${seat.id}/sit`,session).then(resp=>{applyIncoming(resp);toast.textContent='Seated — use Stand up to leave the chair.';}).catch(e=>{toast.textContent=e.message||'Could not sit down';});
@@ -377,7 +1124,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     // (that was part 3's own, now superseded by public speech bubbles;
     // see CLAUDE.md's "Public tavern speech" section for the history).
     function approachPlayer(player){
-      if(!mine||overlay.childElementCount||player.id===mine.id)return;
+      if(!mine||overlay.childElementCount||eatingUI||player.id===mine.id)return;
       if(manhattan(mine.x,mine.y,player.x,player.y)<=1)return; // already adjacent — nothing more to do
       const approach=findApproachTile(player.x,player.y);
       if(!approach){toast.textContent="Can't reach them right now.";return;}
@@ -407,6 +1154,22 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         // than only ever once per whole session.
         if(pct<20&&!lowStaminaNotified){lowStaminaNotified=true;toast.textContent='Getting low on energy — the counter has meals and drinks.';}
         else if(pct>=20)lowStaminaNotified=false;
+      }
+      // Recovers the eating lock straight from the server's own public
+      // field on every reconcile — including the very first one after a
+      // fresh page load/refresh or a reconnect — rather than only ever
+      // being set locally by the prompt's own click handler. This is
+      // what makes a mid-animation refresh resume the cutscene instead
+      // of silently losing it, and what clears it the moment the
+      // server's own lazy-expiry says the 8 seconds are up, with no
+      // client "I'm done" message required either way (CLAUDE.md).
+      if(mine?.eating){
+        if(!eatingUI||eatingUI.startedAt!==mine.eating.startedAt){
+          eatingUI={kinds:mine.eating.kinds,startedAt:mine.eating.startedAt,endsAt:mine.eating.endsAt,seatKind:mySeatKind()};
+          eatingExpiryFetchedFor=null;
+        }
+      }else if(eatingUI){
+        eatingUI=null;
       }
     }
     // The staleness rule for this channel: public/liveSync.js's
@@ -616,7 +1379,20 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       keys.clear();heldDirection=null;path=[];
       if(open)speechInput.focus();else canvas.focus();
     }
-    speechToggle.onclick=()=>toggleSpeech(speechBar.hidden);
+    // Real bug, not just a visual one (2026-11-04): every other
+    // interactive control in this file already checks
+    // overlay.childElementCount before acting (movement, clicks, seat
+    // targets, keydown) — this toggle never did, so the chat bubble
+    // button remained clickable (and, worse, visually painted on top of)
+    // any open dialog, including the new login/signup form. The CSS
+    // fix below (`.tavern-world:has(>.world-overlay>*) .speech-toggle`)
+    // hides it from view the same way world-overlay's own :has()
+    // selector already hides the map's background tint rules; this JS
+    // guard is the actual behavioral fix (a hidden-but-still-wired
+    // onclick could still fire from a stale reference or synthetic
+    // event) and the one that matches this file's own established
+    // pattern for every other control.
+    speechToggle.onclick=()=>{if(overlay.childElementCount)return;toggleSpeech(speechBar.hidden);};
     speechInput.addEventListener('keydown',e=>{if(e.key==='Escape'){e.preventDefault();toggleSpeech(false);}});
     async function doSay(){
       if(!mine)return;
@@ -632,6 +1408,249 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     speechSend.onclick=doSay;
     speechInput.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();doSay();}});
     scene.append(speechBar,speechToggle);
+    // Revokes the server-side account session (the cookie itself is
+    // cleared by the server's own Set-Cookie response — see
+    // src/accountRoutes.ts's logout route), then clears every piece of
+    // THIS browser's own cached identity for the character that account
+    // controlled: the bar session, every room session this tab might
+    // still be holding, and voice/game credentials are covered
+    // transitively since they're never cached independently of those —
+    // a late response to any in-flight request for the OLD identity
+    // naturally 403s once this has run, never silently resurrecting the
+    // old UI (CLAUDE.md: "迟到的响应不能恢复旧账号界面"). Logging out
+    // itself never calls exitGame/fold/disband — CLAUDE.md's own
+    // "退出登录... 不能把旧玩家座位交给新账号" is about NOT silently
+    // reassigning a seat, not about forcing an exit; an active game seat
+    // simply keeps running exactly as the existing disconnect-tolerant
+    // policy already handles any other disconnect.
+    async function doLogout(){
+      if(activeSeat&&!confirm("You're still seated at a game table. Logging out won't exit it — your seat is handled by the normal disconnect rules, exactly like closing this tab would be. Log out anyway?")){
+        return false;
+      }
+      try{await accountsApi.logout();}catch{}
+      account=null;
+      session=null;
+      try{localStorage.removeItem(sessionKey);}catch{}
+      activeSeat=null;
+      if(returnGameButton){returnGameButton.remove();returnGameButton=null;}
+      // This browser no longer controls any identity at all — clear the
+      // just-logged-out character's own cached view (nickname tag,
+      // sprite, stamina chip) rather than leaving it rendered stale
+      // behind the auth overlay until some future server response
+      // happens to overwrite it (CLAUDE.md: "退出/切换...不能把...界面
+      // 恢复"). `mine` stays null until a fresh join/login repopulates it.
+      mine=null;
+      staminaFill.style.width='0%';staminaLabel.textContent='—';
+      enteredThisPage=false;
+      return true;
+    }
+    // Shown exactly once, right after the codes are generated (at
+    // registration, after a successful reset, or after a voluntary
+    // regenerate) — the server has already forgotten the plaintext by
+    // the time this renders (only the hash is ever stored), so this is
+    // the one and only chance the user has to see these. `onDone` is
+    // called once the user explicitly acknowledges — never auto-advances
+    // on a timer, since copying/writing them down takes real time.
+    function renderRecoveryCodes(codes,onDone){
+      const copyMsg=el('p',{class:'dialog-footnote',role:'status'},'');
+      overlay.replaceChildren(el('section',{class:'world-dialog auth-dialog',role:'dialog','aria-label':'Save your recovery codes'},[
+        el('p',{class:'eyebrow'},'Las Vegas · OPEN ALL EVENING'),el('h1',{},'Save these recovery codes'),
+        el('p',{class:'dialog-subtitle'},"If you ever forget your password, any ONE of these unused codes lets you set a new one. Each code works only once, and this is the only time they'll ever be shown — write them down or copy them somewhere safe now."),
+        el('ul',{class:'recovery-code-list'},codes.map(code=>el('li',{},el('code',{},code)))),
+        el('div',{class:'account-panel-actions'},[
+          el('button',{type:'button',class:'hud-button',onclick:async()=>{
+            try{
+              if(!navigator.clipboard?.writeText)throw Error('Clipboard unavailable');
+              await navigator.clipboard.writeText(codes.join('\n'));
+              copyMsg.textContent='Copied to clipboard.';
+            }catch{copyMsg.textContent="Couldn't copy automatically — please select and copy the codes above.";}
+          }},'Copy all'),
+        ]),
+        copyMsg,
+        el('button',{type:'button',class:'enter-world',onclick:()=>{overlay.replaceChildren();onDone();}},"I've saved these codes"),
+      ]));
+    }
+    // A logged-in user voluntarily re-rolling their own recovery-code
+    // batch (e.g. after using one, or suspecting the old batch leaked) —
+    // requires the current password first (CLAUDE.md: "旧账号补设恢复方
+    // 式必须验证当前密码"), the server's own check, not just a client
+    // gate.
+    function openRegenerateRecoveryCodes(){
+      const error=el('p',{class:'error',role:'alert'});
+      const currentPasswordField=passwordField(el,{id:'regen-current-password',placeholder:'Current password',autocomplete:'current-password'});
+      const submit=el('button',{type:'submit',class:'enter-world'},'Get new codes');
+      const form=el('form',{class:'world-dialog auth-dialog',role:'dialog','aria-label':'Get new recovery codes',onsubmit:async e=>{
+        e.preventDefault();submit.disabled=true;error.textContent='';
+        try{
+          const result=await accountsApi.regenerateRecoveryCodes({currentPassword:currentPasswordField.input.value});
+          renderRecoveryCodes(result.recoveryCodes,()=>chooseCharacter());
+        }catch(err){error.textContent=err.message||'Could not generate new codes';submit.disabled=false;}
+      }},[
+        el('p',{class:'eyebrow'},'Las Vegas · OPEN ALL EVENING'),el('h1',{},'Get new recovery codes'),
+        el('p',{class:'dialog-subtitle'},'This replaces your entire existing batch — any old codes, used or not, stop working.'),
+        el('label',{for:'regen-current-password'},'Current password'),currentPasswordField.wrapper,
+        error,submit,
+        el('button',{type:'button',class:'hud-button',onclick:()=>chooseCharacter()},'Cancel'),
+      ]);overlay.replaceChildren(form);currentPasswordField.input.focus();
+    }
+    // The floating Log in / Sign up / Continue as guest entry point
+    // (CLAUDE.md's account section) — shown over the existing character
+    // editor rather than replacing it, since "continue as guest" is
+    // exactly today's existing chooseCharacter() flow with nothing new
+    // required of it.
+    function openAuthOverlay(startMode='menu'){
+      let mode=startMode; // 'menu' | 'login' | 'register' | 'reset'
+      const error=el('p',{class:'error',role:'alert'});
+      function renderMenu(){
+        error.textContent='';
+        overlay.replaceChildren(el('section',{class:'world-dialog auth-dialog',role:'dialog','aria-label':'Log in or sign up'},[
+          el('button',{class:'dialog-close','aria-label':'Close',onclick:()=>{overlay.replaceChildren();chooseCharacter();}},'×'),
+          el('p',{class:'eyebrow'},'Las Vegas · OPEN ALL EVENING'),el('h1',{},'Welcome back — or welcome in.'),
+          el('div',{class:'auth-menu'},[
+            el('button',{type:'button',class:'enter-world',onclick:()=>{mode='login';renderForm();}},'Log in'),
+            el('button',{type:'button',class:'enter-world',onclick:()=>{mode='register';renderForm();}},'Sign up'),
+            el('button',{type:'button',class:'hud-button',onclick:()=>{overlay.replaceChildren();chooseCharacter();}},'Continue as guest'),
+          ]),
+          error,
+        ]));
+      }
+      function renderForm(){
+        error.textContent='';
+        const username=el('input',{placeholder:'Username',id:'auth-username',maxlength:'24',required:true,autocomplete:'username'});
+        const passwordField1=passwordField(el,{id:'auth-password',placeholder:'Password',autocomplete:mode==='login'?'current-password':'new-password'});
+        const password=passwordField1.input;
+        const confirmPasswordField=mode==='register'?passwordField(el,{id:'auth-confirm',placeholder:'Confirm password',autocomplete:'new-password'}):null;
+        const confirmPassword=confirmPasswordField?confirmPasswordField.input:null;
+        // The optional "keep my current guest character" checkbox
+        // (CLAUDE.md: 服务器验证过的当前游客凭证进行一次性、事务性的绑定) —
+        // only offered when this browser actually has a guest character
+        // right now (`session` set) and only at signup; nothing is
+        // trusted here beyond the fact that this checkbox was ticked —
+        // the actual proof is session.playerId/sessionSecret, verified
+        // server-side exactly the way every other bar action already is.
+        const migrateCheckbox=(mode==='register'&&session)?el('input',{type:'checkbox',id:'auth-migrate',checked:true}):null;
+        const submit=el('button',{type:'submit',class:'enter-world'},mode==='login'?'Log in':'Create account');
+        const form=el('form',{class:'world-dialog auth-dialog',role:'dialog','aria-label':mode==='login'?'Log in':'Sign up',onsubmit:async e=>{
+          e.preventDefault();submit.disabled=true;error.textContent='';
+          try{
+            let result;
+            if(mode==='login'){
+              result=await accountsApi.login({username:username.value,password:password.value});
+            }else{
+              if(password.value!==confirmPassword.value){error.textContent='Passwords do not match';submit.disabled=false;return;}
+              result=await accountsApi.register({
+                username:username.value,password:password.value,confirmPassword:confirmPassword.value,
+                migrateGuest:(migrateCheckbox&&migrateCheckbox.checked&&session)?{playerId:session.playerId,sessionSecret:session.sessionSecret}:null,
+              });
+            }
+            account={id:result.accountId,username:result.username};
+            if(result.barPlayerId){
+              // A fresh bar secret is only reported for login (always,
+              // via the takeover rotation) or a brand-new register with
+              // no migration — a migrated-guest register deliberately
+              // reports none (the browser already holds the real one),
+              // so keep the existing local session in that case rather
+              // than overwriting it with undefined.
+              if(result.barSessionSecret){
+                session={playerId:result.barPlayerId,sessionSecret:result.barSessionSecret};
+                try{localStorage.setItem(sessionKey,JSON.stringify(session));}catch{}
+              }
+              // A Vegas room this account is actively bound to gets its
+              // own freshly-rotated credential too (the takeover design,
+              // CLAUDE.md) — update this tab's own cached room session so
+              // "Return to your game" and any already-open room view use
+              // the new credential rather than the one that was just
+              // revoked.
+              if(result.vegasRoom){
+                saveSession(result.vegasRoom.code,{playerId:result.barPlayerId,sessionSecret:result.vegasRoom.sessionSecret});
+              }
+            }
+            const afterAuth=async()=>{
+              if(session){
+                try{const resp=await post('/rejoin',session);applyIncoming(resp);activeSeat=resp.activeSeat??null;}catch{}
+              }
+              chooseCharacter();
+            };
+            // A brand-new account's first recovery-code batch is shown
+            // exactly once, right here — nothing else in this app ever
+            // has another chance to show these (only the hash survives
+            // server-side). A login never generates new codes, so this
+            // only ever fires for mode==='register'.
+            if(result.recoveryCodes){
+              renderRecoveryCodes(result.recoveryCodes,afterAuth);
+            }else{
+              overlay.replaceChildren();
+              await afterAuth();
+            }
+          }catch(err){error.textContent=err.message||'Could not complete that request';submit.disabled=false;}
+        }},[
+          el('p',{class:'eyebrow'},'Las Vegas · OPEN ALL EVENING'),el('h1',{},mode==='login'?'Log in':'Sign up'),
+          el('label',{for:'auth-username'},'Username'),username,
+          el('label',{for:'auth-password'},'Password'),passwordField1.wrapper,
+          ...(confirmPasswordField?[el('label',{for:'auth-confirm'},'Confirm password'),confirmPasswordField.wrapper]:[]),
+          ...(migrateCheckbox?[el('div',{class:'auth-migrate-row'},[migrateCheckbox,el('label',{for:'auth-migrate'},'Keep my current guest character')])]:[]),
+          error,submit,
+          ...(mode==='login'?[el('button',{type:'button',class:'hud-button auth-forgot-link',onclick:()=>{mode='reset';renderResetForm();}},'Forgot password?')]:[]),
+          el('button',{type:'button',class:'hud-button',onclick:()=>{mode='menu';renderMenu();}},'Back'),
+          ...(mode==='register'?[el('p',{class:'dialog-footnote'},'No email is required. If you forget your password, the recovery codes shown after signup are the only way back in — there is no email-based recovery.')]:[]),
+        ]);overlay.replaceChildren(form);username.focus();
+      }
+      // The reset-password form (CLAUDE.md's recovery-code design) — a
+      // real recovery code is the ONLY proof accepted here, never
+      // username/nickname/localStorage alone. No account cookie is read
+      // or required: by definition, someone resetting a forgotten
+      // password cannot be expected to still have a valid session.
+      function renderResetForm(){
+        error.textContent='';
+        const resetUsername=el('input',{placeholder:'Username',id:'reset-username',maxlength:'24',required:true,autocomplete:'username'});
+        const codeInput=el('input',{placeholder:'XXXX-XXXX',id:'reset-code',required:true,autocomplete:'off',style:'text-transform:uppercase'});
+        const newPasswordField=passwordField(el,{id:'reset-new-password',placeholder:'New password',autocomplete:'new-password'});
+        const confirmNewPasswordField=passwordField(el,{id:'reset-confirm-password',placeholder:'Confirm new password',autocomplete:'new-password'});
+        const submit=el('button',{type:'submit',class:'enter-world'},'Reset password');
+        const form=el('form',{class:'world-dialog auth-dialog',role:'dialog','aria-label':'Reset your password',onsubmit:async e=>{
+          e.preventDefault();submit.disabled=true;error.textContent='';
+          try{
+            if(newPasswordField.input.value!==confirmNewPasswordField.input.value){
+              error.textContent='Passwords do not match';submit.disabled=false;return;
+            }
+            const result=await accountsApi.resetPassword({
+              username:resetUsername.value,recoveryCode:codeInput.value,
+              newPassword:newPasswordField.input.value,confirmNewPassword:confirmNewPasswordField.input.value,
+            });
+            account={id:result.accountId,username:result.username};
+            // Exactly the same takeover-style credential handoff a fresh
+            // login already performs — this device is now logged in with
+            // the new password, immediately usable.
+            if(result.barPlayerId&&result.barSessionSecret){
+              session={playerId:result.barPlayerId,sessionSecret:result.barSessionSecret};
+              try{localStorage.setItem(sessionKey,JSON.stringify(session));}catch{}
+            }
+            if(result.vegasRoom){
+              saveSession(result.vegasRoom.code,{playerId:result.barPlayerId,sessionSecret:result.vegasRoom.sessionSecret});
+            }
+            const afterReset=async()=>{
+              if(session){
+                try{const resp=await post('/rejoin',session);applyIncoming(resp);activeSeat=resp.activeSeat??null;}catch{}
+              }
+              chooseCharacter();
+            };
+            // The just-used code's whole batch is replaced — shown once,
+            // exactly like a fresh registration's own first batch.
+            renderRecoveryCodes(result.newRecoveryCodes,afterReset);
+          }catch(err){error.textContent=err.message||'Could not reset your password';submit.disabled=false;}
+        }},[
+          el('p',{class:'eyebrow'},'Las Vegas · OPEN ALL EVENING'),el('h1',{},'Reset your password'),
+          el('p',{class:'dialog-subtitle'},'Enter your username and one of your unused recovery codes.'),
+          el('label',{for:'reset-username'},'Username'),resetUsername,
+          el('label',{for:'reset-code'},'Recovery code'),codeInput,
+          el('label',{for:'reset-new-password'},'New password'),newPasswordField.wrapper,
+          el('label',{for:'reset-confirm-password'},'Confirm new password'),confirmNewPasswordField.wrapper,
+          error,submit,
+          el('button',{type:'button',class:'hud-button',onclick:()=>{mode='login';renderForm();}},'Back'),
+        ]);overlay.replaceChildren(form);resetUsername.focus();
+      }
+      if(mode==='menu')renderMenu();else if(mode==='reset')renderResetForm();else renderForm();
+    }
     function chooseCharacter(){
       let color=mine?.color||'green',skin=mine?.skin||'warm';
       const preview=el('canvas',{width:'180',height:'180','aria-label':'Character preview'});
@@ -665,7 +1684,40 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
               el('p',{class:'stamina-note'},'Eating a meal restores +70%, a drink +30% — both cap at 100%, with nothing stored for later.'),
             ]),
           ]:[]),
-        ])]),error,enter,el('p',{class:'dialog-footnote'},'No account needed. Your character stays in this browser.'),
+          // Account status + Log out/Switch account — the one combined
+          // entry point this user's own design asked for ("Your character
+          // 面板显示当前账号/游客状态，提供 Log out / Switch account"),
+          // never a second place to look for this. A guest sees no
+          // account section at all here beyond the existing footnote
+          // below; only a logged-in browser sees this block.
+          ...(account?[
+            el('span',{class:'option-label'},'Account'),
+            el('div',{class:'account-panel'},[
+              el('p',{},[el('strong',{},account.username),' is logged in on this browser.']),
+              el('div',{class:'account-panel-actions'},[
+                el('button',{type:'button',class:'hud-button',onclick:async e=>{
+                  e.preventDefault();
+                  // Logging out leaves this browser with no character at
+                  // all (session cleared above) — the same choice as a
+                  // brand-new visitor gets, not a half-finished panel for
+                  // an identity that no longer exists.
+                  if(await doLogout())openAuthOverlay();
+                }},'Log out'),
+                el('button',{type:'button',class:'hud-button',onclick:async e=>{
+                  e.preventDefault();
+                  if(await doLogout())openAuthOverlay('login');
+                }},'Switch account'),
+                el('button',{type:'button',class:'hud-button',onclick:e=>{e.preventDefault();openRegenerateRecoveryCodes();}},'Get new recovery codes'),
+              ]),
+            ]),
+          ]:[
+            el('span',{class:'option-label'},'Account'),
+            el('div',{class:'account-panel'},[
+              el('p',{},"You're playing as a guest — this character only exists in this browser."),
+              el('button',{type:'button',class:'hud-button',onclick:e=>{e.preventDefault();openAuthOverlay();}},'Log in or sign up'),
+            ]),
+          ]),
+        ])]),error,enter,el('p',{class:'dialog-footnote'},account?'':'No account needed — or log in above to keep this character across devices.'),
       ]);overlay.replaceChildren(form);update();input.focus();
     }
     function begin(){
@@ -681,7 +1733,29 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       timers.push(setInterval(()=>post('/heartbeat',session).then(resp=>{
         activeSeat=resp.activeSeat??null;
         if(!activeSeat&&returnGameButton){returnGameButton.remove();returnGameButton=null;}
-      }).catch(()=>{}),5000),setInterval(fetchAndApply,10000));
+      }).catch(async e=>{
+        // A 403 here is this identity's bar secret itself being revoked —
+        // the heartbeat's own natural ~5s cadence is what makes this the
+        // FASTEST place to notice an account takeover from elsewhere
+        // (CLAUDE.md's "旧设备明确显示" requirement), faster than the
+        // slower, dedicated 15s accountCheckTimer poll below, which
+        // exists for the case where this tab isn't even logged in to an
+        // account (so there'd be nothing for a rotated bar secret to
+        // mean) or hasn't acted in a while. Every other transient
+        // network error still silently retries next tick, unchanged.
+        if(e.status===403&&active&&!loggedOutElsewhereShown){
+          loggedOutElsewhereShown=true;
+          session=null;try{localStorage.removeItem(sessionKey);}catch{}
+          mine=null;staminaFill.style.width='0%';staminaLabel.textContent='—';
+          activeSeat=null;if(returnGameButton){returnGameButton.remove();returnGameButton=null;}
+          const wasLoggedIn=!!account;
+          await refreshAccount();
+          toast.textContent=wasLoggedIn
+            ?'Your account was signed in on another device. Please log in again.'
+            :'Your session could not be restored. Reload to rejoin.';
+          openAuthOverlay(wasLoggedIn?'login':'menu');
+        }
+      }),5000),setInterval(fetchAndApply,10000));
       visibilityHandler=()=>{
         if(document.visibilityState!=='visible')return;
         // A backgrounded tab can have its EventSource suspended by the
@@ -708,11 +1782,11 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       }},'Return to your game');hud.querySelector('.hud-actions').appendChild(returnGameButton);}
       toast.textContent='Welcome in. WASD / arrows to walk · click a destination';canvas.focus();
     }
-    const keyDown=e=>{if(['INPUT','TEXTAREA'].includes(e.target.tagName)||overlay.childElementCount)return;const key=e.key.toLowerCase();if(['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright'].includes(key)){e.preventDefault();keys.add(key);path=[];pendingSitSeat=null;approachTarget=null;}if(e.key==='Escape'){path=[];destination=null;pendingSitSeat=null;approachTarget=null;}};
+    const keyDown=e=>{if(['INPUT','TEXTAREA'].includes(e.target.tagName)||overlay.childElementCount||eatingUI)return;const key=e.key.toLowerCase();if(['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright'].includes(key)){e.preventDefault();keys.add(key);path=[];pendingSitSeat=null;approachTarget=null;}if(e.key==='Escape'){path=[];destination=null;pendingSitSeat=null;approachTarget=null;}};
     const keyUp=e=>keys.delete(e.key.toLowerCase());const blur=()=>{keys.clear();heldDirection=null;path=[];pendingSitSeat=null;approachTarget=null;};
     window.addEventListener('keydown',keyDown);window.addEventListener('keyup',keyUp);window.addEventListener('blur',blur);
     canvas.addEventListener('click',e=>{
-      if(!mine||overlay.childElementCount)return;const rect=canvas.getBoundingClientRect(),x=Math.floor((e.clientX-rect.left+camera.x)/tile),y=Math.floor((e.clientY-rect.top+camera.y)/tile);
+      if(!mine||overlay.childElementCount||eatingUI)return;const rect=canvas.getBoundingClientRect(),x=Math.floor((e.clientX-rect.left+camera.x)/tile),y=Math.floor((e.clientY-rect.top+camera.y)/tile);
       // A player's own tile takes priority over whatever floor, seat, or
       // table is underneath them (product-direction-update, part 2) —
       // clicking yourself is a deliberate no-op. Checked first, before
@@ -1042,7 +2116,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     }
     function animate(now){
       if(!active)return;frame=requestAnimationFrame(animate);
-      if(session&&mine&&!moving&&now-lastTime>145&&!overlay.childElementCount){
+      if(session&&mine&&!moving&&now-lastTime>145&&!overlay.childElementCount&&!eatingUI){
         let dx=0,dy=0;if(keys.has('w')||keys.has('arrowup'))dy=-1;else if(keys.has('s')||keys.has('arrowdown'))dy=1;
         if(keys.has('a')||keys.has('arrowleft'))dx=-1;else if(keys.has('d')||keys.has('arrowright'))dx=1;
         if(heldDirection){dx=heldDirection.dx;dy=heldDirection.dy;}
@@ -1101,6 +2175,32 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         menuBookButton.style.display=mine&&bx+bookHotspotHalfW*2>0&&by+bookHotspotHalfH*2>0&&bx<vw&&by<vh?'block':'none';
         menuBookButton.style.transform=`translate(${Math.round(bx)}px,${Math.round(by)}px)`;
       }
+      // My own overhead holding/eat/drink prompt (CLAUDE.md's seated-
+      // eating section) — positioned every frame above my own head,
+      // exactly where the nickname tag itself will be drawn a little
+      // further below, so the two never overlap (the prompt sits above
+      // the tag, not beside it). Hidden entirely once eatingUI is set
+      // (the cutscene has taken over) or once there's nothing held.
+      if(mine&&!eatingUI){
+        const myPrompt=holdingLabelFor(mine);
+        if(myPrompt){
+          const myPos=displayPositions.get(mine.id)||{x:mine.x,y:mine.y};
+          const px=(myPos.x+.5)*tile-camera.x, py=(mine.seatId?(myPos.y+.75)*tile-7:(myPos.y+.75)*tile)-camera.y-92;
+          eatPromptBtn.textContent=myPrompt.label;
+          eatPromptBtn.disabled=!myPrompt.actionable;
+          eatPromptBtn.classList.toggle('eat-prompt-passive',!myPrompt.actionable);
+          eatPromptBtn.style.display='block';
+          // The button's own width is auto/text-sized (CSS), so centering
+          // it under px is a CSS transform (translateX(-50%)) rather than
+          // a JS-measured half-width — correct regardless of how long
+          // "Eat & Drink" ends up being in any given font/zoom.
+          eatPromptBtn.style.transform=`translate(${Math.round(px)}px,${Math.round(py)}px) translateX(-50%)`;
+        }else{
+          eatPromptBtn.style.display='none';
+        }
+      }else{
+        eatPromptBtn.style.display='none';
+      }
       const seatedPatrons=new Set();
       for(const s of layout.gameChairs||[]){
         const t=state.tables.find(t=>t.id===s.tableId);
@@ -1136,6 +2236,24 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         sprite(ctx,x,p.seatId?y-7:y,colors[p.color]||colors.green,skins[p.skin]||skins.warm,p.seatId?1.0:1.15,walking?now/90:0,!!p.seatId);
         ctx.font='12px monospace';ctx.textAlign='center';const label=p.nickname+(p.id===mine?.id?' · you':'');const width=ctx.measureText(label).width+14;
         box(ctx,x-width/2,y-72,width,20,'#292635dc');ctx.fillStyle='#f5e7d2';ctx.fillText(label,x,y-58);
+        // A bystander's own holding/eating status (CLAUDE.md: visible to
+        // others, never clickable for anyone but the actor themselves,
+        // and never the specific dish) — drawn as a plain canvas tag
+        // just above the nickname, never for `mine` here (the clickable
+        // DOM prompt positioned earlier in this same frame already
+        // covers that case, and would otherwise double-render this
+        // text). Skipped for a frame where this patron also has an
+        // active speech bubble — that already occupies the same spot
+        // just above the nickname tag, and a speech bubble (max 8s) is
+        // the more time-sensitive of the two to show without crowding.
+        if(p.id!==mine?.id&&!p.speech){
+          const tag=p.eating?(p.eating.kinds.length>1?'Eating & drinking':p.eating.kinds[0]==='meal'?'Eating':'Drinking')
+            :(p.holding?.meal||p.holding?.drink)?'Holding':null;
+          if(tag){
+            const tw=ctx.measureText(tag).width+12;
+            box(ctx,x-tw/2,y-95,tw,17,'#3f4a3399');ctx.fillStyle='#e9f0d8';ctx.font='10px monospace';ctx.fillText(tag,x,y-83);ctx.font='12px monospace';
+          }
+        }
         // Follows the same interpolated, camera-adjusted (x,y) the
         // nickname tag and sprite themselves use — walking, sitting at a
         // dining/stool chair, and the camera panning all move the bubble
@@ -1144,12 +2262,104 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       }
       if(!session){sprite(ctx,vw/2,vh/2+60,colors.green,skins.warm,1.2);}
       const shade=ctx.createRadialGradient(vw/2,vh/2,100,vw/2,vh/2,Math.max(vw,vh)*.7);shade.addColorStop(0,'#100d1800');shade.addColorStop(1,'#100d1870');ctx.fillStyle=shade;ctx.fillRect(0,0,vw,vh);
+      // The seated eating/drinking cutscene (CLAUDE.md's seated-eating
+      // section) — drawn on its own full-screen layer above the whole
+      // map whenever eatingUI is set, timed purely from the server's own
+      // startedAt/endsAt (never a locally-invented duration), so a
+      // refresh mid-animation resumes at the right point rather than
+      // restarting. Cleared back to transparent the instant eatingUI
+      // goes null (reconcile() above, driven by the server's own lazy
+      // expiry) — nothing here ever decides on its own that the action
+      // is "done"; the server's state is what ends it.
+      if(mine&&eatingUI){
+        const startMs=new Date(eatingUI.startedAt).getTime(), endMs=new Date(eatingUI.endsAt).getTime();
+        // serverNow(), not a bare Date.now() — see noteServerTime's own
+        // comment above for the real bug this closes (a fast/slow browser
+        // clock made the cutscene vanish before, or linger after, the
+        // server's own real window).
+        if(serverNow()>=endMs){
+          // The local (clock-skew-corrected) estimate has reached the
+          // server's own endsAt. Never decide on our own that the action
+          // is actually over — only the server's next reported `eating`
+          // (null once its lazy expiry check sees it) does that, via
+          // reconcile() above — but don't keep drawing a cutscene for a
+          // window that's visibly finished either, and don't just sit
+          // waiting for an opportunistic SSE push or a seq-gated poll that
+          // might not carry a bumped seq for this specific transition (the
+          // lock's own expiry writes nothing to the DB, so nothing bumps
+          // bar_seq on its own until the presence ticker's signature-diff
+          // happens to notice it). One extra direct fetchAndApply() per
+          // action, deduped by endsAt so a slow network/frame-rate can't
+          // fire it twice, forces exactly the same authoritative re-check
+          // a refresh would already trigger — gameplay gating is still
+          // entirely the server's call via `mine.eating`/isEating, never
+          // this timer; a real clock-skew test confirmed a direct move
+          // attempt during this exact window is still correctly refused
+          // server-side even though the local canvas already hid.
+          eatCanvas.style.display='none';
+          if(eatingExpiryFetchedFor!==eatingUI.endsAt){
+            eatingExpiryFetchedFor=eatingUI.endsAt;
+            fetchAndApply();
+          }
+        }else{
+          eatCanvas.style.display='block';
+          const progress=(serverNow()-startMs)/(endMs-startMs);
+          const phase=eatingPhaseAt(eatingUI.kinds,progress);
+          drawEatingScene(eatCtx,vw,vh,{color:colors[mine.color]||colors.green,skin:skins[mine.skin]||skins.warm,phase,seatKind:eatingUI.seatKind,reduceMotion:eatReduceMotion.matches});
+        }
+      }else{
+        eatCanvas.style.display='none';
+      }
     }
     frame=requestAnimationFrame(animate);
-    dispose=()=>{active=false;cancelAnimationFrame(frame);timers.forEach(clearInterval);holdCleanups.forEach(cleanup=>cleanup());window.removeEventListener('resize',resize);window.removeEventListener('keydown',keyDown);window.removeEventListener('keyup',keyUp);window.removeEventListener('blur',blur);document.body.classList.remove('world-mode');};
+    dispose=()=>{active=false;cancelAnimationFrame(frame);timers.forEach(clearInterval);holdCleanups.forEach(cleanup=>cleanup());if(accountCheckTimer)clearInterval(accountCheckTimer);window.removeEventListener('resize',resize);window.removeEventListener('keydown',keyDown);window.removeEventListener('keyup',keyUp);window.removeEventListener('blur',blur);document.body.classList.remove('world-mode');};
+    // A short, dedicated poll for "did my account session get revoked
+    // elsewhere" (the multi-device takeover's own "旧设备明确显示" —
+    // CLAUDE.md) — independent of whatever bar action this tab happens
+    // to be doing right now, since a device can sit idle in the bar for
+    // a long time with nothing else triggering a 403 to notice it by.
+    const ACCOUNT_POLL_MS=15000;
+    accountCheckTimer=setInterval(async()=>{
+      if(!active||!account||loggedOutElsewhereShown)return;
+      const was=account.id;
+      await refreshAccount();
+      if(active&&!account&&was&&!loggedOutElsewhereShown){
+        loggedOutElsewhereShown=true;
+        toast.textContent='Your account was signed in on another device. Please log in again.';
+      }
+    },ACCOUNT_POLL_MS);
+    await refreshAccount();
     try{session=JSON.parse(localStorage.getItem(sessionKey)||'null');}catch{}
-    if(session){try{const resp=await post('/rejoin',session);applyIncoming(resp);activeSeat=resp.activeSeat??null;if(active){if(enteredThisPage)begin();else chooseCharacter();}}catch(e){if(e.status===403){session=null;localStorage.removeItem(sessionKey);chooseCharacter();}else toast.textContent='Unable to reconnect. Reload to retry.';}}
-    else chooseCharacter();
+    if(session){
+      try{
+        const resp=await post('/rejoin',session);applyIncoming(resp);activeSeat=resp.activeSeat??null;
+        if(active){if(enteredThisPage)begin();else chooseCharacter();}
+      }catch(e){
+        if(e.status===403){
+          session=null;try{localStorage.removeItem(sessionKey);}catch{}
+          // Was this rejection because another device just logged into
+          // THIS account (rotating the bar secret out from under this
+          // tab), or an ordinary stale/forged session? refreshAccount()
+          // right before the attempt already told us whether an account
+          // was active; a 403 immediately after that is this tab's own
+          // signal of exactly the takeover scenario CLAUDE.md names.
+          if(account){
+            loggedOutElsewhereShown=true;
+            await refreshAccount(); // the cookie itself is still this tab's own, unaffected — only the bar secret was rotated
+            toast.textContent='Your account was signed in on another device. Please log in again.';
+            openAuthOverlay('login');
+          }else chooseCharacter();
+        }else toast.textContent='Unable to reconnect. Reload to retry.';
+      }
+    }
+    else if(account){
+      // A valid account cookie but no local bar session at all (e.g. a
+      // brand-new tab/device for an already-registered account, or local
+      // storage was cleared) — skip straight to the login form rather
+      // than the generic menu, since "which account" isn't in question.
+      openAuthOverlay('login');
+    }
+    else openAuthOverlay();
   }
   return {mount,stop:()=>{menuBook.close();dispose();}};
 }

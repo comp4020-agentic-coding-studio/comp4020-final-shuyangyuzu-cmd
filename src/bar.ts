@@ -9,6 +9,7 @@ import type Database from "better-sqlite3";
 import { randomBytes, randomUUID } from "node:crypto";
 import { logAction, markIdentityVerified, transact } from "./actionLog.ts";
 import { BAR_SEATS, defaultSpawn, FURNITURE, GRID_COLS, GRID_ROWS, isValidStep, isWalkingFloor } from "./barLayout.ts";
+import { currentEatingAction, isEating } from "./eating.ts";
 import { isConnected } from "./presence.ts";
 import { effectivePosition } from "./position.ts";
 import { currentStamina, initStamina, recordHeartbeat as recordStaminaHeartbeat } from "./stamina.ts";
@@ -218,6 +219,24 @@ export function requireBarSession(db: Database.Database, playerId: string, sessi
   markIdentityVerified();
 }
 
+/** Mints a brand-new bar_sessions.session_secret for this identity and
+ * invalidates the old one, atomically — used only by src/accounts.ts's
+ * login takeover (2026-11-04's explicit multi-device credential-rotation
+ * decision, CLAUDE.md), never by any ordinary bar action. The caller
+ * must already have independently verified that whoever is asking for
+ * this rotation is the legitimate account controlling this identity
+ * (accounts.ts does this via account_characters, never via the OLD
+ * bar session_secret itself — the whole point is that a stale device's
+ * cached secret must stop working the instant this runs). Returns the
+ * new secret, which the caller hands back to the NEW device only. */
+export function rotateBarSession(db: Database.Database, playerId: string): string {
+  const exists = db.prepare(`SELECT 1 FROM bar_players WHERE id = ?`).get(playerId);
+  if (!exists) throw new BarError("no such bar identity", "player_not_found", 404);
+  const newSecret = randomBytes(24).toString("base64url");
+  db.prepare(`UPDATE bar_sessions SET session_secret = ? WHERE player_id = ?`).run(newSecret, playerId);
+  return newSecret;
+}
+
 /** Re-authenticates and refreshes this identity's own heartbeat — and,
  * because a tile that was legitimately free while this identity was
  * disconnected may since have been claimed by someone else (a stale
@@ -289,6 +308,11 @@ export function moveBar(db: Database.Database, playerId: string, sessionSecret: 
   if(db.prepare('SELECT 1 FROM domino_members WHERE bar_id=? AND active=1').get(playerId))throw new BarError('Leave your domino match first','already_seated',409);
 
   if(db.prepare('SELECT 1 FROM poker_members WHERE bar_id=? AND active=1').get(playerId))throw new BarError('Leave your poker table before walking in the bar','already_seated',409);
+  // Mid an eating/drinking animation (CLAUDE.md's seated-eating section):
+  // no moving until it naturally expires — the same server-checked lock
+  // every other gated action (ordering, standing, joining a game) shares
+  // (src/eating.ts).
+  if (isEating(db, playerId)) throw new BarError("finish eating or drinking first", "eating_active", 409);
 
   const nickname = db.prepare(`SELECT nickname FROM bar_players WHERE id = ?`).get(playerId) as
     | { nickname: string }
@@ -363,6 +387,7 @@ export function sitAtSeat(db: Database.Database, playerId: string, sessionSecret
   if(db.prepare('SELECT 1 FROM domino_members WHERE bar_id=? AND active=1').get(playerId))throw new BarError('Leave your domino match first','already_seated',409);
 
   if(db.prepare('SELECT 1 FROM poker_members WHERE bar_id=? AND active=1').get(playerId))throw new BarError('Leave your poker table before sitting elsewhere','already_seated',409);
+  if (isEating(db, playerId)) throw new BarError("finish eating or drinking first", "eating_active", 409);
   const seat = BAR_SEATS.find((s) => s.id === seatId);
   if (!seat) throw new BarError("no such seat", "seat_not_found", 404);
 
@@ -421,6 +446,7 @@ export function sitAtSeat(db: Database.Database, playerId: string, sessionSecret
 /** Idempotent: standing when not seated anywhere is a harmless no-op. */
 export function standFromSeat(db: Database.Database, playerId: string, sessionSecret: string): void {
   requireBarSession(db, playerId, sessionSecret);
+  if (isEating(db, playerId)) throw new BarError("finish eating or drinking first", "eating_active", 409);
   transact(db, () => {
     const seat = db.prepare(`SELECT x, y FROM bar_seats WHERE occupied_by = ?`).get(playerId) as { x: number; y: number } | undefined;
     if (seat) {
@@ -555,6 +581,25 @@ export interface PublicBarPlayer {
    * position/seatId already are, even though the client only ever
    * renders the viewer's own value. */
   stamina: number;
+  /** Replaces the old standalone "Holding" menu page (CLAUDE.md's
+   * seated-eating section): true/false per kind, never the specific item
+   * — a bystander can see "this patron is holding food/a drink" to
+   * justify the overhead prompt they'll see, but never what was
+   * actually ordered (no private order detail leaks through the public
+   * snapshot). Read straight off held_items' own `state = 'held'` rows,
+   * the same table src/orders.ts already owns — queried here directly
+   * rather than importing orders.ts, which would cycle back (orders.ts
+   * already imports bar.ts for requireBarSession). */
+  holding: { meal: boolean; drink: boolean };
+  /** The current eating/drinking action, if any — null once its 8-second
+   * window has passed (src/eating.ts's own lazy-expiry contract, the
+   * same "ends_at > now, recomputed fresh on every read" shape as speech
+   * and the away-from-table clock). Every bystander sees this (so their
+   * client can render the same in-progress animation, timed from
+   * startedAt/endsAt rather than guessing), never just the actor's own
+   * client — and never anything about which specific dish, matching
+   * `holding` above. */
+  eating: { kinds: readonly ("meal" | "drink")[]; startedAt: string; endsAt: string } | null;
 }
 
 export interface PublicGameTable {
@@ -605,6 +650,21 @@ export function getPublicBarState(db: Database.Database): PublicBarState {
       text: string;
     }>).map((s) => [s.player_id, s.text]),
   );
+  // Public, kind-only holding status (CLAUDE.md: "other players can see
+  // holding/eating status" but never the specific item ordered) — read
+  // directly off held_items rather than importing src/orders.ts (which
+  // already imports this module for requireBarSession; the other
+  // direction would cycle).
+  const holdingBy = new Map<string, { meal: boolean; drink: boolean }>();
+  for (const row of db.prepare(`SELECT player_id, kind FROM held_items WHERE state = 'held'`).all() as Array<{
+    player_id: string;
+    kind: string;
+  }>) {
+    const entry = holdingBy.get(row.player_id) ?? { meal: false, drink: false };
+    if (row.kind === "meal") entry.meal = true;
+    else if (row.kind === "drink") entry.drink = true;
+    holdingBy.set(row.player_id, entry);
+  }
   return {
     players: online.map((p) => {
       // A present game-table occupant is reported at their real chair
@@ -613,6 +673,7 @@ export function getPublicBarState(db: Database.Database): PublicBarState {
       // agree with what's actually drawn at the chair, rather than an
       // invisible stale position nobody can see or reach (CLAUDE.md).
       const pos = effectivePosition(db, p.id) ?? { x: p.x, y: p.y };
+      const eating = currentEatingAction(db, p.id, now);
       return {
         id: p.id,
         nickname: p.nickname,
@@ -623,6 +684,8 @@ export function getPublicBarState(db: Database.Database): PublicBarState {
         seatId: seatedBy.get(p.id) ?? null,
         speech: speechBy.get(p.id) ?? null,
         stamina: currentStamina(db, p.id, now),
+        holding: holdingBy.get(p.id) ?? { meal: false, drink: false },
+        eating: eating ? { kinds: eating.kinds, startedAt: eating.startedAt, endsAt: eating.endsAt } : null,
       };
     }),
   };

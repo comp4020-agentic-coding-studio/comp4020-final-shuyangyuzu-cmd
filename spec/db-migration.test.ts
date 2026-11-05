@@ -19,6 +19,7 @@ import { afterEach, beforeEach, expect, it } from "vitest";
 import { openDb } from "../src/db.ts";
 import { BAR_SEATS, GAME_TABLES, defaultSpawn } from "../src/barLayout.ts";
 import { joinBar } from "../src/bar.ts";
+import { register } from "../src/accounts.ts";
 
 it("repositions occupied chairs with their patron, and moves only floor patrons obstructed by the layout", () => {
   const path = join(dir, "seated-layout.db");
@@ -220,6 +221,47 @@ it("adds the poker away column to an already-existing poker_members table, prese
   } finally { migrated.close(); }
 });
 
+// 2026-11 correction: bar_eating_requests is a brand-new table added
+// alongside the pre-existing bar_eating_actions lock, so CREATE TABLE IF
+// NOT EXISTS is genuinely sufficient (same reasoning as bar_seats/
+// table_departures above) — still verified against a real pre-existing
+// database (one that already has bar_eating_actions from the original
+// seated-eating round, but predates this round's durable-request table)
+// rather than assumed safe, per this file's own established discipline.
+function createPreEatingRequestsSchema(path: string): void {
+  const db = new Database(path);
+  db.exec(`
+    CREATE TABLE bar_players (
+      id TEXT PRIMARY KEY, nickname TEXT NOT NULL, color TEXT NOT NULL, skin TEXT NOT NULL DEFAULT 'warm',
+      x INTEGER NOT NULL, y INTEGER NOT NULL, current_table_id TEXT, current_seat_id TEXT, current_game_player_id TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE bar_eating_actions (
+      player_id TEXT PRIMARY KEY REFERENCES bar_players(id),
+      kinds TEXT NOT NULL, idempotency_key TEXT, started_at TEXT NOT NULL, ends_at TEXT NOT NULL
+    );
+    INSERT INTO bar_players VALUES ('old-eater', 'Old Eater', 'red', 'warm', 5, 5, NULL, NULL, NULL, '2026-10-29');
+    INSERT INTO bar_eating_actions VALUES ('old-eater', '["drink"]', 'pre-existing-key', '2026-10-29T00:00:00.000Z', '2026-10-29T00:00:08.000Z');
+  `);
+  db.close();
+}
+
+it("adds bar_eating_requests to a database that already has bar_eating_actions, without disturbing the existing lock row", () => {
+  const path = join(dir, "vegas.db");
+  createPreEatingRequestsSchema(path);
+
+  const db = openDb(path);
+  const names = (
+    db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>
+  ).map((r) => r.name);
+  expect(names).toContain("bar_eating_requests");
+
+  // The pre-existing lock row from before this round survives untouched.
+  const lock = db.prepare(`SELECT kinds, idempotency_key FROM bar_eating_actions WHERE player_id = 'old-eater'`).get();
+  expect(lock).toEqual({ kinds: '["drink"]', idempotency_key: "pre-existing-key" });
+  db.close();
+});
+
 it("preserves a table's current_room_id across a reopen rather than resetting the seed", () => {
   const path = join(dir, "vegas.db");
   createPreBarSchema(path);
@@ -241,4 +283,125 @@ it("preserves a table's current_room_id across a reopen rather than resetting th
   };
   expect(row.current_room_id).toBe("some-room-id");
   db2.close();
+});
+
+// 2026-11-04: accounts (src/accountsSchema.ts) adds bar_players.account_id
+// to an already-existing bar_players table, exactly the same migration
+// shape as `skin`/`current_game_player_id` above — built against a
+// database that predates the accounts feature entirely (has bar_players,
+// no account_id column, no accounts/account_sessions/account_characters
+// tables at all), per this file's own standing rule that passing the
+// rest of the suite proves nothing about this specific failure mode.
+function createPreAccountsSchema(path: string): void {
+  const db = new Database(path);
+  db.exec(`
+    CREATE TABLE bar_players (
+      id TEXT PRIMARY KEY, nickname TEXT NOT NULL, color TEXT NOT NULL, skin TEXT NOT NULL DEFAULT 'warm',
+      x INTEGER NOT NULL, y INTEGER NOT NULL, current_table_id TEXT, current_seat_id TEXT, current_game_player_id TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE bar_sessions (player_id TEXT PRIMARY KEY REFERENCES bar_players(id), session_secret TEXT NOT NULL);
+    INSERT INTO bar_players VALUES ('old-guest', 'Old Guest', 'red', 'warm', 5, 5, NULL, NULL, NULL, '2026-10-01');
+    INSERT INTO bar_sessions VALUES ('old-guest', 'old-secret');
+  `);
+  db.close();
+}
+
+it("adds bar_players.account_id and the account tables to a database that predates accounts entirely, preserving the existing guest row", () => {
+  const path = join(dir, "vegas.db");
+  createPreAccountsSchema(path);
+
+  const db = openDb(path);
+  try {
+    const columns = (db.prepare("PRAGMA table_info(bar_players)").all() as Array<{ name: string }>).map((c) => c.name);
+    expect(columns).toContain("account_id");
+    const names = (db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>).map(
+      (r) => r.name,
+    );
+    expect(names).toContain("accounts");
+    expect(names).toContain("account_sessions");
+    expect(names).toContain("account_characters");
+    expect(names).toContain("account_recovery_codes");
+
+    // The pre-existing guest identity survives untouched, with the new
+    // column defaulting to NULL (a guest, not controlled by any account)
+    // rather than erroring or being dropped.
+    const guest = db.prepare(`SELECT id, nickname, account_id FROM bar_players WHERE id = 'old-guest'`).get();
+    expect(guest).toEqual({ id: "old-guest", nickname: "Old Guest", account_id: null });
+  } finally {
+    db.close();
+  }
+});
+
+it("opening an accounts-era database twice (idempotent migration) doesn't error and doesn't disturb an already-registered account", () => {
+  const path = join(dir, "vegas.db");
+  const db1 = openDb(path);
+  const result = register(db1, "IdempotentUser", "correct horse battery staple", null);
+  db1.close();
+
+  const db2 = openDb(path);
+  try {
+    const row = db2.prepare(`SELECT username FROM accounts WHERE id = ?`).get(result.accountId) as { username: string };
+    expect(row.username).toBe("IdempotentUser");
+  } finally {
+    db2.close();
+  }
+});
+
+// 2026-11-04: recovery codes (account_recovery_codes) are a brand-new
+// table added inside the SAME migrateAccounts() CREATE TABLE block that
+// already created accounts/account_sessions/account_characters in the
+// prior round — so the realistic already-deployed scenario this needs
+// to survive isn't "no accounts schema at all" (createPreAccountsSchema
+// above already covers that), it's specifically "the accounts tables
+// from the PRIOR round already exist on disk, recovery codes don't yet."
+// Built by hand against that exact prior shape, not assumed safe just
+// because CREATE TABLE IF NOT EXISTS usually is.
+function createPreRecoveryCodesSchema(path: string): void {
+  const db = new Database(path);
+  db.exec(`
+    CREATE TABLE bar_players (
+      id TEXT PRIMARY KEY, nickname TEXT NOT NULL, color TEXT NOT NULL, skin TEXT NOT NULL DEFAULT 'warm',
+      x INTEGER NOT NULL, y INTEGER NOT NULL, current_table_id TEXT, current_seat_id TEXT, current_game_player_id TEXT,
+      account_id TEXT, created_at TEXT NOT NULL
+    );
+    CREATE TABLE accounts (
+      id TEXT PRIMARY KEY, username TEXT NOT NULL, username_normalized TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    CREATE TABLE account_sessions (
+      token TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id),
+      created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL
+    );
+    CREATE TABLE account_characters (
+      account_id TEXT PRIMARY KEY REFERENCES accounts(id), bar_player_id TEXT NOT NULL UNIQUE REFERENCES bar_players(id)
+    );
+    CREATE TABLE auth_attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, bucket TEXT NOT NULL, at INTEGER NOT NULL);
+    INSERT INTO bar_players VALUES ('old-account-holder', 'Old Holder', 'blue', 'warm', 7, 7, NULL, NULL, NULL, 'old-account-id', '2026-11-01');
+    INSERT INTO accounts VALUES ('old-account-id', 'OldAccountHolder', 'oldaccountholder', 'scrypt:16384:8:1:aa:bb', '2026-11-01');
+    INSERT INTO account_characters VALUES ('old-account-id', 'old-account-holder');
+  `);
+  db.close();
+}
+
+it("adds account_recovery_codes to a database with the prior round's own accounts tables already in place, preserving the existing account/character link", () => {
+  const path = join(dir, "vegas.db");
+  createPreRecoveryCodesSchema(path);
+
+  const db = openDb(path);
+  try {
+    const names = (db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>).map(
+      (r) => r.name,
+    );
+    expect(names).toContain("account_recovery_codes");
+
+    // The pre-existing account/character link from before this round
+    // survives untouched.
+    const link = db.prepare(`SELECT account_id, bar_player_id FROM account_characters WHERE account_id = 'old-account-id'`).get();
+    expect(link).toEqual({ account_id: "old-account-id", bar_player_id: "old-account-holder" });
+    const account = db.prepare(`SELECT username FROM accounts WHERE id = 'old-account-id'`).get() as { username: string };
+    expect(account.username).toBe("OldAccountHolder");
+  } finally {
+    db.close();
+  }
 });
