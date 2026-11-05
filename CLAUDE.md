@@ -1164,6 +1164,45 @@ states. Resume allows a new explicit join, never passive auto-join.
 Component tests use media adapters; do not describe them as real audio
 acceptance. STUN is not a TURN audio relay; TURN remains unconfigured.
 
+### The stuck-forever connection bug, and a takeover-detection gap (Claude, 2026-11-05)
+
+`RTCPeerConnection.connectionState` has no guarantee of ever reaching
+`"failed"` — reproduced directly with a forced `iceTransportPolicy:
+"relay"` + no TURN servers repro that sat at `"new"` for 60+ real
+seconds. The prior round's own error-surfacing/bounded-ICE-restart code
+only ever reacted to the `"failed"` transition, so a genuinely
+unreachable peer (two symmetric NATs, AP-isolated Wi-Fi, no TURN
+configured — exactly the shape this app ships with today, since no TURN
+secrets exist on production) showed "Connecting audio…" forever with no
+error and no retry. Fixed with a bounded connect-timeout watchdog
+(`CONNECT_TIMEOUT_MS`, 15s) inside the existing 2-second health-check
+loop in `public/voiceCall.js` — a peer stuck off `"connected"` this long
+is now treated exactly like a `"failed"` one already was, reusing the
+same error text and the same bounded `attemptIceRestart`. This closes
+the actual "我们俩互相听不见, 一直 Connecting" failure mode; it does not
+and cannot make a connection succeed where no TURN relay exists and both
+peers are genuinely unreachable by direct UDP — that's a real,
+stated limitation, not something this fix papers over.
+
+Separately: a login-elsewhere takeover (CLAUDE.md's own account section)
+already correctly rotates the old tab's room `session_secret`
+server-side, but the client's own room heartbeat (`public/app.js`'s
+`startHeartbeat`) silently swallowed every error, so the old tab never
+*noticed* — its own voice call's mic only stopped as an incidental side
+effect of the ~15s presence-staleness window, with no message shown.
+Fixed to match `public/tavern.js`'s own bar-heartbeat 403 handling
+exactly: a 403 on the room heartbeat now immediately tears down the
+voice call and shows a clear "signed in on another device" screen,
+cutting detection from ~15s to one heartbeat tick. Fixing this surfaced
+a second, narrower bug: a fetch/SSE response already in flight when the
+takeover is detected can still resolve directly into the room view's own
+`apply()` closure afterward (captured once at `enterRoom`, not reached
+through the generation-gated shared pointers `stopLive()` clears) and
+silently redraw the normal table over the just-shown terminal screen —
+fixed by checking the closure's own captured generation inside `apply()`
+itself, the same guard every other stale-response path here already
+relies on.
+
 ## Hold’em scope and authority (Codex, 2026-10-22)
 
 The user now explicitly authorizes Texas Hold’em in both existing Texas
