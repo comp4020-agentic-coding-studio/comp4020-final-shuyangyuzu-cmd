@@ -1203,6 +1203,51 @@ fixed by checking the closure's own captured generation inside `apply()`
 itself, the same guard every other stale-response path here already
 relies on.
 
+### The real production fault: stale signaling after a fast reconnect (Claude, 2026-11-06)
+
+The prior entry's own stuck-forever fix deployed and was retested on two
+real computers; audio still never connected either way, with the
+*identical* asymmetric pattern reported before (one side's own mic
+working, the other stuck on "Connecting audio…"). The actual root cause
+was narrower and different from a missing TURN relay: nothing previously
+distinguished a signal belonging to the CURRENT peer-connection
+negotiation attempt for a given remote from one belonging to a PREVIOUS,
+already-superseded attempt — reproduced directly by forcing two rapid
+reconnects where the first negotiation's answer arrives late, after the
+second has already started. `signalingState` alone can't tell these
+apart (a fresh offer also leaves it at `have-local-offer`), so the stale
+answer got applied to the new peer connection anyway: `signalingState`
+reaches `stable` (nothing *looks* wrong) but the actual SDP/ICE
+credentials now mismatch what was really offered, and media can never
+establish — silent, with no error until the previous entry's own 15s
+watchdog eventually notices.
+
+Fixed with a per-remote-peer monotonic `attempt` number carried inside
+every outgoing offer/answer/ICE-candidate's own `data` payload (never a
+sibling field — `src/voice.ts`'s `relaySignal` forwards `data` opaquely
+and never reads anything beside it, so no server change was needed or
+made). The offerer draws the next number only when it actually sends a
+genuinely new offer (not when resending an already-pending one); the
+answerer adopts that same number from the offer it's answering, which is
+what lets both sides agree on "which round is this" with no coordinator.
+A received answer or ICE candidate whose `attempt` doesn't match the
+current one for that peer is dropped as stale, never applied — closing
+exactly the race this found. `public/voiceCall.js`'s own `peerAttempt`
+map comment has the full reasoning; `spec/voiceClient.test.ts` pins the
+exact scenario down directly (a stale answer dropped, the real one
+applied; a stale ICE candidate dropped after `remoteDescription` has
+already landed for a newer attempt).
+
+A "Copy call diagnostics" button (same expanded call panel) was added
+alongside this fix — a bounded, privacy-safe per-call negotiation log
+(every offer/answer/candidate sent/received/dropped-as-stale, each
+tagged with its own `attempt` number and an 8-char truncated peer id,
+never raw SDP/IP/a session secret/a full player id) that two people can
+paste to compare notes on a real failed call, rather than guessing from
+the UI's own summary text alone. Confirmed via two dedicated tests that
+the copied text never contains an SDP marker, a bare IPv4 address, or an
+un-truncated id.
+
 ## Hold’em scope and authority (Codex, 2026-10-22)
 
 The user now explicitly authorizes Texas Hold’em in both existing Texas
