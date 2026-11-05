@@ -585,7 +585,32 @@ function stopHeartbeat() {
 
 function startHeartbeat(code, session) {
   stopHeartbeat();
-  const tick = () => api(`/rooms/${code}/heartbeat`, session).catch(() => {});
+  // A real bug found and fixed while verifying the voice-call takeover
+  // requirement directly (two real browser contexts, a real account
+  // login-elsewhere triggering rooms.rotateSession): every error here was
+  // silently swallowed, so an old tab's own room session being rotated
+  // away (CLAUDE.md's multi-device takeover) was never noticed by this
+  // tab at all — the microphone only stopped, eventually, as an
+  // incidental side effect of the ~15s presence-staleness window voice
+  // reconciliation already sweeps on, not because this code detected
+  // anything. Mirrors public/tavern.js's own bar-heartbeat 403 handling:
+  // the heartbeat's own ~5s cadence is the fastest place to notice this
+  // specific tab's room credential has been revoked, same reasoning.
+  const tick = () => api(`/rooms/${code}/heartbeat`, session).catch((e) => {
+    if (e.status === 403 && codeFromUrl() === code) {
+      stopHeartbeat();
+      stopLive();
+      voiceCall.leaveRoom();
+      clearSession(code);
+      render(
+        el("div", { class: "entry" }, [
+          el("h1", {}, "Las Vegas"),
+          el("p", {}, "This browser's seat was signed in on another device. Return to the bar to continue there, or log in again."),
+          backToHomeButton({ recordDeparture: false }),
+        ]),
+      );
+    }
+  });
   tick();
   heartbeatHandle = setInterval(tick, HEARTBEAT_MS);
 }
@@ -605,6 +630,16 @@ function startLive(code, session, initialState) {
   }
 
   function apply(state) {
+    // A real race this round's own takeover-detection fix could otherwise
+    // reintroduce: stopLive() bumps liveGeneration and clears the shared
+    // applyIncoming/refreshNow pointers, but a fetch or SSE message already
+    // in flight when it was called still resolves into THIS closure's own
+    // `apply` directly (captured once by fetchAndApply/connect(), not
+    // reached through those shared pointers) — without this check, that
+    // stale response could silently redraw the normal table view right
+    // over a terminal screen (the takeover notice above, or the existing
+    // "removed from this room" screen below) a moment after it was shown.
+    if (generation !== liveGeneration) return;
     // The one staleness rule, used for every source of state below (the
     // stream, a fallback fetch, and an action's own response) —
     // public/liveSync.js's shouldApplyLiveUpdate, the single
