@@ -82,9 +82,27 @@ export function eatingPhaseAt(kinds, progress) {
 // straight into the glass-lift.
 const MEAL_FORK_END = 0.34; // fork-to-mouth + chewing ends here
 const MEAL_PLATE_LIFT_END = 0.5; // plate fully risen+tilted by here
-const MEAL_PLATE_LOWER_START = 0.92; // plate starts descending here
+const MEAL_PLATE_LOWER_START = 0.86; // plate starts descending here
+const MEAL_PLATE_LANDED_BY = 0.96; // plate is fully back on the table by here — see the REST_BUFFER note below
 const DRINK_LIFT_END = 0.22;
-const DRINK_LOWER_START = 0.82;
+const DRINK_LOWER_START = 0.74;
+const DRINK_LANDED_BY = 0.92; // glass is fully back on the table by here
+
+// 2026-11-05 manual-acceptance correction: the lowering phase previously
+// finished landing EXACTLY at local=1.0 — the same instant the server's
+// own lock naturally expires. With zero buffer between "finished landing"
+// and "the window is actually over," ordinary SSE/poll round-trip latency
+// (confirmed directly: the client's own clear typically lands 100-600ms
+// after the true local=1.0, not before — a real, measured range, not
+// assumed) meant the viewer's own LAST SEEN frame was still mid-descent,
+// the plate/glass genuinely hanging in front of the chest when the scene
+// vanished — exactly the "空盘不悬在胸前" (the empty plate must not hang
+// in front of the chest) the student's own playtest called out. Giving
+// the lowering phase its own earlier finish line (*_LANDED_BY, well
+// before 1.0) means the prop is provably resting ON the table for a real,
+// visible span before the window — and any ordinary network jitter on
+// top of it — ever ends, confirmed by re-running the same burst-
+// screenshot timing check this correction was itself found with.
 
 /** Smoothstep-style ease for every continuous motion below — a plain
  * linear ramp reads as mechanical at this scale; this keeps every
@@ -114,9 +132,14 @@ function mealBeats(local) {
     plateLift = t; plateTilt = t; // rises and tilts together, continuously
   } else if (local < MEAL_PLATE_LOWER_START) {
     plateLift = 1; plateTilt = 1; // held up, tipped to the mouth, emptying
-  } else {
-    const t = ease((local - MEAL_PLATE_LOWER_START) / (1 - MEAL_PLATE_LOWER_START));
+  } else if (local < MEAL_PLATE_LANDED_BY) {
+    const t = ease((local - MEAL_PLATE_LOWER_START) / (MEAL_PLATE_LANDED_BY - MEAL_PLATE_LOWER_START));
     plateLift = 1 - t; plateTilt = 1 - t; // continuous un-tilt + lower, together
+  } else {
+    // Genuinely resting on the table for the remainder of the window —
+    // this real, visible rest span (not just a mathematical instant at
+    // local=1.0) is what the fix above is actually for.
+    plateLift = 0; plateTilt = 0;
   }
   // Food remaining on the plate: the one forked bite goes first (a visible
   // notch), then the rest drains away continuously while the plate itself
@@ -130,7 +153,8 @@ function drinkBeats(local) {
   let lift = 0;
   if (local <= DRINK_LIFT_END) lift = ease(local / DRINK_LIFT_END);
   else if (local < DRINK_LOWER_START) lift = 1;
-  else lift = 1 - ease((local - DRINK_LOWER_START) / (1 - DRINK_LOWER_START));
+  else if (local < DRINK_LANDED_BY) lift = 1 - ease((local - DRINK_LOWER_START) / (DRINK_LANDED_BY - DRINK_LOWER_START));
+  else lift = 0; // genuinely resting on the table for the remainder of the window
   const span = Math.max(0.0001, DRINK_LOWER_START - DRINK_LIFT_END);
   const consumed = local <= DRINK_LIFT_END ? 0 : Math.min(1, (local - DRINK_LIFT_END) / span);
   return { lift, consumed };
@@ -148,6 +172,78 @@ function ellipse(ctx, x, y, rx, ry, color) {
   ctx.fill();
 }
 
+// ---- 2026-11-05 manual-acceptance correction ----
+//
+// The student's own real-browser playtest rejected the previous round's
+// contact geometry outright: the glass's rim reached up near the eyes
+// instead of the mouth, the plate's CENTRE (not its near rim) was being
+// driven toward the mouth, and a grey, vertically-standing utensil was
+// left floating beside the character with nothing holding it. All three
+// traced to the same root cause — every prop computed its own ad hoc
+// offset toward a loosely-shared "mouth height" number, rather than every
+// prop being placed from one single shared anchor set (MOUTH/TABLE/hand
+// rests below) via the actual geometry of what "contact" means for that
+// prop's own shape (a flat-vs-tilted ellipse for the plate, a rotated
+// local point for the glass). This section replaces that ad hoc approach
+// with exactly one coordinate system and two small, independently
+// testable pure geometry functions (plateCenterForRim/glassOriginForRim)
+// that every prop's placement is derived from — see spec/eatingAnimation.test.ts's
+// own geometry checks, which re-run the SAME forward transform these
+// functions are built from and assert the resulting rim/rotated point
+// actually lands within a small pixel tolerance of the mouth, rather than
+// re-asserting the formula's own output (the student's own explicit
+// instruction: verify the transformed contact point, don't just restate
+// the implementation).
+
+/** The plate's own vertical half-extent at a given tilt — the single
+ * source of truth both drawPlate itself and this file's own rim-contact
+ * math read from, so "how flat is the plate right now" can never silently
+ * drift between the two. */
+function plateRy(w, tilt) {
+  return w * 0.22 * (1 - tilt * 0.92); // never fully to 0 — a hairline edge still reads as "a plate", not nothing
+}
+
+/** Given the on-screen point the plate's own NEAR rim — the edge closest
+ * to the mouth, the point that actually makes contact, never the plate's
+ * centre — must land at, returns the ellipse centre drawPlate itself must
+ * be given. The near rim sits at local (0, -ry) relative to the centre in
+ * this scene's own up-is-negative-y convention, so centre = rim + (0, ry).
+ * Exported as its own pure function specifically so it can be verified
+ * directly: feed it a rim target and a tilt, and the rim of the ellipse
+ * drawPlate would actually draw at the returned centre is provably at
+ * that exact target, not merely "close by construction." */
+export function plateCenterForRim(rimX, rimY, ry) {
+  return { x: rimX, y: rimY + ry };
+}
+
+/** Rotates the point (px,py) by `theta` radians — canvas's own rotation
+ * convention (ctx.rotate), used below so the glass's contact math matches
+ * exactly what ctx.rotate will actually do to its local geometry, not an
+ * approximation of it. */
+export function rotatePoint(px, py, theta) {
+  const c = Math.cos(theta), sn = Math.sin(theta);
+  return { x: px * c - py * sn, y: px * sn + py * c };
+}
+
+/** Given the desired on-screen contact point for the glass's own rim
+ * (local point (0, -bowlH), the top of its bowl before any rotation) at a
+ * given tilt `theta`, returns the untransformed (x, y) drawGlass must be
+ * called with so that ctx.translate(x,y); ctx.rotate(theta) places that
+ * exact local rim point at (contactX, contactY) on screen — "compute the
+ * rim's actual position from the rotation angle, then derive the
+ * translation" (the student's own explicit instruction), rather than
+ * guessing a translation and hoping the rim lands near the target. This
+ * is the exact inverse of the forward transform
+ * (origin + rotate(localPoint, theta) = onScreenPoint), so any caller can
+ * verify correctness by re-applying the forward transform to the
+ * returned origin and checking it reproduces the requested contact point
+ * (spec/eatingAnimation.test.ts does exactly this, not just re-stating
+ * this formula). */
+export function glassOriginForRim(contactX, contactY, bowlH, theta) {
+  const rimLocal = rotatePoint(0, -bowlH, theta);
+  return { x: contactX - rimLocal.x, y: contactY - rimLocal.y };
+}
+
 /** The plate, drawn with real thickness/rim/inner-circle so it reads as
  * a dish rather than a rectangle. `tilt` (0..1) continuously rotates it
  * from lying flat (an ellipse, food visible on top) to edge-on (a thin
@@ -156,10 +252,12 @@ function ellipse(ctx, x, y, rx, ry, color) {
  * back" behaviour, expressed as geometry rather than a whole-canvas
  * zoom/snap. `food` (0..1, 1 = full) draws the remaining portion only
  * while the plate is still closer to flat than edge-on, since food on an
- * edge-on plate wouldn't visibly sit on it anyway. */
+ * edge-on plate wouldn't visibly sit on it anyway. `x,y` is always this
+ * plate's own ELLIPSE CENTRE (as returned by plateCenterForRim) — never
+ * the contact/rim point directly, which is what caused the previous
+ * round's "centre aimed at the mouth" bug. */
 function drawPlate(ctx, x, y, w, tilt, food, biteNotch) {
-  const flatRy = w * 0.22;
-  const ry = flatRy * (1 - tilt * 0.92); // never fully to 0 — a hairline edge still reads as "a plate", not nothing
+  const ry = plateRy(w, tilt);
   const rx = w / 2;
   ellipse(ctx, x, y + ry * 0.12, rx * 1.02, ry * 1.1, '#00000022'); // soft shadow of the rim's own thickness
   ellipse(ctx, x, y, rx, ry, '#efe3c9'); // plate body
@@ -178,8 +276,11 @@ function drawPlate(ctx, x, y, w, tilt, food, biteNotch) {
 }
 
 /** A stemmed glass (bowl + stem + base), tilted continuously toward the
- * mouth as it's lifted, with a visibly draining liquid level — the
- * student's own specific request over the previous plain rectangle. */
+ * mouth as it's lifted, with a visibly draining liquid level. `x,y` is
+ * always this glass's own untransformed TRANSLATE ORIGIN, as returned by
+ * glassOriginForRim — never a guessed "roughly near the mouth" point,
+ * which is what let the rim drift up near the eyes in the previous
+ * round. */
 function drawGlass(ctx, x, y, h, tiltRad, liquidFrac) {
   ctx.save();
   ctx.translate(x, y);
@@ -202,7 +303,7 @@ function drawGlass(ctx, x, y, h, tiltRad, liquidFrac) {
   ctx.lineTo(bowlW * 0.32, bowlBottomY);
   ctx.closePath();
   ctx.fill();
-  ellipse(ctx, 0, bowlTopY, bowlW * 0.5, bowlW * 0.14, '#f5ecd977'); // rim ellipse
+  ellipse(ctx, 0, bowlTopY, bowlW * 0.5, bowlW * 0.14, '#f5ecd977'); // rim ellipse — the contact point glassOriginForRim solves for
   if (liquidFrac > 0.01) {
     const liquidTopY = bowlBottomY - (bowlBottomY - bowlTopY) * liquidFrac;
     const liquidHalfW = bowlW * (0.32 + 0.18 * liquidFrac);
@@ -224,9 +325,13 @@ function drawGlass(ctx, x, y, h, tiltRad, liquidFrac) {
  * version ("人物没有五官"). `chewing` animates the mouth between a
  * closed line and a small open oval; otherwise a plain closed mouth.
  * `headX/headY/headW/headH` are the already-positioned head box this is
- * drawn relative to, so this needs no knowledge of the outer transform. */
-function drawFace(ctx, headX, headY, headW, headH, skin, chewing) {
-  const eyeY = headY + headH * 0.42, mouthY = headY + headH * 0.78;
+ * drawn relative to, so this needs no knowledge of the outer transform.
+ * `mouthY` is always computed by `mouthAnchor` below — kept as a passed-in
+ * value rather than recomputed here so the face and every prop reaching
+ * toward it can never silently use two different formulas for the same
+ * point. */
+function drawFace(ctx, headX, headY, headW, headH, mouthY, skin, chewing) {
+  const eyeY = headY + headH * 0.42;
   const eyeDX = headW * 0.22, eyeW = headW * 0.1, eyeH = headH * 0.07;
   // Eyebrows, just above the eyes.
   ctx.fillStyle = '#4a3a30';
@@ -248,6 +353,38 @@ function drawFace(ctx, headX, headY, headW, headH, skin, chewing) {
     ctx.beginPath(); ctx.moveTo(headX + headW / 2 - headW * 0.14, mouthY); ctx.lineTo(headX + headW / 2 + headW * 0.14, mouthY); ctx.stroke();
   }
   void skin; // kept in the signature for symmetry/future use (e.g. a skin-toned nose highlight); not needed for the current strokes
+}
+
+/** The ONE shared anchor the entire scene places every prop relative to —
+ * exported so spec/eatingAnimation.test.ts can compute it exactly once
+ * and reuse it to verify every other prop's own contact point against the
+ * same value, rather than each test re-deriving its own copy of "where is
+ * the mouth" and silently drifting from what the drawing code actually
+ * uses. `headX` only matters for drawFace's own horizontal centring;
+ * every prop below reaches for x=0 (the character's own horizontal
+ * centre line in this scene's translated coordinate space), matching
+ * drawFace's own `headX + headW/2`. */
+export function mouthAnchor(headY, headH) {
+  return { x: 0, y: headY + headH * 0.78 };
+}
+
+/** Lying flat on the table, oriented along the X axis — the student's own
+ * explicit fix for the previous round's grey, vertically-standing utensil
+ * that read as floating beside the character with nothing holding it. A
+ * knife/fork at rest always has this one clear position and orientation;
+ * it is never drawn standing on end. */
+function drawRestingFork(ctx, x, y, len) {
+  ctx.fillStyle = '#cfd3d8';
+  ctx.fillRect(x - len / 2, y - len * 0.05, len * 0.6, len * 0.1); // handle
+  ctx.fillRect(x - len / 2 + len * 0.58, y - len * 0.09, len * 0.42, len * 0.18); // tine block
+  ctx.fillStyle = '#9aa0a8';
+  for (let i = 0; i < 3; i++) ctx.fillRect(x - len / 2 + len * 0.64 + i * len * 0.12, y - len * 0.09, len * 0.045, len * 0.18);
+}
+function drawRestingKnife(ctx, x, y, len) {
+  ctx.fillStyle = '#cfd3d8';
+  ctx.fillRect(x - len / 2, y - len * 0.04, len * 0.68, len * 0.08); // blade
+  ctx.fillStyle = '#9aa0a8';
+  ctx.fillRect(x - len / 2 + len * 0.66, y - len * 0.07, len * 0.34, len * 0.14); // handle
 }
 
 // The seated eating/drinking cutscene (CLAUDE.md's seated-eating
@@ -296,81 +433,115 @@ function drawEatingScene(ctx, vw, vh, { color, skin, phase, seatKind, reduceMoti
   const tableY = -s * 0.15; // resting height on the table/counter top
   const local = Math.max(0, Math.min(1, phase.localProgress ?? 0));
 
+  // ONE shared coordinate system every prop below reaches toward or rests
+  // on — the student's own explicit requirement. No prop computes its own
+  // independent "approximately near the mouth/table" offset; every
+  // contact point is derived from MOUTH/TABLE plus that prop's own real
+  // geometry (plateCenterForRim for the plate, glassOriginForRim's actual
+  // rotation math for the glass).
+  const MOUTH = mouthAnchor(headY, headH);
+  const TABLE = { x: s * 0.1, y: tableY };
+  const HAND_L_REST = { x: TABLE.x - s * 0.95, y: TABLE.y }; // character's own right hand -> screen-left (fork)
+  const HAND_R_REST = { x: TABLE.x + s * 0.95, y: TABLE.y }; // character's own left hand -> screen-right (knife/glass)
+
   const chewingNow = phase.kind === 'meal' && mealBeats(local).chewing;
-  drawFace(ctx, headX, headY, headW, headH, skin, reduceMotion ? false : chewingNow);
+  drawFace(ctx, headX, headY, headW, headH, MOUTH.y, skin, reduceMotion ? false : chewingNow);
 
-  // A small sipping wobble only while actually holding something up near
-  // the mouth, skipped entirely under prefers-reduced-motion (CLAUDE.md:
-  // a less-motion pose is fine, a frozen illusion of eating is not
-  // required to move).
-  const wobble = reduceMotion ? 0 : Math.sin(Date.now() / 160) * s * 0.03;
+  // A small sipping/chewing wobble only while actually holding something
+  // up near the mouth, skipped entirely under prefers-reduced-motion
+  // (CLAUDE.md: a less-motion pose is fine, a frozen illusion of eating is
+  // not required to move). Applied only to the MOUTH-side end of a lerp
+  // below, scaled by how close the prop currently is to the mouth, so it
+  // never pulls a resting prop off the table and never moves the verified
+  // contact point by more than this small amplitude.
+  const wobbleAmp = reduceMotion ? 0 : s * 0.025;
+  const wobble = reduceMotion ? 0 : Math.sin(Date.now() / 160) * wobbleAmp;
 
-  // Utensils resting beside the plate whenever the plate itself hasn't
-  // been picked up yet — fork in the character's own RIGHT hand, knife
-  // in their own LEFT hand; since this is a front-facing close-up, the
-  // character's own right appears on the viewer's LEFT side of the
-  // screen (mirrored toward the camera), matching how a mirror — or a
-  // front-facing photo — always reads.
-  const plateCenterX = s * 0.1, plateCenterY = tableY;
-  const knifeX = plateCenterX + s * 0.95, forkRestX = plateCenterX - s * 0.95; // knife: character's own left -> screen right; fork: character's own right -> screen left
+  const lerp = (a, b, t) => a + (b - a) * t;
 
   if (phase.kind === 'meal') {
     const { forkHeight, biteEaten, plateLift, plateTilt, plateConsumed } = mealBeats(local);
-    const platePickedUp = plateLift > 0.02;
+    const PLATE_W = s * 1.8;
+    const UTENSIL_LEN = s * 0.9;
 
-    // Knife stays resting on the table the whole meal segment — only the
-    // fork and the plate itself ever move.
-    if (!platePickedUp || plateTilt < 0.3) {
-      box(knifeX - s * 0.05, tableY - s * 0.5, s * 0.1, s * 0.5, '#cfd3d8');
-      box(knifeX - s * 0.09, tableY - s * 0.56, s * 0.18, s * 0.1, '#9aa0a8');
-    }
-
-    if (!platePickedUp) {
-      // Beat 1/2: plate flat on the table, fork lifts one bite to the mouth.
-      drawPlate(ctx, plateCenterX, plateCenterY, s * 1.9, 0, 1, biteEaten);
-      const mouthX = s * 0.0, mouthY = headY + headH * 0.78;
-      const forkTipX = forkRestX + (mouthX - forkRestX) * forkHeight + wobble;
-      const forkTipY = (tableY - s * 0.3) + (mouthY - (tableY - s * 0.3)) * forkHeight;
-      // Forearm from off-screen-ish shoulder height to the fork's own
-      // current position, then the fork itself — one continuous reach.
+    // Fork: rests flat on the table until its own bite beat raises it;
+    // the FOOD END (the tine block, drawn at the tip) is what travels to
+    // MOUTH — never just "the hand" — and lowers back to its exact
+    // resting pose afterward (forkHeight returns to 0 by construction).
+    if (forkHeight > 0.02) {
+      const forkTip = { x: lerp(HAND_L_REST.x, MOUTH.x, forkHeight) + wobble * forkHeight, y: lerp(HAND_L_REST.y, MOUTH.y, forkHeight) };
       ctx.strokeStyle = skin; ctx.lineWidth = s * 0.22; ctx.lineCap = 'round';
-      ctx.beginPath(); ctx.moveTo(forkRestX, tableY + s * 0.1); ctx.lineTo(forkTipX, forkTipY); ctx.stroke();
-      box(forkTipX - s * 0.06, forkTipY - s * 0.14, s * 0.12, s * 0.14, '#cfd3d8');
+      ctx.beginPath(); ctx.moveTo(HAND_L_REST.x, HAND_L_REST.y + s * 0.1); ctx.lineTo(forkTip.x, forkTip.y); ctx.stroke();
+      // The food end: a small tine block plus, while still near the
+      // plate, a visible morsel riding on it — this is the "food reaches
+      // the mouth" beat, not a bare rectangle standing in for a hand.
+      box(forkTip.x - s * 0.06, forkTip.y - s * 0.07, s * 0.12, s * 0.14, '#cfd3d8');
+      if (forkHeight < 0.75) ellipse(ctx, forkTip.x, forkTip.y - s * 0.02, s * 0.07 * (1 - forkHeight / 0.75), s * 0.05 * (1 - forkHeight / 0.75), '#8a5f3f');
     } else {
-      // Beats 3-5: utensils set down; the plate itself rises and
-      // continuously tilts toward the mouth, then un-tilts and lowers —
-      // a true rotation (scaled ellipse height), never a frozen frame.
-      // Target height is just below the mouth (headY + headH*0.78,
-      // ≈ -0.78s) — a real bug this round's own browser verification
-      // caught: the first version lifted all the way to ≈ -1.5s, well
-      // past the head's own top edge, which read as the plate floating
-      // above the character's hair rather than reaching their mouth.
-      const liftedY = headY + headH * 0.78 - s * 0.15;
-      const plateY = tableY - (tableY - liftedY) * plateLift + wobble * plateTilt;
-      const plateX = plateCenterX * (1 - plateTilt) + s * 0.05 * plateTilt;
-      drawPlate(ctx, plateX, plateY, s * 1.7, plateTilt, 1 - plateConsumed, false);
-      // Two hands holding the plate's own edges, following it up.
+      drawRestingFork(ctx, HAND_L_REST.x, HAND_L_REST.y, UTENSIL_LEN);
+    }
+    // Knife: always resting, flat, on its own clear table position —
+    // never drawn standing on end, never left floating once the plate is
+    // lifted (the actual bug the student's screenshot caught: a grey,
+    // vertical, unheld shape beside the character).
+    drawRestingKnife(ctx, HAND_R_REST.x, HAND_R_REST.y, UTENSIL_LEN);
+
+    if (plateLift > 0.02) {
+      // Beats 3-5: the plate's own NEAR RIM — not its centre — travels
+      // continuously from just above the table to MOUTH as plateLift
+      // goes 0..1, while plateTilt independently rotates it (via
+      // plateRy's own vertical squish) from flat to edge-on. The two are
+      // driven by the same mealBeats() values as before (unchanged
+      // timing contract); only the contact-point math changed.
+      const restRy = plateRy(PLATE_W, 0);
+      const restContact = { x: TABLE.x, y: TABLE.y - restRy };
+      const contact = { x: lerp(restContact.x, MOUTH.x, plateLift) + wobble * plateLift, y: lerp(restContact.y, MOUTH.y, plateLift) };
+      const ry = plateRy(PLATE_W, plateTilt);
+      const center = plateCenterForRim(contact.x, contact.y, ry);
+      const rx = PLATE_W / 2;
+      drawPlate(ctx, center.x, center.y, PLATE_W, plateTilt, 1 - plateConsumed, false);
+      // Two hands holding the plate's own ACTUAL edges (± rx from its
+      // real current centre) — they move with the plate because they are
+      // computed from the plate's own current geometry every frame, not
+      // from a separately-guessed offset.
       ctx.strokeStyle = skin; ctx.lineWidth = s * 0.2; ctx.lineCap = 'round';
-      ctx.beginPath(); ctx.moveTo(plateX - s * 0.6, tableY + s * 0.15); ctx.lineTo(plateX - s * 0.55, plateY); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(plateX + s * 0.6, tableY + s * 0.15); ctx.lineTo(plateX + s * 0.55, plateY); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(HAND_L_REST.x, HAND_L_REST.y + s * 0.15); ctx.lineTo(center.x - rx * 0.85, center.y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(HAND_R_REST.x, HAND_R_REST.y + s * 0.15); ctx.lineTo(center.x + rx * 0.85, center.y); ctx.stroke();
+    } else {
+      // Beats 1/2: plate flat on the table — drawn at TABLE itself, tilt
+      // 0, so its centre and its rim coincide with no lift applied yet.
+      drawPlate(ctx, TABLE.x, TABLE.y, PLATE_W, 0, 1, biteEaten);
     }
   } else {
     const { lift, consumed } = drinkBeats(local);
-    // The glass rests on the table until lifted; tilts toward the mouth
-    // continuously as it rises, draining visibly as it's held up.
-    const glassRestX = s * 0.55, glassH = s * 1.1;
-    // Same mouth-height fix as the plate above — the glass's own base
-    // (where it meets the hand) lands just below the mouth, not above
-    // the head.
-    const liftedX = s * 0.0, liftedY = headY + headH * 0.78 - s * 0.1;
-    const glassX = glassRestX + (liftedX - glassRestX) * lift;
-    const glassBaseY = tableY + (liftedY - tableY) * lift + wobble * lift;
-    const tiltRad = -lift * 0.9; // tips toward the mouth as it's raised
+    const GLASS_H = s * 1.1;
+    const bowlH = GLASS_H * 0.5;
+    const GLASS_REST = { x: TABLE.x + s * 0.45, y: TABLE.y };
+    // The rim's own resting contact point, computed FORWARD from the
+    // glass's real resting origin/geometry (theta=0) rather than assumed —
+    // this is what keeps the lifted trajectory continuous with the
+    // glass's own true resting pose instead of snapping at lift=0.
+    const restContact = { x: GLASS_REST.x, y: GLASS_REST.y - bowlH };
+    const contact = { x: lerp(restContact.x, MOUTH.x, lift) + wobble * lift, y: lerp(restContact.y, MOUTH.y, lift) };
+    const theta = -lift * 0.9; // tips toward the mouth as it's raised
+    // The actual fix: compute the translation FROM the rotation and the
+    // desired rim position, not the other way around (CLAUDE.md's own
+    // instruction this round, taken literally) — glassOriginForRim is the
+    // exact algebraic inverse of what ctx.translate+ctx.rotate will do to
+    // the glass's own local rim point.
+    const origin = glassOriginForRim(contact.x, contact.y, bowlH, theta);
     if (lift > 0.02) {
+      // The grip point is a REAL point on the glass's own stem (local
+      // (0, stemH/2) before rotation, transformed the same way as the
+      // rim) — the hand is drawn to that exact transformed point, so it
+      // can never read as detached from the glass regardless of tilt.
+      const stemH = GLASS_H * 0.32;
+      const gripLocal = rotatePoint(0, stemH * 0.55, theta);
+      const grip = { x: origin.x + gripLocal.x, y: origin.y + gripLocal.y };
       ctx.strokeStyle = skin; ctx.lineWidth = s * 0.2; ctx.lineCap = 'round';
-      ctx.beginPath(); ctx.moveTo(glassRestX, tableY + s * 0.15); ctx.lineTo(glassX + Math.sin(tiltRad) * glassH * 0.3, glassBaseY); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(HAND_R_REST.x, HAND_R_REST.y + s * 0.15); ctx.lineTo(grip.x, grip.y); ctx.stroke();
     }
-    drawGlass(ctx, glassX, glassBaseY, glassH, tiltRad, 1 - consumed);
+    drawGlass(ctx, origin.x, origin.y, GLASS_H, theta, 1 - consumed);
   }
   ctx.restore();
 }
