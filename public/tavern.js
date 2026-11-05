@@ -378,13 +378,28 @@ export function mouthAnchor(headY, headH) {
  * different thing from "standing on end," which remains wrong; lying
  * flat but oriented vertically on the table is the correct, requested
  * pose). A knife/fork at rest always has this one clear position and
- * orientation. */
-function drawRestingFork(ctx, x, y, len) {
+ * orientation.
+ *
+ * The fork is a real three-tine fork, not a solid block with faint
+ * stripes painted over it — three separate rectangles with actual gaps
+ * of background colour between them, each individually rounded at the
+ * tip, so it reads as tines rather than a single prong (the student's
+ * own explicit "不想叉子，做成三叉的那种叉子" — make it look like an
+ * actual three-pronged fork). `gapColor` is the surface the fork is
+ * resting on (so the gaps between tines show that colour, not a
+ * hardcoded one that would mismatch a different background). */
+function drawRestingFork(ctx, x, y, len, gapColor) {
+  const tineW = len * 0.05, tineGap = len * 0.025, tineLen = len * 0.42;
+  const totalTineW = tineW * 3 + tineGap * 2;
   ctx.fillStyle = '#cfd3d8';
-  ctx.fillRect(x - len * 0.09, y - len / 2, len * 0.18, len * 0.42); // tine block (top, pointing away)
+  ctx.fillRect(x - totalTineW / 2, y - len / 2, totalTineW, tineLen); // tine block footprint (top, pointing away)
+  ctx.fillStyle = gapColor;
+  ctx.fillRect(x - totalTineW / 2 + tineW, y - len / 2, tineGap, tineLen * 0.82); // gap between tine 1 and 2
+  ctx.fillRect(x - totalTineW / 2 + tineW * 2 + tineGap, y - len / 2, tineGap, tineLen * 0.82); // gap between tine 2 and 3
+  ctx.fillStyle = '#cfd3d8';
   ctx.fillRect(x - len * 0.05, y - len / 2 + len * 0.4, len * 0.1, len * 0.6); // handle (bottom, nearest the character)
   ctx.fillStyle = '#9aa0a8';
-  for (let i = 0; i < 3; i++) ctx.fillRect(x - len * 0.09, y - len / 2 + i * 0.12 * len, len * 0.18, len * 0.045);
+  ctx.fillRect(x - totalTineW / 2, y - len / 2 + tineLen * 0.82, totalTineW, tineLen * 0.18); // shank joining the tines to the handle
 }
 function drawRestingKnife(ctx, x, y, len) {
   ctx.fillStyle = '#cfd3d8';
@@ -447,8 +462,17 @@ function drawEatingScene(ctx, vw, vh, { color, skin, phase, seatKind, reduceMoti
   // rotation math for the glass).
   const MOUTH = mouthAnchor(headY, headH);
   const TABLE = { x: s * 0.1, y: tableY };
+  // Pushed further out from the plate than the hands' own rest points
+  // below — the student's own follow-up: the utensils previously sat
+  // exactly on top of where the reaching-arm lines are drawn, so a
+  // resting fork/knife looked fused with the forearm. UTENSIL_REST is a
+  // real, separate position outside the arm's own reach line, not the
+  // hands' own anchor.
   const HAND_L_REST = { x: TABLE.x - s * 0.95, y: TABLE.y }; // character's own right hand -> screen-left (fork)
   const HAND_R_REST = { x: TABLE.x + s * 0.95, y: TABLE.y }; // character's own left hand -> screen-right (knife/glass)
+  const UTENSIL_L_REST = { x: TABLE.x - s * 1.35, y: TABLE.y };
+  const UTENSIL_R_REST = { x: TABLE.x + s * 1.35, y: TABLE.y };
+  const tableSurfaceColor = seatKind === 'stool' ? '#6b4635' : '#8d4545';
 
   const chewingNow = phase.kind === 'meal' && mealBeats(local).chewing;
   drawFace(ctx, headX, headY, headW, headH, MOUTH.y, skin, reduceMotion ? false : chewingNow);
@@ -484,13 +508,15 @@ function drawEatingScene(ctx, vw, vh, { color, skin, phase, seatKind, reduceMoti
       box(forkTip.x - s * 0.06, forkTip.y - s * 0.07, s * 0.12, s * 0.14, '#cfd3d8');
       if (forkHeight < 0.75) ellipse(ctx, forkTip.x, forkTip.y - s * 0.02, s * 0.07 * (1 - forkHeight / 0.75), s * 0.05 * (1 - forkHeight / 0.75), '#8a5f3f');
     } else {
-      drawRestingFork(ctx, HAND_L_REST.x, HAND_L_REST.y, UTENSIL_LEN);
+      drawRestingFork(ctx, UTENSIL_L_REST.x, UTENSIL_L_REST.y, UTENSIL_LEN, tableSurfaceColor);
     }
     // Knife: always resting, flat, on its own clear table position —
     // never drawn standing on end, never left floating once the plate is
     // lifted (the actual bug the student's screenshot caught: a grey,
-    // vertical, unheld shape beside the character).
-    drawRestingKnife(ctx, HAND_R_REST.x, HAND_R_REST.y, UTENSIL_LEN);
+    // vertical, unheld shape beside the character). Positioned at
+    // UTENSIL_R_REST, outside the hand/arm reach line, per the student's
+    // follow-up that the utensils previously overlapped the forearm.
+    drawRestingKnife(ctx, UTENSIL_R_REST.x, UTENSIL_R_REST.y, UTENSIL_LEN);
 
     if (plateLift > 0.02) {
       // Beats 3-5: the plate's own NEAR RIM — not its centre — travels
