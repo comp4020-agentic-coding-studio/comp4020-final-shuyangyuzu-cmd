@@ -5095,3 +5095,6 @@ Deployed the prior round's fix (build `b3fccab742`), and the user's own real two
 - **Next step**: the user's own two-device retest, using the same "Copy call diagnostics" button on both sides if it still fails. If the new trace shows real candidates reaching `applied` with a real selected candidate pair but still no audio, that's a genuinely new symptom to investigate; if it instead shows `iceConnectionState` never progressing past `checking` with no candidate pair ever nominated, that's the case this round's own TURN section already describes.
 
 Per the user's own instruction, this stays local — not pushed, not deployed, waiting for explicit confirmation.
+
+## 2026-11-06 — Codex: All Fives tabletop and matching ends
+I reported a narrow playing surface and a chain whose adjacent numbers looked mismatched. Codex traced the screenshot to the client drawing canonical tiles without orienting them to the played port. The square felt now centers the played chain, rotates vertical branches, and marks open ports. The server already rejects used ports and opens the spinner's extra arms after both primary sides are occupied. A regression replays my 4-4, 1-4, 1-6 example, rejects the used interior port, and verifies the later top branch. Typecheck and both domino test files passed (18 tests). Local preview only; visual acceptance is pending.

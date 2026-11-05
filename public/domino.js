@@ -1,5 +1,28 @@
 // Private hand comes only from the authenticated server view. No stock order
 // or opponent tiles are ever delivered to this module.
+// Replay the public attachment history. Keep hand tiles canonical; orient only
+// the pieces on the felt so the matching half faces its actual parent.
+export function layoutBones(board) {
+  const placements = new Map();
+  const directions = {left:[-1,0], right:[1,0], top:[0,-1], bottom:[0,1]};
+  for (const bone of board) {
+    const parent = placements.get(bone.parent);
+    if (!parent) {
+      placements.set(bone.id, {x:0,y:0,dx:1,dy:0,face:bone.tile,out:null,width:74,height:40});
+      continue;
+    }
+    const port = bone.port.split(':')[1];
+    const [dx,dy] = directions[port] ?? [parent.dx,parent.dy];
+    const contact = port === 'out' ? parent.out : port === 'right' ? parent.face[1] : parent.face[0];
+    const far = bone.tile[0] === contact ? bone.tile[1] : bone.tile[0];
+    const face = dx < 0 || dy < 0 ? [far,contact] : [contact,far];
+    const width = dy ? 40 : 74, height = dy ? 74 : 40;
+    placements.set(bone.id, {x:parent.x+dx*(parent.width+width)/2,
+      y:parent.y+dy*(parent.height+height)/2,dx,dy,face,out:far,width,height});
+  }
+  return placements;
+}
+
 export function createDominoUI({el,navigate}) {
   let mounted=false,busy=false,fetching=false,room=null,selected=null,error='',generation=0,lastSignature='';
   const saved=()=>{try{return JSON.parse(localStorage.getItem('vegas:bar:session')||'null');}catch{return null;}};
@@ -34,21 +57,26 @@ export function createDominoUI({el,navigate}) {
   function boardView(){
     const area=el('div',{class:'domino-board','aria-label':'Played dominoes — scroll to inspect the full layout'});
     if(!room.board.length){area.append(el('p',{class:'domino-empty'},'Choose your opening tile below.'));return area;}
-    const root=room.board.find(b=>b.id===room.spinner?.id)||room.board[0];
-    const neighbors=new Map(room.board.map(b=>[b.id,[]]));
-    for(const b of room.board)if(b.parent){neighbors.get(b.id).push(b.parent);neighbors.get(b.parent).push(b.id);}
-    const coords=new Map([[root.id,{x:0,y:0}]]),directions=[[-1,0],[1,0],[0,-1],[0,1]];
-    const rootNeighbors=neighbors.get(root.id);
-    const used=new Set();
-    for(const [i,id] of rootNeighbors.entries()){
-      const b=room.board.find(b=>b.id===id);let d=b.parent===root.id&&b.port.endsWith(':top')?2:b.parent===root.id&&b.port.endsWith(':bottom')?3:i;
-      while(used.has(d))d++;used.add(d);const [dx,dy]=directions[d]||directions[1];
-      let current=id,previous=root.id,n=1;
-      while(current){coords.set(current,{x:dx*n,y:dy*n});const next=neighbors.get(current).find(x=>x!==previous);previous=current;current=next;n++;}
+    const placements=layoutBones(room.board);
+    const pieces=[...placements.values()];
+    const left=Math.min(...pieces.map(p=>p.x-p.width/2)), right=Math.max(...pieces.map(p=>p.x+p.width/2));
+    const top=Math.min(...pieces.map(p=>p.y-p.height/2)), bottom=Math.max(...pieces.map(p=>p.y+p.height/2));
+    const canvas=el('div',{class:'domino-layout',style:`width:${right-left+32}px;height:${bottom-top+32}px`});
+    for(const b of room.board){
+      const p=placements.get(b.id);
+      const ends=room.ends.filter(e=>e.bone===b.id);
+      const label=[b.id===room.spinner?.id?'Spinner':'',...ends.map(e=>`Open ${e.pip}`)].filter(Boolean).join(' · ');
+      const axes=['left','right','top','bottom'];
+      const marks=ends.map(e=>{
+        const port=e.key.split(':')[1];
+        return axes.includes(port)?port:p.dx<0?'left':p.dx>0?'right':p.dy<0?'top':'bottom';
+      });
+      const wrapper=el('div',{class:`domino-played ${b.id===room.spinner?.id?'spinner':''}`,
+        style:`left:${p.x-p.width/2-left+16}px;top:${p.y-p.height/2-top+16}px;--bone-width:${p.width}px;--bone-height:${p.height}px`,title:label},
+        [bone(p.face,{style:`transform:translate(-50%,-50%) rotate(${p.dy?90:0}deg)`})]);
+      for(const side of marks) wrapper.append(el('span',{class:`domino-edge edge-${side}`, 'aria-hidden':'true'}));
+      canvas.append(wrapper);
     }
-    const positions=[...coords.values()],minX=Math.min(...positions.map(p=>p.x)),maxX=Math.max(...positions.map(p=>p.x)),minY=Math.min(...positions.map(p=>p.y)),maxY=Math.max(...positions.map(p=>p.y));
-    const canvas=el('div',{class:'domino-layout',style:`width:${(maxX-minX+1)*86+80}px;height:${Math.max(220,(maxY-minY+1)*78+80)}px`});
-    for(const b of room.board){const p=coords.get(b.id)||{x:0,y:0};const ends=room.ends.filter(e=>e.bone===b.id);canvas.append(el('div',{class:`domino-played ${b.id===room.spinner?.id?'spinner':''}`,style:`left:${(p.x-minX)*86+40}px;top:${(p.y-minY)*78+40}px`},[bone(b.tile),el('small',{},b.id===room.spinner?.id?'Spinner':ends.length?'Open end':'')]));}
     area.append(canvas);return area;
   }
   function draw(){

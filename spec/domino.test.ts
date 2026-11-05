@@ -8,6 +8,7 @@ import {joinBar,moveBar,sitAtSeat,standFromSeat} from '../src/bar.ts';
 import {GAME_CHAIRS,BAR_SEATS} from '../src/barLayout.ts';
 import {deal,deck,moves,play,drawOrPass,endTotal,npcMove,type DominoState,type Tile} from '../src/dominoEngine.ts';
 import {openDomino,respondDomino,actDomino,dominoMe,leaveDomino,tickDomino} from '../src/domino.ts';
+import {layoutBones} from '../public/domino.js';
 import {getTablesStatus} from '../src/tables.ts';
 import {placeOrder,startEating} from '../src/orders.ts';
 import {isEating} from '../src/eating.ts';
@@ -20,6 +21,19 @@ describe('All Fives rules',()=>{
     play(s,1,[0,5],'5-5:left');expect(endTotal(s)).toBe(10);expect(s.ends).toHaveLength(2);
     s.hands[0].push([2,5]);play(s,0,[2,5],'5-5:right');expect(s.spinner?.unlocked).toBe(true);expect(s.ends).toHaveLength(4);expect(endTotal(s)).toBe(2);
     play(s,1,[3,5],'5-5:top');expect(endTotal(s)).toBe(5);expect(s.scores[1]).toBe(15);
+  });
+  it('renders the reported chain with matching halves and rejects a spent interior port',()=>{
+    const s=position();
+    s.hands=[[[4,4],[1,6],[3,4],[0,0]],[[1,4],[2,4],[3,6]]];
+    play(s,0,[4,4],'start');play(s,1,[1,4],'4-4:left');play(s,0,[1,6],'1-4:out');
+    const positions=layoutBones(s.board);
+    expect([...positions.values()].sort((a,b)=>a.x-b.x).map(p=>p.face)).toEqual([[6,1],[1,4],[4,4]]);
+    expect(()=>play(s,1,[2,4],'1-4:out')).toThrow();
+    play(s,1,[2,4],'4-4:right');
+    play(s,0,[3,4],'4-4:top');
+    const top=layoutBones(s.board).get('3-4');
+    expect(top.dy).toBe(-1);
+    expect(top.face).toEqual([3,4]);
   });
   it('refuses illegal turn, tile, and drawing when a move exists',()=>{const s=position();expect(()=>play(s,1,[0,5],'start')).toThrow();expect(()=>play(s,0,[6,6],'start')).toThrow();expect(()=>drawOrPass(s,0)).toThrow();});
   it('scores a round and carries the score into the next alternating deal',()=>{const s=position();s.hands[0]=[[1,2]];s.hands[1]=[[2,3]];play(s,0,[1,2],'start');expect(s.phase).toBe('round_end');expect(s.scores[0]).toBe(5);const n=deal(s);expect(n.scores).toEqual(s.scores);expect(n.starter).toBe(1-s.starter);expect(n.required).toBeNull();});
