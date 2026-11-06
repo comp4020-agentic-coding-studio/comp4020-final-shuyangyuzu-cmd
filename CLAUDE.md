@@ -1164,6 +1164,157 @@ states. Resume allows a new explicit join, never passive auto-join.
 Component tests use media adapters; do not describe them as real audio
 acceptance. STUN is not a TURN audio relay; TURN remains unconfigured.
 
+### The stuck-forever connection bug, and a takeover-detection gap (Claude, 2026-11-05)
+
+`RTCPeerConnection.connectionState` has no guarantee of ever reaching
+`"failed"` — reproduced directly with a forced `iceTransportPolicy:
+"relay"` + no TURN servers repro that sat at `"new"` for 60+ real
+seconds. The prior round's own error-surfacing/bounded-ICE-restart code
+only ever reacted to the `"failed"` transition, so a genuinely
+unreachable peer (two symmetric NATs, AP-isolated Wi-Fi, no TURN
+configured — exactly the shape this app ships with today, since no TURN
+secrets exist on production) showed "Connecting audio…" forever with no
+error and no retry. Fixed with a bounded connect-timeout watchdog
+(`CONNECT_TIMEOUT_MS`, 15s) inside the existing 2-second health-check
+loop in `public/voiceCall.js` — a peer stuck off `"connected"` this long
+is now treated exactly like a `"failed"` one already was, reusing the
+same error text and the same bounded `attemptIceRestart`. This closes
+the actual "我们俩互相听不见, 一直 Connecting" failure mode; it does not
+and cannot make a connection succeed where no TURN relay exists and both
+peers are genuinely unreachable by direct UDP — that's a real,
+stated limitation, not something this fix papers over.
+
+Separately: a login-elsewhere takeover (CLAUDE.md's own account section)
+already correctly rotates the old tab's room `session_secret`
+server-side, but the client's own room heartbeat (`public/app.js`'s
+`startHeartbeat`) silently swallowed every error, so the old tab never
+*noticed* — its own voice call's mic only stopped as an incidental side
+effect of the ~15s presence-staleness window, with no message shown.
+Fixed to match `public/tavern.js`'s own bar-heartbeat 403 handling
+exactly: a 403 on the room heartbeat now immediately tears down the
+voice call and shows a clear "signed in on another device" screen,
+cutting detection from ~15s to one heartbeat tick. Fixing this surfaced
+a second, narrower bug: a fetch/SSE response already in flight when the
+takeover is detected can still resolve directly into the room view's own
+`apply()` closure afterward (captured once at `enterRoom`, not reached
+through the generation-gated shared pointers `stopLive()` clears) and
+silently redraw the normal table over the just-shown terminal screen —
+fixed by checking the closure's own captured generation inside `apply()`
+itself, the same guard every other stale-response path here already
+relies on.
+
+### The real production fault: stale signaling after a fast reconnect (Claude, 2026-11-06)
+
+The prior entry's own stuck-forever fix deployed and was retested on two
+real computers; audio still never connected either way, with the
+*identical* asymmetric pattern reported before (one side's own mic
+working, the other stuck on "Connecting audio…"). The actual root cause
+was narrower and different from a missing TURN relay: nothing previously
+distinguished a signal belonging to the CURRENT peer-connection
+negotiation attempt for a given remote from one belonging to a PREVIOUS,
+already-superseded attempt — reproduced directly by forcing two rapid
+reconnects where the first negotiation's answer arrives late, after the
+second has already started. `signalingState` alone can't tell these
+apart (a fresh offer also leaves it at `have-local-offer`), so the stale
+answer got applied to the new peer connection anyway: `signalingState`
+reaches `stable` (nothing *looks* wrong) but the actual SDP/ICE
+credentials now mismatch what was really offered, and media can never
+establish — silent, with no error until the previous entry's own 15s
+watchdog eventually notices.
+
+Fixed with a per-remote-peer monotonic `attempt` number carried inside
+every outgoing offer/answer/ICE-candidate's own `data` payload (never a
+sibling field — `src/voice.ts`'s `relaySignal` forwards `data` opaquely
+and never reads anything beside it, so no server change was needed or
+made). The offerer draws the next number only when it actually sends a
+genuinely new offer (not when resending an already-pending one); the
+answerer adopts that same number from the offer it's answering, which is
+what lets both sides agree on "which round is this" with no coordinator.
+A received answer or ICE candidate whose `attempt` doesn't match the
+current one for that peer is dropped as stale, never applied — closing
+exactly the race this found. `public/voiceCall.js`'s own `peerAttempt`
+map comment has the full reasoning; `spec/voiceClient.test.ts` pins the
+exact scenario down directly (a stale answer dropped, the real one
+applied; a stale ICE candidate dropped after `remoteDescription` has
+already landed for a newer attempt). **Superseded in part, 2026-11-06**:
+this entry's own "any mismatch is dropped as stale" was itself
+incomplete — see the entry below for the real bug that left in, found
+from an actual production diagnostics trace.
+
+A "Copy call diagnostics" button (same expanded call panel) was added
+alongside this fix — a bounded, privacy-safe per-call negotiation log
+(every offer/answer/candidate sent/received/dropped-as-stale, each
+tagged with its own `attempt` number and an 8-char truncated peer id,
+never raw SDP/IP/a session secret/a full player id) that two people can
+paste to compare notes on a real failed call, rather than guessing from
+the UI's own summary text alone. Confirmed via two dedicated tests that
+the copied text never contains an SDP marker, a bare IPv4 address, or an
+un-truncated id.
+
+### An early ICE candidate wrongly treated as stale, found from a real production diagnostics trace (Claude, 2026-11-06)
+
+The prior entry's own "attempt" tagging correctly rejected an answer or
+candidate from an OLDER, already-superseded round, but its
+`data.attempt !== pc.__attempt` check also rejected a candidate for a
+NEWER round whose own offer simply hadn't arrived or been applied yet —
+treating "not yet active" the same as "already superseded." This matters
+because `onicecandidate` fires its own independent signaling POST as
+candidates are gathered, entirely unordered with respect to the offer's
+own POST; a candidate for a brand-new round can genuinely reach the
+other side first. Reproduced directly (delayed only the offer by 3s
+while letting its own candidates go out immediately) and confirmed: the
+answerer received four real candidates for the new round, all
+permanently discarded as "stale" before that round's own offer ever
+landed — exactly the shape of a real pasted production diagnostics trace
+from the user's own failed call (`iceConnectionState: checking` forever,
+zero candidate pair ever nominated, zero audio packets either
+direction). Fixed by distinguishing the two cases in `handleSignal`'s
+`ice-candidate` branch and `flushPendingCandidates`: strictly OLDER than
+the current attempt is genuinely stale (dropped); anything else (pc not
+yet created, its `remoteDescription` not yet set, or a NEWER attempt) is
+queued and flushed once that round's own offer actually lands.
+
+Also found and fixed, from the same pasted trace: `onicecandidate`'s own
+signaling POST was fire-and-forget (`.catch(() => {})`), so a real
+delivery failure (a 409 from `src/voice.ts`'s own `not_in_call` check, a
+rate limit, a network error) was indistinguishable from a successful
+send — raised directly by an independent review that correctly pointed
+out the existing evidence couldn't prove a candidate had actually
+reached the other side. Every candidate send is now tracked by its own
+`.then`/`.catch`, recording real HTTP status on failure, never assumed
+delivered. `public/voiceCall.js`'s new `candidateStats` map keeps a
+compact per-(remote, attempt) summary — generated/sent-ok/sent-failed
+locally, received/queued/applied/dropped-stale/apply-failed from the
+remote — printed as one line per round in "Copy call diagnostics"
+instead of a line per candidate, which a real trace across several
+reconnect rounds would otherwise bury in noise. `closePeer` now also
+carries an explicit reason (`teardown` / `manual-reconnect` /
+`reconnect-attempts-exhausted` / `not-in-call-roster`), closing a
+related gap the same trace exposed: a peer closing mid-`connecting` with
+no prior `failed` event previously gave no way to tell "ICE itself gave
+up" from "the server's own call membership no longer lists this
+remote."
+
+**A second real mechanism found in the same trace, reproduced directly,
+and left unchanged because it is this app's own documented, deliberate
+design, not a new bug.** `src/voice.ts`'s `reconcileParticipants` evicts
+a joined call participant using the room's ordinary `PRESENCE_STALE_MS`
+(15s) "connected" threshold — the exact same signal the room already
+uses everywhere else, with no additional grace specific to an active
+voice negotiation (CLAUDE.md's own voice-call section already states
+this is intentional: "reusing `connected`... is deliberate: no second,
+voice-specific liveness signal to keep in sync with the first").
+Reproduced directly: blocking one side's ordinary room heartbeat for 17
+seconds while its WebRTC link was fully `connected` and healthy still
+tore the peer connection down, tagged `reason=not-in-call-roster` in the
+new diagnostics — the underlying media link itself never failed at all.
+This is a real, concrete explanation for repeated reconnect churn on any
+network with occasional brief hiccups (a phone switching networks, a
+backgrounded tab's timer throttled), stated here plainly rather than
+silently left unexplained, but not something this round changes — it is
+the existing, intentional tradeoff this file's own voice-call section
+already documents.
+
 ## Hold’em scope and authority (Codex, 2026-10-22)
 
 The user now explicitly authorizes Texas Hold’em in both existing Texas
