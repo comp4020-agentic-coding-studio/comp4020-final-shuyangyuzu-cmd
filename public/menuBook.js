@@ -622,6 +622,7 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
     clearTimeout(openingTimer); openingTimer = null; opening = false;
     if (!dialog) return;
     const old = dialog; dialog = null;
+    mixologyMount?.teardown(); mixologyMount = null;
     document.removeEventListener('keydown', onKeydown);
     pagesEl?.removeEventListener('pointerdown', onPagesPointerDown);
     pagesEl?.removeEventListener('click', onPagesClick);

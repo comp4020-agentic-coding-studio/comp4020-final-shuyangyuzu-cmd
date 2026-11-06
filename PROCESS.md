@@ -248,3 +248,7 @@ All 495 automated checks passed, run once, not repeatedly. I still need to actua
 ## 2026-11-06 — Taking the accepted Blackjack room online
 
 I accepted the Offline semicircle table and NPC turn animation, then asked Codex to implement Online and deploy both. Codex moved Online decisions into a persistent server engine while retaining the Offline presentation. Its two-browser check found a real concurrent-Ready rejection and corrected that independently from the version checks that protect chip-spending actions. Codex verified a two-identity hand, dealer animation, refresh, return and leave in desktop/mobile browser viewports. I have accepted Offline; the automated Online checks are not my own multiplayer acceptance.
+
+## 2026-11-07 — Letting players contribute recipes
+
+I asked for a public place to share homemade drinks using the existing recipe layout, with local photos, editable ingredient measures, preparation steps and a way to manage my own posts. I approved a first version that separates saved recipes from party planning. Codex implemented it in a separate worktree while Claude expanded the restaurant menu, then integrated Claude's committed menu changes. Codex's automated checks distinguish saving a private draft from publishing it, and a saved reference from the fixed recipe snapshot used for a party shopping list. Its browser screenshots exposed a mobile filter layout problem, which it corrected. These are Codex's checks, not my personal acceptance; I still need to try publishing and managing my own recipes.

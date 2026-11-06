@@ -29,6 +29,7 @@ import { registerBlackjack } from './blackjackRoutes.ts';
 import { registerPoker } from './pokerRoutes.ts';
 import { registerDomino } from './dominoRoutes.ts';
 import { registerAccounts } from './accountRoutes.ts';
+import { registerCommunity } from './communityRoutes.ts';
 import { AccountError } from './accounts.ts';
 import { getIceServers } from "./iceConfig.ts";
 
@@ -267,7 +268,7 @@ app.use("*", async (c, next) => {
 // shows, without asking everyone to hard-refresh.
 app.use("*", async (c, next) => {
   await next();
-  c.header("Cache-Control", (c.req.path.startsWith('/api/poker/')||c.req.path.startsWith('/api/domino/')||c.req.path.startsWith('/api/blackjack/'))?'private, no-store':"no-cache");
+  c.header("Cache-Control", (c.req.path.startsWith('/api/community/')||c.req.path.startsWith('/api/poker/')||c.req.path.startsWith('/api/domino/')||c.req.path.startsWith('/api/blackjack/'))?'private, no-store':"no-cache");
 });
 
 // Best-effort claimed identity for a rejected request — read from the
@@ -1193,6 +1194,7 @@ registerPoker(app,db);
 registerBlackjack(app,db);
 registerDomino(app,db);
 registerAccounts(app,db);
+registerCommunity(app,db);
 app.use("/*", serveStatic({ root: "./public" }));
 
 const port = Number(process.env.PORT ?? 8080);

@@ -14,6 +14,10 @@
 const assetVersion = new URL(document.querySelector('script[type="module"]').src).searchParams.get('v');
 const { createTavern } = await import(`./tavern.js?v=${assetVersion}`);
 const mixologyModule = await import(`./mixology.js?v=${assetVersion}`);
+const {createCommunityBook}=await import(`./communityRecipes.js?v=${assetVersion}`);
+const recipeModel=await import(`./recipeModel.js?v=${assetVersion}`);
+const communityStyles=document.createElement('link');communityStyles.rel='stylesheet';communityStyles.href=`./communityRecipes.css?v=${assetVersion}`;document.head.append(communityStyles);
+const communityMixologyModule={...mixologyModule,createMixology:()=>createCommunityBook({house:mixologyModule,model:recipeModel})};
 const ordersApi = await import(`./orders.js?v=${assetVersion}`);
 const { createMenuBook } = await import(`./menuBook.js?v=${assetVersion}`);
 // The one client-side staleness-gate implementation, shared with
@@ -1277,5 +1281,5 @@ function hexBoard(code, session, state, isMyTurn) {
 
 // ---- Boot -------------------------------------------------------------
 
-const tavern = createTavern({ el, render, navigate, buildClassicPanel, saveSession, shouldApplyLiveUpdate, createMenuBook, mixologyModule, ordersApi, accountsApi });
+const tavern = createTavern({ el, render, navigate, buildClassicPanel, saveSession, shouldApplyLiveUpdate, createMenuBook, mixologyModule:communityMixologyModule, ordersApi, accountsApi });
 route();

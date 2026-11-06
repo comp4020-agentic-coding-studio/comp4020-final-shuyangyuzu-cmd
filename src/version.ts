@@ -31,6 +31,9 @@ function computeVersion(): string {
   hash.update(readFileSync("public/blackjack.js"));
   hash.update(readFileSync("public/domino.js"));
   hash.update(readFileSync("public/mixology.js"));
+  hash.update(readFileSync("public/communityRecipes.js"));
+  hash.update(readFileSync("public/communityRecipes.css"));
+  hash.update(readFileSync("public/recipeModel.js"));
   hash.update(readFileSync("public/orders.js"));
   hash.update(readFileSync("public/menuBook.js"));
   hash.update(readFileSync("public/accounts.js"));
