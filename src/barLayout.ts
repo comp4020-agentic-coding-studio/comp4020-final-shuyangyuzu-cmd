@@ -205,9 +205,9 @@ const CORE_FURNITURE: readonly Furniture[] = [
     y: 14,
     w: 2,
     h: 2,
-    label: "Blackjack Offline — not yet open",
+    label: "Blackjack Offline",
     gameType: "blackjack",
-    available: false,
+    available: true,
     tableMode: "npc",
   },
   // A map-edge, walkable-only fixture — clear of the furniture cluster
@@ -284,6 +284,13 @@ export const GAME_CHAIRS = GAME_TABLES.flatMap((f) => f.gameType === "vegas"
     const angle = (-90 + i * 72) * Math.PI / 180;
     const displayX = f.x + f.w / 2 + 1.55 * Math.cos(angle);
     const displayY = f.y + f.h / 2 + 1.55 * Math.sin(angle);
+    return { tableId: f.id, color, x: Math.floor(displayX), y: Math.floor(displayY), displayX, displayY };
+  })
+  : f.gameType === "blackjack" ? ["red", "blue", "green", "yellow"].map((color, i) => {
+    // Left to right on the lower arc, around the midpoint of the flat edge.
+    const angle = (165 - 50 * i) * Math.PI / 180;
+    const displayX = f.x + f.w / 2 + 1.7 * Math.cos(angle);
+    const displayY = f.y + f.h / 2 + 1.7 * Math.sin(angle);
     return { tableId: f.id, color, x: Math.floor(displayX), y: Math.floor(displayY), displayX, displayY };
   })
   : f.gameType === "dominoes" ? [

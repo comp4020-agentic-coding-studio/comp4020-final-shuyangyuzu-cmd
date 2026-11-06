@@ -129,7 +129,7 @@ function el(tag, attrs = {}, children = []) {
 }
 
 function render(node) {
-  document.body.classList.toggle("table-mode", node.classList.contains("table"));
+  document.body.classList.toggle("table-mode", node.matches(".table, .bj-room"));
   root.replaceChildren(node);
 }
 
@@ -215,6 +215,8 @@ function route() {
   activeRoomCode=code;
   pokerUI.routeChanged();
   dominoUI.routeChanged();
+  const blackjackSeat=new URLSearchParams(location.search).get('blackjack');
+  if(blackjackSeat!==null){tavern.mountBlackjack(blackjackSeat);return;}
   if(new URLSearchParams(location.search).has('domino')){dominoUI.mount();return;}
   if(new URLSearchParams(location.search).has('poker')){pokerUI.mount();return;}
   if (!code) {

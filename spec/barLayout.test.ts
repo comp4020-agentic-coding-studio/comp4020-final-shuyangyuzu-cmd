@@ -227,7 +227,26 @@ it("all physical chairs have unique, reachable tiles, including between adjacent
   }
 });
 
-it("every game table has exactly COLORS.length chairs, one per color, mutually exclusive and walkable", () => {
+it("blackjack has four symmetric player seats outside the lower curved rail", () => {
+  for (const table of GAME_TABLES.filter((t) => t.gameType === "blackjack")) {
+    const seats = GAME_CHAIRS.filter((s) => s.tableId === table.id);
+    expect(seats).toHaveLength(4);
+    const cx = table.x + table.w / 2, cy = table.y + table.h / 2;
+    const centers = seats.map((s) => ({
+      x: "displayX" in s ? Number(s.displayX) : s.x + 0.5,
+      y: "displayY" in s ? Number(s.displayY) : s.y + 0.5,
+    })).sort((a, b) => a.x - b.x);
+    for (const [i, seat] of centers.entries()) {
+      expect(seat.y).toBeGreaterThan(cy);
+      expect(Math.hypot(seat.x - cx, seat.y - cy)).toBeGreaterThan(table.w / 2);
+      expect(seat.x + centers[3-i].x).toBeCloseTo(2 * cx);
+      expect(seat.y).toBeCloseTo(centers[3-i].y);
+    }
+    expect(centers[1].y).toBeGreaterThan(centers[0].y);
+  }
+});
+
+it("every game table has the expected colors in distinct walkable chair tiles", () => {
   // 5, not 4 — the official rulebook ships 5 player colours' worth of
   // dice (src/rooms.ts's MAX_PLAYERS comment has the citation); this test
   // guards GAME_CHAIRS staying in sync with COLORS, whatever its length
@@ -235,7 +254,7 @@ it("every game table has exactly COLORS.length chairs, one per color, mutually e
   // the first.
   for (const t of GAME_TABLES) {
     const chairs = GAME_CHAIRS.filter((c) => c.tableId === t.id);
-    const expectedColors=t.gameType === "dominoes" ? COLORS.slice(0,4) : COLORS;
+    const expectedColors=["dominoes", "blackjack"].includes(t.gameType!) ? COLORS.slice(0,4) : COLORS;
     expect(chairs, `${t.id} chair count`).toHaveLength(expectedColors.length);
     expect(chairs.map((c) => c.color).sort()).toEqual([...expectedColors].sort());
     const seen = new Set<string>();
@@ -285,16 +304,16 @@ it("the online row's own columns leave a real walkway beside every chair ring, r
   }
 });
 
-it("has nine tables in two labelled rows — 3 Vegas + 2 Hold’em + 2 dominoes playable, 2 reserved slots, all 2x2", () => {
+it("has nine tables in two labelled rows — 3 Vegas + 2 Hold’em + 2 dominoes + offline blackjack playable, 1 reserved slots, all 2x2", () => {
   expect(GAME_TABLES).toHaveLength(9);
   expect(GAME_TABLES.filter((t) => t.gameType === "vegas")).toHaveLength(3); // 2 online + 1 NPC
-  expect(GAME_TABLES.filter((t) => t.available)).toHaveLength(7);
-  expect(GAME_TABLES.filter((t) => !t.available)).toHaveLength(2);
+  expect(GAME_TABLES.filter((t) => t.available)).toHaveLength(8);
+  expect(GAME_TABLES.filter((t) => !t.available)).toHaveLength(1);
   expect(GAME_TABLES.filter((t) => t.tableMode === "online")).toHaveLength(5);
   expect(GAME_TABLES.filter((t) => t.tableMode === "npc")).toHaveLength(4);
-  // Vegas and Hold’em are playable; dominoes and blackjack remain reserved.
+  expect(GAME_TABLES.find(t => t.id === "blackjack-1")?.available).toBe(false);
   for (const t of GAME_TABLES.filter((t) => t.available)) {
-    expect(["vegas","texas","dominoes"]).toContain(t.gameType);
+    expect(["vegas","texas","dominoes","blackjack"]).toContain(t.gameType);
   }
   for (const t of GAME_TABLES) {
     expect(t.w).toBe(2);

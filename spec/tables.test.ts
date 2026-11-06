@@ -59,12 +59,12 @@ async function anEmptyVegasTable(): Promise<string> {
   return empty.id;
 }
 
-it("lists nine tables — 2 online + 1 NPC Vegas playable, 2 reserved that can never be created/joined", async () => {
+it("lists nine tables — 2 online + 1 NPC Vegas playable, 1 reserved that can never be created/joined", async () => {
   const tables = await tablesStatus();
   expect(tables).toHaveLength(9);
   expect(tables.filter((t) => t.gameType === "vegas")).toHaveLength(3);
   const reserved = tables.filter((t) => !t.available);
-  expect(reserved).toHaveLength(2);
+  expect(reserved.map(t => t.id)).toEqual(["blackjack-1"]);
 
   const patron = await joinBar("Reservist", "red");
   for (const t of reserved) {

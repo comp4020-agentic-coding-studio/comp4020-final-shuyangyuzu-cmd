@@ -1,5 +1,170 @@
 // Original canvas art. World-space fixtures and camera-space input are
 // separate; movement remains adjacent steps validated by the server.
+export function blackjackTotal(cards) {
+  let total = 0, aces = 0;
+  for (const card of cards) {
+    const rank = card.slice(0,-1);
+    if (rank === 'A') aces++;
+    total += rank === 'A' ? 1 : ['J','Q','K'].includes(rank) ? 10 : Number(rank);
+  }
+  return aces && total <= 11 ? total + 10 : total;
+}
+
+function blackjackDeck() {
+  const deck = [...'♠♥♦♣'].flatMap(suit =>
+    ['A','2','3','4','5','6','7','8','9','10','J','Q','K'].map(rank => rank+suit));
+  for (let i=deck.length-1;i>0;i--) {
+    const j=Math.floor(Math.random()*(i+1));
+    [deck[i],deck[j]]=[deck[j],deck[i]];
+  }
+  return deck;
+}
+
+function payout(cards, dealer, natural) {
+  const points=blackjackTotal(cards), house=blackjackTotal(dealer);
+  const dealerNatural=house===21 && dealer.length===2;
+  if(points>21) return ['Bust',0];
+  if(natural) return dealerNatural?['Push',1]:['Blackjack',2.5];
+  if(dealerNatural) return ['Dealer blackjack',0];
+  if(house>21 || points>house) return ['Win',2];
+  return points===house?['Push',1]:['Dealer wins',0];
+}
+
+function drawDealer(dealer, deck) {
+  while(blackjackTotal(dealer)<17) dealer.push(deck.pop());
+}
+
+// The original solo interface is also used by the initial rule tests.
+export function playBlackjack(hand, hit) {
+  if(hand.result) return;
+  if(hit) {
+    hand.player.push(hand.deck.pop());
+    if(blackjackTotal(hand.player)>21) { hand.result='You bust · Dealer wins'; return; }
+    if(blackjackTotal(hand.player)<21) return;
+  }
+  drawDealer(hand.dealer,hand.deck);
+  const [result]=payout(hand.player,hand.dealer,false);
+  hand.result=result==='Win'?(blackjackTotal(hand.dealer)>21?'Dealer busts · You win':'You win'):result;
+}
+
+const naturalHand=h=>!h.split && h.cards.length===2 && blackjackTotal(h.cards)===21;
+const handValue=card=>blackjackTotal([card]);
+export const blackjackPersonalities=['Cautious','Balanced','Bold','Patient'];
+// House NPC styles, not a claim of optimal strategy. Decisions use only the
+// NPC's own cards and the dealer's visible card, never the shoe or hole card.
+export function blackjackNpcChoice(cards, upcard, style) {
+  const total=blackjackTotal(cards), dealer=handValue(upcard);
+  const low=cards.reduce((sum,c)=>sum+(c.startsWith('A')?1:handValue(c)),0);
+  if(total<=11) return 'Hit';
+  if(total>=19) return 'Stand';
+  if(total>low) return total<(style==='Bold'?19:18)?'Hit':'Stand';
+  const threshold=style==='Cautious'?(dealer>=7?16:12):
+    style==='Bold'?(dealer>=7?18:15):style==='Patient'?(dealer>=7?17:13):
+    (dealer>=7?17:dealer<=3?13:12);
+  return total<threshold?'Hit':'Stand';
+}
+export function beginBlackjack(balance, bet, seat, deck=blackjackDeck()) {
+  if(!Number.isInteger(bet)||bet<=0||bet>balance) throw Error('Choose a bet you can cover');
+  const hands=Array.from({length:4},(_,index)=>({seat:index,cards:[],bet:index===seat?bet:10,split:false,result:''}));
+  const round={hands,seat,dealer:[],deck,balance:balance-bet,index:0,phase:'playing',insurance:0,lastMove:null,dealerRevealed:false};
+  for(let pass=0;pass<2;pass++) {
+    for(const h of hands) h.cards.push(deck.pop());
+    round.dealer.push(deck.pop());
+  }
+  if(round.dealer[0].startsWith('A')) round.phase='insurance';
+  else advanceBlackjack(round);
+  return round;
+}
+
+function advanceBlackjack(r) {
+  const houseNatural=r.dealer.length===2 && blackjackTotal(r.dealer)===21;
+  while(!houseNatural && r.index<r.hands.length) {
+    const h=r.hands[r.index];
+    if(blackjackTotal(h.cards)<21) return;
+    r.index++;
+  }
+  if(!houseNatural && r.hands.some(h=>!naturalHand(h)&&blackjackTotal(h.cards)<=21)) {
+    r.phase='dealer';
+    return;
+  }
+  settleBlackjack(r);
+}
+
+function settleBlackjack(r) {
+  const houseNatural=r.dealer.length===2 && blackjackTotal(r.dealer)===21;
+  for(const h of r.hands) {
+    const [result,multiplier]=payout(h.cards,r.dealer,naturalHand(h));
+    h.result=result;
+    if(h.seat===r.seat) r.balance+=h.bet*multiplier;
+  }
+  if(houseNatural) r.balance+=3*r.insurance;
+  r.phase='settled';
+}
+
+// Exactly one visible NPC/dealer action per tick; rendering controls pacing.
+export function stepBlackjack(r) {
+  if(r.phase==='dealer') {
+    if(!r.dealerRevealed) {
+      r.dealerRevealed=true;
+      r.lastMove={seat:'dealer',action:'Reveal',card:1};
+      return;
+    }
+    if(blackjackTotal(r.dealer)<17) {
+      r.dealer.push(r.deck.pop());
+      r.lastMove={seat:'dealer',action:'Hit',card:r.dealer.length-1};
+    } else {
+      r.lastMove={seat:'dealer',action:'Stand'};
+      settleBlackjack(r);
+    }
+    return;
+  }
+  if(r.phase!=='playing') return;
+  const h=r.hands[r.index];
+  if(!h || h.seat===r.seat) return;
+  const action=blackjackNpcChoice(h.cards,r.dealer[0],blackjackPersonalities[h.seat]);
+  if(action==='Hit') h.cards.push(r.deck.pop());
+  r.lastMove={seat:h.seat,action,card:action==='Hit'?h.cards.length-1:null};
+  if(action==='Stand'||blackjackTotal(h.cards)>=21) r.index++;
+  advanceBlackjack(r);
+}
+
+export function blackjackChoices(r) {
+  if(r.phase==='insurance') return r.balance>=r.hands[r.seat].bet/2?['Insurance','Decline']:['Decline'];
+  if(r.phase!=='playing') return [];
+  const h=r.hands[r.index], choices=['Hit','Stand'];
+  if(!h || h.seat!==r.seat) return [];
+  if(h.cards.length===2 && r.balance>=h.bet) {
+    choices.push('Double');
+    if(!h.split && handValue(h.cards[0])===handValue(h.cards[1])) choices.push('Split');
+  }
+  return choices;
+}
+
+export function blackjackAction(r, action) {
+  if(!blackjackChoices(r).includes(action)) return;
+  if(r.phase==='insurance') {
+    if(action==='Insurance') {
+      r.insurance=r.hands[r.seat].bet/2;
+      r.balance-=r.insurance;
+    }
+    r.phase='playing';
+  } else {
+    const h=r.hands[r.index];
+    if(action==='Split') {
+      r.balance-=h.bet;
+      const second={...h,cards:[h.cards.pop()],split:true};
+      h.split=true; h.cards.push(r.deck.pop()); second.cards.push(r.deck.pop());
+      r.hands.splice(r.index+1,0,second);
+    } else {
+      if(action==='Double') { r.balance-=h.bet; h.bet*=2; }
+      if(action!=='Stand') h.cards.push(r.deck.pop());
+      r.lastMove={seat:h.seat,action,card:action!=='Stand'?h.cards.length-1:null};
+      if(action!=='Hit'||blackjackTotal(h.cards)>=21) r.index++;
+    }
+  }
+  advanceBlackjack(r);
+}
+
 export function bindDirectionHold(button, { onPress, onRelease, onTap }) {
   let pointer = null;
   const release = e => { if (pointer !== null) { pointer = null; onRelease({ cancelled: e?.type !== 'pointerup' }); } };
@@ -691,6 +856,79 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     rect(-5,-36,2,3,'#302635');rect(4,-36,2,3,'#302635');rect(-2,-30,4,1,'#a56656');
     c.restore();
   }
+  function mountBlackjack(color) {
+    dispose();
+    let timer=null,active=true,animateMove=false;
+    dispose=()=>{active=false;clearTimeout(timer);};
+    let patron;
+    try { patron=JSON.parse(localStorage.getItem(sessionKey)||'null'); } catch {}
+    if(!patron?.playerId){history.replaceState(null,'','/');mount();return;}
+    const seat=Math.max(0,['red','blue','green','yellow'].indexOf(color));
+    const names=['Mae','Jasper','Ruth','Silas'];
+    const saved=history.state?.blackjack;
+    const sitting=saved?.owner===patron.playerId ? saved : {};
+    let {round=null,balance=500,bet=10}=sitting;
+    const draw=()=>{
+      if(!active) return;
+      clearTimeout(timer);
+      history.replaceState({blackjack:{owner:patron.playerId,round,balance,bet}},'');
+      const action=(label,fn,disabled=false)=>el('button',{disabled,onclick:()=>{fn();animateMove=true;draw();}},label);
+      const card=value=>el('span',{class:'poker-card '+(value==null?'card-back':/[♥♦]/.test(value)?'red':''),
+        'aria-label':value??'Dealer hole card'},value??'◆');
+      const cards=(values,owner)=>el('div',{class:'bj-card-row'},values.map((value,index)=>{
+        const node=card(value);
+        if(animateMove && round?.lastMove?.seat===owner && round.lastMove.card===index) node.classList.add('bj-new-card');
+        return node;
+      }));
+      const nameplate=(label,shirt)=>el('strong',{class:'bj-nameplate'},[
+        el('span',{class:'poker-avatar',style:`--shirt:${shirt}`,'aria-hidden':'true'},
+          ['head','shirt','legs'].map(part=>el('i',{class:'avatar-'+part}))),label
+      ]);
+      const settled=round?.phase==='settled';
+      const revealed=settled||round?.dealerRevealed;
+      const exposed=round?(revealed?round.dealer:round.dealer.slice(0,1)):[];
+      const felt=el('div',{class:'bj-felt'},[
+        el('div',{class:'bj-dealer'},[nameplate('Dealer','#d8c6a3'),cards(round&&!revealed?[...exposed,null]:exposed,'dealer'),
+          el('small',{},exposed.length?String(blackjackTotal(exposed)):'')]),
+        ...names.map((name,i)=>{
+          const hands=round?.hands.filter(h=>h.seat===i)??[];
+          return el('div',{class:'bj-seat bj-seat-'+i+(i===seat?' own':'')},[
+            nameplate(i===seat?(patron.nickname||'Player')+' · You':name+' · NPC', i===seat?(colors[patron.color]||colors.green):[colors.red,colors.blue,colors.green,colors.yellow][i]),
+            ...hands.map(h=>el('div',{class:round.phase==='playing'&&round.hands[round.index]===h?'bj-active':''},[
+              cards(h.cards,i),el('small',{},[blackjackTotal(h.cards),h.result].filter(Boolean).join(' · '))])),
+            ...(i===seat?[]:[el('small',{class:'bj-personality'},blackjackPersonalities[i])])
+          ]);
+        })
+      ]);
+      const controls=el('div',{class:'bj-actions'});
+      if(!round) {
+        for(const amount of [2,10,20,50]) controls.append(action(String(amount),()=>{bet=amount;},amount>balance||amount===bet));
+        controls.append(action('Deal · '+bet,()=>{round=beginBlackjack(balance,bet,seat);},bet>balance));
+      } else if(settled) {
+        controls.append(action('Next hand',()=>{balance=round.balance;round=null;bet=balance>=10?10:2;},round.balance<2));
+      } else {
+        for(const choice of blackjackChoices(round)) controls.append(action(choice,()=>blackjackAction(round,choice)));
+      }
+      const status=!round?'Choose your wager':settled?round.hands.filter(h=>h.seat===seat).map(h=>h.result+' · bet '+h.bet).join(' / '):
+        round.phase==='insurance'?'Dealer shows an ace. Insurance costs '+round.hands[seat].bet/2+' chips.':
+        round.phase==='dealer'?'Dealer’s turn':round.hands[round.index].seat!==seat?
+        names[round.hands[round.index].seat]+' is thinking…':
+        'Your turn · '+blackjackTotal(round.hands[round.index].cards)+' points · bet '+round.hands[round.index].bet;
+      const move=round?.lastMove;
+      const moveText=move?(move.seat==='dealer'?'Dealer':move.seat===seat?'You':names[move.seat])+' · '+move.action:'';
+      render(el('main',{class:'poker-page bj-room','aria-label':'Blackjack Offline'},[
+        el('header',{class:'poker-header bj-header'},[el('h1',{},'Blackjack'),el('strong',{},(round?.balance??balance)+' chips'),
+          el('button',{onclick:()=>{history.replaceState(null,'');navigate('/');}},'Back to the bar')]),
+        felt,el('section',{class:'poker-controls','aria-label':'Blackjack actions'},[el('p',{role:'status'},status),el('p',{class:'bj-last-move','aria-live':'polite'},moveText),controls]),
+        el('details',{},[el('summary',{},'Table rules'),el('p',{},'Beat the dealer without passing 21. Aces count as 1 or 11. Dealer stands on 17, including soft 17. Blackjack pays 3:2. Double for one final card, or split equal-value cards once. Split 21 pays even money. Insurance pays 2:1. Chips belong to this sitting.')])]));
+      animateMove=false;
+      if(round?.phase==='dealer'||(round?.phase==='playing'&&round.hands[round.index]?.seat!==seat)) {
+        timer=setTimeout(()=>{if(!active)return;stepBlackjack(round);animateMove=true;draw();},1100);
+      }
+    };
+    draw();
+  }
+
   async function mount() {
     dispose(); document.body.classList.add('world-mode');
     let active=true, session=null, state={players:[],tables:[]}, mine=null, camera={x:0,y:0}, path=[], moving=false, frame=0, lowStaminaNotified=false;
@@ -1294,6 +1532,10 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     // is a separate, simpler flow from openTableDialog above: pick a
     // colour, start immediately against 3 computer-controlled opponents.
     async function openNpcTableDialog(f,preferredColor){
+      if(f.gameType==='blackjack'){
+        navigate('/?blackjack='+encodeURIComponent(preferredColor||'red'));
+        return;
+      }
       if(f.gameType==='dominoes'){window.dispatchEvent(new CustomEvent('domino-open',{detail:{mode:'offline',seat:preferredColor}}));return;}
       if(f.gameType==='texas'){window.dispatchEvent(new CustomEvent('poker-open',{detail:{mode:'offline',seat:preferredColor}}));return;}
       path=[];
@@ -2018,6 +2260,23 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         fc.beginPath();fc.arc(cx,cy,r-14,0,Math.PI*2);fc.strokeStyle='#bcad7770';fc.lineWidth=2;fc.stroke();
         fc.fillStyle='#eadcc5';for(let i=0;i<3;i++){box(fc,cx-28+i*21,cy-21,15,21,'#eadcc5');box(fc,cx-23+i*21,cy-14,5,5,'#8a594c');}
         fc.font='bold 10px monospace';fc.textAlign='center';fc.fillStyle='#f7e6c6';fc.fillText(f.label,cx,cy+28);
+      }else if(f.kind==='game_table'&&f.gameType==='blackjack'){
+        const cx=x+w/2, railY=y+h/2, radius=w/2;
+        const halfDisc=(r,edgeY,color)=>{
+          fc.beginPath();fc.arc(cx,edgeY,r,0,Math.PI);fc.closePath();
+          fc.fillStyle=color;fc.fill();
+        };
+        // The dealer sits behind the straight rail, facing the four chairs.
+        sprite(fc,cx,railY+5,'#e7d7b3',skins.tan,1,0,true);
+        box(fc,cx-12,railY-39,24,4,'#372a25');
+        box(fc,cx-8,railY-46,16,8,'#634a35');
+        halfDisc(radius,railY+6,'#452f26');
+        halfDisc(radius,railY,'#bf925a');
+        halfDisc(radius-6,railY+3,'#315d4b');
+        fc.font='bold 12px monospace';fc.textAlign='center';fc.fillStyle='#f4dfb4';
+        fc.fillText('BLACKJACK',cx,railY+23);
+        fc.font='9px monospace';
+        fc.fillText(f.tableMode==='npc'?'Offline':'Online',cx,railY+37);
       }else if(f.kind==='game_table'&&f.gameType==='dominoes'){
         box(fc,x-5,y+12,w+10,h,'#382a2d');box(fc,x-6,y,w+12,h,'#b78a59');box(fc,x,y+6,w,h-12,'#356451');
         box(fc,x+8,y+h/2-1,w-16,2,'#d3b783');
@@ -2361,5 +2620,5 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     }
     else openAuthOverlay();
   }
-  return {mount,stop:()=>{menuBook.close();dispose();}};
+  return {mount,mountBlackjack,stop:()=>{menuBook.close();dispose();}};
 }

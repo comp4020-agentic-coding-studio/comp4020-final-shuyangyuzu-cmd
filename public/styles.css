@@ -821,3 +821,44 @@ body.table-mode { --bg:#50372a; --panel:#49372f; --fg:#f5e7ca; --muted:#d0b997; 
 .domino-hand{display:flex;flex-wrap:wrap;gap:12px;justify-content:center;margin:20px 0}.domino-player{display:flex;justify-content:center;gap:18px;flex-wrap:wrap;padding:10px;border:1px solid #88633f;border-radius:8px}.domino-player.active{border-color:#efc16a;box-shadow:0 0 0 1px #efc16a}.domino-opponent{display:flex;gap:5px;justify-content:center;flex-wrap:wrap;margin:10px}.domino-back{display:inline-block;background:#886345;color:#e2c494;border:2px solid #c4a074;border-radius:4px;padding:8px 3px}.domino-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.domino-controls p{width:100%}.domino-request{padding:12px;background:#55422e;display:flex;gap:10px;align-items:center}.domino-resume{position:fixed;bottom:28px;left:20px;z-index:60;display:flex;gap:8px}.domino-resume[hidden]{display:none}.domino-rules{max-height:85vh;overflow:auto}
 @media(max-width:600px){body.table-mode:has(.domino-page){padding:8px}.domino-page{padding:12px;border-radius:12px}.domino-header h1{font-size:26px}.domino-board{border-width:8px;border-radius:22px;max-height:320px}.domino-header button{font-size:12px}.domino-resume{bottom:14px;left:10px}}
 .domino-bone .domino-pips{display:grid;grid-template-columns:repeat(3,5px);grid-template-rows:repeat(3,5px);gap:2px;padding:3px;width:25px;box-sizing:content-box}.domino-pips i{display:block;width:5px;height:5px}.domino-pips i.pip{background:#342c26;border-radius:50%}
+/* The straight rail belongs to the dealer. The four nameplates follow the arc. */
+.bj-room {min-height:calc(100dvh - 4rem)}
+.bj-actions {display:flex;align-items:center;gap:.65rem;flex-wrap:wrap}
+.bj-header strong {color:#f4d084}
+.bj-felt {
+  container-type:inline-size; position:relative; width:min(94%,840px);aspect-ratio:2; margin:3rem auto clamp(50px,8vw,88px);
+  border-radius:4px 4px 50% 50% / 4px 4px 100% 100%;border:clamp(5px,1vw,13px) solid #936b42;
+  box-shadow:inset 0 0 0 2px #c9ae73, inset 0 2px 20px #182e23,0 6px 0 #302019;
+  background:repeating-linear-gradient(36deg,#ffffff02 0 1px,transparent 1px 4px),radial-gradient(ellipse at top,#347561,#184b3d 72%,#10372e);
+}
+.bj-dealer,.bj-seat {position:absolute;transform:translateX(-50%);text-align:center}
+.bj-dealer {left:50%;top:-1.2rem}
+.bj-seat {width:24%}
+.bj-seat-0 {left:11%;top:47%}.bj-seat-1 {left:36%;top:81%}
+.bj-seat-2 {left:64%;top:81%}.bj-seat-3 {left:89%;top:47%}
+.bj-seat strong,.bj-dealer strong {display:inline-block;border-radius:8px;background:#38271e;color:#fff2d4;
+  border:1px solid #ad8557;padding:3px 7px;font:600 clamp(10px,2cqw,16px) Georgia,serif}
+.bj-seat.own strong {background:#684727;border-color:#f2c578}
+.bj-card-row {display:flex;align-items:center;justify-content:center;gap:clamp(6px,1cqw,10px);margin:3px 0}
+.bj-seat small,.bj-dealer small {display:block;font-size:clamp(10px,1.8cqw,14px);color:#fff0cf;text-shadow:0 1px 3px #20180f}
+.bj-active {outline:1px solid #eec778;border-radius:5px}
+.bj-personality {order:2;color:#d9bd8b;font-size:10px}
+.bj-new-card {animation:bj-reveal 650ms ease-out both}
+@keyframes bj-reveal {
+  0% {transform:perspective(500px) translateY(-20px) rotateY(90deg);opacity:0}
+  30% {transform:perspective(500px) translateY(-8px) rotateY(90deg);opacity:1}
+  100% {transform:perspective(500px) translateY(0) rotateY(0);opacity:1}
+}
+@media (prefers-reduced-motion:reduce) {.bj-new-card {animation:none}}
+.bj-room details {margin-top:1em;color:#e6d1ad}
+.bj-room [role=status] {color:#f7dfad}
+@media(max-width:600px){
+  .bj-felt {margin-top:2rem;margin-bottom:5rem}
+  .bj-seat strong {padding:2px 3px}
+  .bj-card-row .poker-card {width:clamp(15px,4.7cqw,23px);height:26px;font-size:11px}
+}
+.bj-seat .bj-nameplate,.bj-dealer .bj-nameplate {display:inline-flex;align-items:center;gap:3px;max-width:100%}
+.bj-nameplate .poker-avatar {width:clamp(15px,2.5cqw,25px);height:clamp(18px,3cqw,30px);flex:none}
+.bj-seat {display:flex;flex-direction:column;align-items:center}
+.bj-seat .bj-nameplate {order:1}
+.bj-seat .bj-card-row {flex-wrap:wrap}
