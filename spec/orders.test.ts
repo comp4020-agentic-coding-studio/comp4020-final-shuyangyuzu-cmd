@@ -5,7 +5,7 @@
 // actual logic this module owns.
 
 import Database from "better-sqlite3";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
@@ -199,4 +199,67 @@ it("once a meal is consumed, a new meal can be ordered again (not permanently st
   consumeHeldItem(db, p.playerId, p.sessionSecret, first.id);
   const second = placeOrder(db, p.playerId, p.sessionSecret, "bean-chili", null, "key-2");
   expect(second.id).not.toBe(first.id);
+});
+
+// ---- 2026-11-06 menu expansion (Claude): net +10 drinks, +6 meals ----
+
+it("the 2026-11-06 expansion added exactly 10 drinks and 6 meals, net, with no duplicate IDs", () => {
+  const ids = MENU.map((m) => m.id);
+  expect(new Set(ids).size).toBe(ids.length);
+  expect(MENU.length).toBe(24); // 8 original + 16 new
+  expect(MENU.filter((m) => m.kind === "meal")).toHaveLength(10); // 4 original + 6 new
+  expect(MENU.filter((m) => m.kind === "drink")).toHaveLength(14); // 4 original + 10 new
+  const newDrinkIds = [
+    "old-fashioned", "mojito", "margarita", "negroni", "martini",
+    "manhattan", "daiquiri", "gin-tonic", "moscow-mule", "pina-colada",
+  ];
+  const newMealIds = [
+    "fish-and-chips", "chicken-parmigiana", "mushroom-risotto",
+    "spaghetti-bolognese", "caesar-salad", "loaded-nachos",
+  ];
+  for (const id of [...newDrinkIds, ...newMealIds]) expect(ids).toContain(id);
+});
+
+it("every new drink is marked alcoholic and every new meal is not", () => {
+  for (const id of ["old-fashioned", "mojito", "margarita", "negroni", "martini", "manhattan", "daiquiri", "gin-tonic", "moscow-mule", "pina-colada"]) {
+    const item = MENU.find((m) => m.id === id)!;
+    expect(item.alcoholic).toBe(true);
+  }
+  for (const id of ["fish-and-chips", "chicken-parmigiana", "mushroom-risotto", "spaghetti-bolognese", "caesar-salad", "loaded-nachos"]) {
+    const item = MENU.find((m) => m.id === id)!;
+    expect(item.alcoholic).toBe(false);
+  }
+});
+
+it("every menu item declares an allergens list and a real image file that exists on disk", () => {
+  for (const item of MENU) {
+    expect(Array.isArray(item.allergens)).toBe(true);
+    expect(existsSync(join("public", item.image))).toBe(true);
+  }
+});
+
+it("new variant-bearing items (Caesar Salad, Loaded Nachos) validate their real options and reject a fake one", () => {
+  const salad = previewOrder("caesar-salad", "Grilled chicken");
+  expect(salad.variant).toBe("Grilled chicken");
+  expect(catchError(() => previewOrder("caesar-salad", "Extra dressing")).code).toBe("bad_variant");
+  const nachos = previewOrder("loaded-nachos", "With seasoned beef");
+  expect(nachos.variant).toBe("With seasoned beef");
+});
+
+it("a new cocktail (Old Fashioned) can be ordered, held and consumed exactly like an original menu item", () => {
+  const p = joinBar(db, "A", "red", "warm");
+  const held = placeOrder(db, p.playerId, p.sessionSecret, "old-fashioned", null, "key-new-drink");
+  expect(held.kind).toBe("drink");
+  const consumed = consumeHeldItem(db, p.playerId, p.sessionSecret, held.id);
+  expect(consumed.state).toBe("consumed");
+  expect(currentStamina(db, p.playerId)).toBeCloseTo(100, 2); // 80 + 30 clamps at 100
+});
+
+it("a new meal (Mushroom Risotto) can be ordered, held and consumed exactly like an original menu item", () => {
+  const p = joinBar(db, "A", "red", "warm");
+  const held = placeOrder(db, p.playerId, p.sessionSecret, "mushroom-risotto", null, "key-new-meal");
+  expect(held.kind).toBe("meal");
+  const consumed = consumeHeldItem(db, p.playerId, p.sessionSecret, held.id);
+  expect(consumed.state).toBe("consumed");
+  expect(currentStamina(db, p.playerId)).toBeCloseTo(100, 2); // 80 + 70 clamps at 100
 });

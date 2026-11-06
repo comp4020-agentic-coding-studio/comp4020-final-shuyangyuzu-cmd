@@ -185,7 +185,13 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
         `≈ ${item.kcalEstimate} kcal / serving`,
         item.variantNote ? el('small', {}, item.variantNote) : null,
       ].filter(Boolean)),
-    ]);
+      item.kind === 'drink'
+        ? el('p', { class: 'menu-item-allergens' }, item.alcoholic ? 'Contains alcohol.' : 'Non-alcoholic.')
+        : null,
+      item.allergens.length
+        ? el('p', { class: 'menu-item-allergens' }, `Contains: ${item.allergens.join(', ')}.`)
+        : el('p', { class: 'menu-item-allergens' }, 'No common allergens listed.'),
+    ].filter(Boolean));
   }
 
   function detailRightPage(item) {

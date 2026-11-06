@@ -2,9 +2,9 @@
 // data, linked individually to their sources. No remote recipe API is used.
 export const INGREDIENTS = {
   rum:['White rum','Spirits & aperitifs'],tequila:['Tequila','Spirits & aperitifs'],gin:['Gin','Spirits & aperitifs'],vodka:['Vodka','Spirits & aperitifs'],
-  tripleSec:['Triple sec','Spirits & aperitifs'],campari:['Campari','Spirits & aperitifs'],vermouth:['Sweet red vermouth','Spirits & aperitifs'],aperol:['Aperol','Spirits & aperitifs'],prosecco:['Prosecco','Spirits & aperitifs'],bourbon:['Bourbon whiskey','Spirits & aperitifs'],
-  lime:['Fresh lime juice','Fruit & mixers'],soda:['Soda water','Fruit & mixers'],cola:['Cola','Fruit & mixers'],gingerBeer:['Alcohol-free ginger beer','Fruit & mixers'],coconut:['Coconut water','Fruit & mixers'],cranberry:['Cranberry juice','Fruit & mixers'],strawberries:['Sliced strawberries','Fruit & mixers'],lemon:['Fresh lemon juice','Fruit & mixers'],
-  sugar:['White sugar','Bar basics'],syrup:['Simple syrup','Bar basics'],mint:['Fresh mint','Bar basics'],honey:['Honey','Bar basics'],
+  tripleSec:['Triple sec','Spirits & aperitifs'],campari:['Campari','Spirits & aperitifs'],vermouth:['Sweet red vermouth','Spirits & aperitifs'],dryVermouth:['Dry vermouth','Spirits & aperitifs'],aperol:['Aperol','Spirits & aperitifs'],prosecco:['Prosecco','Spirits & aperitifs'],bourbon:['Bourbon whiskey','Spirits & aperitifs'],ryeWhiskey:['Rye whiskey','Spirits & aperitifs'],
+  lime:['Fresh lime juice','Fruit & mixers'],soda:['Soda water','Fruit & mixers'],cola:['Cola','Fruit & mixers'],gingerBeer:['Alcohol-free ginger beer','Fruit & mixers'],coconut:['Coconut water','Fruit & mixers'],coconutCream:['Coconut cream','Fruit & mixers'],pineappleJuice:['Fresh pineapple juice','Fruit & mixers'],cranberry:['Cranberry juice','Fruit & mixers'],strawberries:['Sliced strawberries','Fruit & mixers'],lemon:['Fresh lemon juice','Fruit & mixers'],
+  sugar:['White sugar','Bar basics'],syrup:['Simple syrup','Bar basics'],mint:['Fresh mint','Bar basics'],honey:['Honey','Bar basics'],bitters:['Angostura bitters','Bar basics'],
 };
 /** @typedef {{id:string,amount:number,unit:string,estimated:boolean}} IngredientMeasure */
 /** @param {string} id @param {number} amount */
@@ -27,6 +27,23 @@ export const RECIPES = [
     ingredients:[item('rum',50),item('cola',120),item('lime',10)],steps:['Fill a tall glass with ice.','Pour in rum, cola and fresh lime juice; gently combine.']},
   {id:'moscow-mule',name:'Moscow Mule',alcoholFree:false,flavour:'Ginger · citrus · lively',glass:'mug',tone:'#d4b974',equipment:'Mug or rocks glass, spoon',serves:1,source:iba('moscow-mule'),garnish:'Lime slice',
     ingredients:[item('vodka',45),item('gingerBeer',120),item('lime',10)],steps:['Combine vodka and ginger beer in a mug or rocks glass with ice.','Stir in the lime juice gently.']},
+  // The Counter's own menu (src/orders.ts) lists these same four drinks as
+  // "Old Fashioned," "Martini," "Manhattan" and "Piña Colada" — those menu
+  // pages reuse this exact recipe data rather than keeping a second,
+  // independently-written copy (CLAUDE.md: the two must never disagree
+  // about the same drink), the same pattern whiskey-sour already set.
+  {id:'old-fashioned',name:'Old Fashioned',alcoholFree:false,flavour:'Bold · bitter · sweet',glass:'rocks',tone:'#b2743f',equipment:'Rocks glass, muddler, spoon',serves:1,source:iba('old-fashioned'),garnish:'Orange slice or zest, and a cocktail cherry',
+    ingredients:[item('bourbon',45),item('sugar',1,'cube'),item('bitters',2,'dash',true),item('soda',5,'ml',true)],
+    steps:['Place the sugar cube in a rocks glass and saturate with bitters, plus a few dashes of plain water.','Muddle until the sugar dissolves.','Fill the glass with ice cubes and add the whiskey.','Stir gently.']},
+  {id:'dry-martini',name:'Dry Martini',alcoholFree:false,flavour:'Crisp · botanical · dry',glass:'coupe',tone:'#d7d9c9',equipment:'Mixing glass, strainer, chilled cocktail glass',serves:1,source:iba('dry-martini'),garnish:'A twist of lemon peel, or green olives if requested',
+    ingredients:[item('gin',60),item('dryVermouth',10)],
+    steps:['Pour the gin and dry vermouth into a mixing glass with ice cubes.','Stir well.','Strain into a chilled martini glass.']},
+  {id:'manhattan',name:'Manhattan',alcoholFree:false,flavour:'Rich · herbal · warming',glass:'coupe',tone:'#8c3f2e',equipment:'Mixing glass, strainer, chilled cocktail glass',serves:1,source:iba('manhattan'),garnish:'A cocktail cherry',
+    ingredients:[item('ryeWhiskey',50),item('vermouth',20),item('bitters',1,'dash',true)],
+    steps:['Pour all ingredients into a mixing glass with ice cubes.','Stir well.','Strain into a chilled cocktail glass.']},
+  {id:'pina-colada',name:'Piña Colada',alcoholFree:false,flavour:'Tropical · creamy · sweet',glass:'highball',tone:'#f0dfa6',equipment:'Electric blender, tall glass',serves:1,source:iba('pina-colada'),garnish:'A slice of pineapple and a cocktail cherry',
+    ingredients:[item('rum',50),item('coconutCream',30),item('pineappleJuice',50)],
+    steps:['Blend all ingredients with ice in an electric blender until smooth.','Pour into a tall glass and serve with straws.']},
   {id:'spritz',name:'Spritz',alcoholFree:false,flavour:'Orange · bittersweet · bubbly',glass:'wine',tone:'#e19850',equipment:'Wine glass, spoon',serves:1,source:iba('spritz'),garnish:'Orange slice',
     ingredients:[item('prosecco',90),item('aperol',60),item('soda',30,'ml',true)],steps:['Add the ingredients to an ice-filled wine glass.','Stir gently, keeping the bubbles. Adjust the soda splash to taste.']},
   {id:'husker-mule',name:'Husker Mule',alcoholFree:true,flavour:'Ginger · lime · sparkling',glass:'mug',tone:'#e4cd86',equipment:'Glass or mug, spoon',serves:1,source:unl('House planning measures adapted from the source’s unmeasured ginger, lime and soda combination.'),garnish:'Optional mint',
@@ -44,7 +61,7 @@ export const RECIPES = [
     steps:['Shake all ingredients with ice until well chilled.','Strain into a chilled coupe glass, or over fresh ice in a rocks glass.']},
 ];
 const STORE='vegas:mixology:v1';
-const plural={sprig:'sprigs',leaf:'leaves','bar spoon':'bar spoons',cup:'cups'};
+const plural={sprig:'sprigs',leaf:'leaves','bar spoon':'bar spoons',cup:'cups',dash:'dashes',cube:'cubes'};
 export function quantity(amount,unit,estimated=false){return `${estimated?'≈ ':''}${Number(amount.toFixed(2))} ${amount===1?unit:plural[unit]||unit}`;}
 /** @param {{ingredients:IngredientMeasure[],serves:number}} recipe @param {number} servings */
 export function scaleRecipe(recipe,servings){

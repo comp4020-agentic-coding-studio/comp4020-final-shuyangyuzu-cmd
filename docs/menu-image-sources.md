@@ -21,6 +21,66 @@ nutrition sourcing.
 | `house-lager.jpg` | House Lager | [Mug of beer from above (ubt 2005).jpg](https://commons.wikimedia.org/wiki/File:Mug_of_beer_from_above_(ubt_2005).jpg) | CC BY 2.5 | Tomasz Sienicki |
 | `whiskey-sour.jpg` | Whiskey Sour | [Whiskey sour in coupe glass with garnishes.jpg](https://commons.wikimedia.org/wiki/File:Whiskey_sour_in_coupe_glass_with_garnishes.jpg) | CC BY-SA 4.0 | Ilikefood |
 
+## Menu expansion (2026-11-06, Claude) — 10 drinks, 6 meals
+
+Sourced the same way as the original eight: a real, matched photograph
+found directly on Wikimedia Commons (via its own MediaWiki search/imageinfo
+API, never a generic stock-photo search), fetched through the API's own
+pre-sized `thumburl` (the size Wikimedia's own servers ask large/automated
+callers to use — see "A note on fetching these images" below), then
+re-encoded locally to this project's existing JPEG pipeline (quality
+65–78, mozjpeg-equivalent via Pillow). Every recipe's own real-world
+ingredients/proportions came from the International Bartenders
+Association's own per-cocktail pages (`iba-world.com/iba-cocktail/<id>/`)
+for the nine IBA-codified drinks, fetched directly at implementation time
+— not invented ratios — and from Wikipedia's own "Gin and tonic" article
+for the one drink IBA does not codify (no single body owns an exact
+gin:tonic ratio; the article states a standard 1:1–1:3 range, and this
+menu's own recipe uses 1:2 as the stated middle of that range).
+
+| File | Menu item | Source | License | Author |
+|---|---|---|---|---|
+| `old-fashioned.jpg` | Old Fashioned | [Whiskey Old Fashioned1.jpg](https://commons.wikimedia.org/wiki/File:Whiskey_Old_Fashioned1.jpg) | CC BY-SA 4.0 | Erich Wagner |
+| `mojito.jpg` | Mojito | [Fresh Mojito Premium.jpg](https://commons.wikimedia.org/wiki/File:Fresh_Mojito_Premium.jpg) | CC BY-SA 4.0 | Rjcastillo |
+| `margarita.jpg` | Margarita | [MargaritaReal.jpg](https://commons.wikimedia.org/wiki/File:MargaritaReal.jpg) | CC BY-SA 3.0 | Akke Monasso |
+| `negroni.jpg` | Negroni | [Negroni on the Rocks.jpg](https://commons.wikimedia.org/wiki/File:Negroni_on_the_Rocks.jpg) | CC BY-SA 3.0 | Will Shenton |
+| `martini.jpg` | Martini | [Classic martini by Ken30684.jpg](https://commons.wikimedia.org/wiki/File:Classic_martini_by_Ken30684.jpg) | CC BY 2.0 | Ken30684 |
+| `manhattan.jpg` | Manhattan | [2 Manhattan cocktails, bird's eye view.jpg](https://commons.wikimedia.org/wiki/File:2_Manhattan_cocktails,_bird%27s_eye_view.jpg) | CC BY-SA 4.0 | Evaengler |
+| `daiquiri.jpg` | Daiquiri | [Classic Daiquiri in Cocktail Glass.jpg](https://commons.wikimedia.org/wiki/File:Classic_Daiquiri_in_Cocktail_Glass.jpg) | CC BY-SA 3.0 | Will Shenton |
+| `gin-tonic.jpg` | Gin & Tonic | [Gin and tonic cocktail with wedge of lime.jpg](https://commons.wikimedia.org/wiki/File:Gin_and_tonic_cocktail_with_wedge_of_lime.jpg) | CC BY-SA 4.0 | Davidnuescheler |
+| `moscow-mule.jpg` | Moscow Mule | [Moscow mule Cocktail im Kupferbecher.jpg](https://commons.wikimedia.org/wiki/File:Moscow_mule_Cocktail_im_Kupferbecher.jpg) | CC BY-SA 4.0 | Gordito1869 |
+| `pina-colada.jpg` | Piña Colada | [Piña Colada.jpg](https://commons.wikimedia.org/wiki/File:Pi%C3%B1a_Colada.jpg) | Public domain | Mario Trefz (uploaded by User:Barmix) |
+| `fish-and-chips.jpg` | Fish & Chips | [Fish and chips plate with peas.jpg](https://commons.wikimedia.org/wiki/File:Fish_and_chips_plate_with_peas.jpg) | CC BY-SA 4.0 | Grendelkhan |
+| `chicken-parmigiana.jpg` | Chicken Parmigiana | [Chicken parmigiana with a side of rigatoni pasta.jpg](https://commons.wikimedia.org/wiki/File:Chicken_parmigiana_with_a_side_of_rigatoni_pasta.jpg) | CC BY-SA 4.0 | Gatorfan252525 |
+| `mushroom-risotto.jpg` | Mushroom Risotto | [Risotto ai funghi porcini.JPG](https://commons.wikimedia.org/wiki/File:Risotto_ai_funghi_porcini.JPG) | CC BY-SA 3.0 | Number55 |
+| `spaghetti-bolognese.jpg` | Spaghetti Bolognese | [Spaghetti bolognese.jpg](https://commons.wikimedia.org/wiki/File:Spaghetti_bolognese.jpg) | CC BY-SA 2.5 | Noblige |
+| `caesar-salad.jpg` | Caesar Salad | [Caesar salad (2).jpg](https://commons.wikimedia.org/wiki/File:Caesar_salad_(2).jpg) | CC BY 2.0 | Geoff Peters |
+| `loaded-nachos.jpg` | Loaded Nachos | [NACHOS - Montagues Tex Mex 2026-06-03.jpg](https://commons.wikimedia.org/wiki/File:NACHOS_-_Montagues_Tex_Mex_2026-06-03.jpg) | CC0 | Andy Li |
+
+### Known limitation: `manhattan.jpg`
+
+This photo shows two Manhattan cocktails shot from directly above, rather
+than the more common straight-on single-glass framing the rest of this
+set uses — the best-composed, correctly-licensed single-glass candidates
+found either lacked the recipe's own cherry garnish (showing an orange
+peel instead, which is a different, equally real variation but not what
+this menu's own `ingredients`/mixology-book recipe calls for) or carried
+a questionable license. This photo was chosen because it's the clearest
+unambiguous match for the actual recipe (rye, vermouth, bitters, cherry
+garnish) even though the camera angle is unusual, and it's disclosed here
+rather than silently presented as a typical shot.
+
+### A note on fetching these images
+
+This round's downloads used Wikimedia's own MediaWiki `imageinfo` API with
+`iiurlwidth=900` to request a pre-rendered, CDN-cached thumbnail URL for
+each file, rather than repeatedly pulling multi-megabyte full-resolution
+originals — the first attempt did the latter and was rate-limited (HTTP
+429) by Wikimedia's own upload servers, whose error text explicitly asks
+automated callers to "use thumbnail images in sizes listed on
+https://w.wiki/GHai" instead; switching to the thumbnail API (plus a
+real delay between requests) is that fix, not a workaround around it.
+
 ## Known limitation: `house-lager.jpg` and `whiskey-sour.jpg`
 
 - **House Lager** is a genuine photo of a lager with a foam head, but shot

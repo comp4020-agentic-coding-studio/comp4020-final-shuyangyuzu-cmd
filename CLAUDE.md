@@ -102,6 +102,16 @@ Eating or drinking (`POST /api/orders/consume`) is the *only* place in this enti
 
 **Superseded by the 2026-10-29 correction above**: the client menu is no longer its own dialog opened from a separate HUD button. `public/orders.js` is now a pure server-communication module (menu/held fetch, place, consume — no DOM); `public/menuBook.js` renders the Meals/Drinks pages as part of the counter's single physical book, alongside an embedded Mixology book page. Both modules still participate in the deployed asset hash (`src/version.ts`); opening the book still stops held movement the same way every other overlay dialog in `tavern.js` already does.
 
+## Menu expansion: 10 drinks, 6 meals (2026-11-06/07, Claude)
+
+`MENU` grew from 8 to 24 items (+10 drinks: Old Fashioned, Mojito, Margarita, Negroni, Martini, Manhattan, Daiquiri, Gin & Tonic, Moscow Mule, Piña Colada; +6 meals: Fish & Chips, Chicken Parmigiana, Mushroom Risotto, Spaghetti Bolognese, Caesar Salad, Loaded Nachos), checked against both `MENU` and the Mixology book's own `RECIPES` first for duplicates — none existed, so all 16 are net-new. Every `MenuItem` (old and new) now also carries `allergens: readonly string[]` (plain-English common-allergen labels, empty rather than omitted when none apply) and `alcoholic: boolean` — both purely informational, shown on the book's detail page, with zero effect on `restoreAmount` or any stamina math, same as `kcalEstimate` already was.
+
+Nine of the ten new drinks are real IBA-codified cocktails reusing the Mixology book's own `RECIPES` via `mixologyRecipeId` (the same shared-recipe discipline `whiskey-sour` already established) — four of those nine (`old-fashioned`, `dry-martini`, `manhattan`, `pina-colada`) were newly added to `public/mixology.js`'s own `RECIPES` this round, sourced from the same IBA page the menu item cites, so the two can never disagree. The tenth, Gin & Tonic, has no IBA entry (no single body codifies an exact ratio) and keeps its own `ingredients`/`steps`, using the commonly-cited 1:1–1:3 gin:tonic range's own middle (1:2), disclosed as such rather than presented as an official proportion. Caesar Salad and Loaded Nachos each carry a real, order-affecting `variants` list (protein/no-protein; bean/beef), reusing the existing `resolveVariant` validation — not a decorative dropdown.
+
+All 16 new photos are real, licensed Wikimedia Commons images (provenance in `docs/menu-image-sources.md`), fetched via the MediaWiki `imageinfo` API's own pre-sized thumbnail URL (`iiurlwidth`) after an initial full-resolution-pull attempt was rate-limited (HTTP 429) by Wikimedia's own servers — the fix was switching to the thumbnail size Wikimedia's own error message asked for, not a workaround.
+
+See PLAN.md's matching 2026-11-06/07 entry for full verification detail (536/536 tests, two-viewport real-browser Playwright pass covering ordering, variant selection, and seated eat/drink of new items) and a separately-flagged, pre-existing seat-lifecycle finding (a `bar_seats` row left occupied by an abandoned test identity) that this round did not fix, being outside its own stated scope.
+
 ## Seated eating and drinking (2026-10-29/30, Claude)
 
 Eating or drinking now requires a real dining/stool seat (`bar_seats` — a
