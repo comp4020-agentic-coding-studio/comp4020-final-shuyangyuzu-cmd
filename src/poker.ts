@@ -39,6 +39,7 @@ function save(db:Database.Database,r:Row,s:PokerState,actor:string|null,action:s
 function membership(db:Database.Database,id:string){return db.prepare('SELECT room_id,seat FROM poker_members WHERE bar_id=? AND active=1').get(id) as {room_id:string;seat:number}|undefined;}
 function ensureFree(db:Database.Database,id:string,roomId?:string):void {
   if(db.prepare('SELECT 1 FROM poker_notices WHERE bar_id=?').get(id))throw new RoomError('Acknowledge your out-of-chips message before joining another poker table','bankruptcy_pending',409);
+  if(db.prepare('SELECT 1 FROM blackjack_members WHERE bar_id=? AND active=1').get(id))throw new RoomError('Leave your blackjack table first','already_seated',409);
   if(db.prepare('SELECT 1 FROM domino_members WHERE bar_id=? AND active=1').get(id))throw new RoomError('Leave your domino match first','already_seated',409);
   const seat=membership(db,id);
   if(seat&&seat.room_id!==roomId)throw new RoomError('Leave your current poker table first','already_seated',409);

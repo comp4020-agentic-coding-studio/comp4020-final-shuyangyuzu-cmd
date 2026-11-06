@@ -38,6 +38,8 @@ export function effectivePosition(db: Database.Database, barPlayerId: string): P
     .get(barPlayerId) as BarPlayerLinkage | undefined;
   if (!bp) return null;
 
+  const blackjack=db.prepare('SELECT seat FROM blackjack_members WHERE bar_id=? AND active=1').get(barPlayerId) as {seat:number}|undefined;
+  if(blackjack){const chair=GAME_CHAIRS.filter(c=>c.tableId==='blackjack-1')[blackjack.seat];if(chair)return {x:chair.x,y:chair.y};}
   const domino=db.prepare(`SELECT r.lane,m.seat FROM domino_members m JOIN domino_rooms r ON r.id=m.room_id WHERE m.bar_id=? AND m.active=1 AND r.closed=0 AND r.mode='online'`).get(barPlayerId) as {lane:number;seat:number}|undefined;
   if(domino){const chair=GAME_CHAIRS.filter(c=>c.tableId==='dominoes-1')[domino.lane*2+domino.seat];if(chair)return {x:chair.x,y:chair.y};}
 

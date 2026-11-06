@@ -156,9 +156,9 @@ const CORE_FURNITURE: readonly Furniture[] = [
     y: 9,
     w: 2,
     h: 2,
-    label: "Blackjack Online — not yet open",
+    label: "Blackjack Online",
     gameType: "blackjack",
-    available: false,
+    available: true,
     tableMode: "online",
   },
   // The NPC row has three clear walkway rows below the online tables.

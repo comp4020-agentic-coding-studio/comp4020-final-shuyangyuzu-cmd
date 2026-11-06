@@ -304,14 +304,14 @@ it("the online row's own columns leave a real walkway beside every chair ring, r
   }
 });
 
-it("has nine tables in two labelled rows — 3 Vegas + 2 Hold’em + 2 dominoes + offline blackjack playable, 1 reserved slots, all 2x2", () => {
+it("has nine tables in two labelled rows — 3 Vegas + 2 Hold’em + 2 dominoes + 2 blackjack playable, no reserved slots, all 2x2", () => {
   expect(GAME_TABLES).toHaveLength(9);
   expect(GAME_TABLES.filter((t) => t.gameType === "vegas")).toHaveLength(3); // 2 online + 1 NPC
-  expect(GAME_TABLES.filter((t) => t.available)).toHaveLength(8);
-  expect(GAME_TABLES.filter((t) => !t.available)).toHaveLength(1);
+  expect(GAME_TABLES.filter((t) => t.available)).toHaveLength(9);
+  expect(GAME_TABLES.filter((t) => !t.available)).toHaveLength(0);
   expect(GAME_TABLES.filter((t) => t.tableMode === "online")).toHaveLength(5);
   expect(GAME_TABLES.filter((t) => t.tableMode === "npc")).toHaveLength(4);
-  expect(GAME_TABLES.find(t => t.id === "blackjack-1")?.available).toBe(false);
+  expect(GAME_TABLES.find(t => t.id === "blackjack-1")?.available).toBe(true);
   for (const t of GAME_TABLES.filter((t) => t.available)) {
     expect(["vegas","texas","dominoes","blackjack"]).toContain(t.gameType);
   }

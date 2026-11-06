@@ -28,6 +28,7 @@ function computeVersion(): string {
   hash.update(readFileSync("public/liveSync.js"));
   hash.update(readFileSync("public/voiceCall.js"));
   hash.update(readFileSync("public/poker.js"));
+  hash.update(readFileSync("public/blackjack.js"));
   hash.update(readFileSync("public/domino.js"));
   hash.update(readFileSync("public/mixology.js"));
   hash.update(readFileSync("public/orders.js"));

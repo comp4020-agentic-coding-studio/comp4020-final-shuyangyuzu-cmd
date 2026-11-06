@@ -36,14 +36,14 @@ async function getJson(path: string) {
   return { status: res.status, body: await res.json() };
 }
 
-it("exposes a fixed nine-table, two-row layout — 3 playable Vegas tables (2 online + 1 NPC), 1 reserved slots", async () => {
+it("exposes a fixed nine-table, two-row layout — 3 playable Vegas tables (2 online + 1 NPC), all games playable", async () => {
   const { body } = await getJson("/api/bar/layout");
   expect(body.gridCols).toBeGreaterThan(0);
   expect(body.gridRows).toBeGreaterThan(0);
   const vegas = body.tables.filter((t: { gameType: string }) => t.gameType === "vegas");
   const reserved = body.tables.filter((t: { available: boolean }) => !t.available);
   expect(vegas).toHaveLength(3);
-  expect(reserved.map((t: {id:string}) => t.id)).toEqual(["blackjack-1"]);
+  expect(reserved.map((t: {id:string}) => t.id)).toEqual([]);
   for (const t of reserved) {
     expect(t.label.toLowerCase()).toContain("not yet open");
   }

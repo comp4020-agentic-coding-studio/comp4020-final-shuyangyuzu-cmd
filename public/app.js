@@ -25,6 +25,8 @@ const { createVoiceCall } = await import(`./voiceCall.js?v=${assetVersion}`);
 const voiceCall = createVoiceCall({ el });
 const { createPokerUI } = await import(`./poker.js?v=${assetVersion}`);
 const pokerUI = createPokerUI({el,navigate});
+const { createBlackjackUI } = await import(`./blackjack.js?v=${assetVersion}`);
+const blackjackUI = createBlackjackUI({el,navigate,render});
 const { createDominoUI } = await import(`./domino.js?v=${assetVersion}`);
 const dominoUI = createDominoUI({el,navigate});
 const accountsApi = await import(`./accounts.js?v=${assetVersion}`);
@@ -214,7 +216,9 @@ function route() {
   }
   activeRoomCode=code;
   pokerUI.routeChanged();
+  blackjackUI.routeChanged();
   dominoUI.routeChanged();
+  if(new URLSearchParams(location.search).has('blackjackOnline')){blackjackUI.mount();return;}
   const blackjackSeat=new URLSearchParams(location.search).get('blackjack');
   if(blackjackSeat!==null){tavern.mountBlackjack(blackjackSeat);return;}
   if(new URLSearchParams(location.search).has('domino')){dominoUI.mount();return;}

@@ -129,6 +129,12 @@ export function getTablesStatus(db: Database.Database): TableStatusView[] {
       for(const p of players){const index=p.lane*2+p.seat;seats[index]={color:COLORS[index],nickname:p.nickname,connected:Date.now()-p.seen<15000,controller:'human',barPlayerId:p.bar_id,skin:p.skin,present:Date.now()-p.seen<15000};}
       return {id:t.id,gameType:'dominoes',available:true,label:t.label,tableMode,status:players.length?(players.some(p=>p.state_json)?'in_progress':'waiting'):'empty',roomCode:null,playerCount:players.length,takenColors:seats.filter(Boolean).map(p=>p!.color),seats,pendingCount:0};
     }
+    if(t.gameType==='blackjack'){
+      const players=tableMode==='online'?db.prepare(`SELECT m.bar_id,m.seat,m.seen,p.nickname,p.skin,r.state_json FROM blackjack_members m JOIN blackjack_rooms r ON r.id=m.room_id JOIN bar_players p ON p.id=m.bar_id WHERE m.active=1 AND r.closed=0 AND m.seen>?`).all(Date.now()-180000) as {bar_id:string;seat:number;seen:number;nickname:string;skin:string;state_json:string}[]:[];
+      const seats:Array<TableSeatView|null>=[null,null,null,null];
+      for(const p of players)seats[p.seat]={color:COLORS[p.seat],nickname:p.nickname,connected:Date.now()-p.seen<15000,controller:'human',barPlayerId:p.bar_id,skin:p.skin,present:Date.now()-p.seen<15000};
+      return {id:t.id,gameType:'blackjack',available:true,label:t.label,tableMode,status:players.length?(['betting','settled'].includes(JSON.parse(players[0].state_json).phase)?'waiting':'in_progress'):'empty',roomCode:null,playerCount:players.length,takenColors:seats.filter(Boolean).map(p=>p!.color),seats,pendingCount:0};
+    }
     if(t.gameType==='texas'){
       const row=tableMode==='online'?db.prepare("SELECT id,state_json FROM poker_rooms WHERE table_id=? AND closed=0 AND mode='online'").get(t.id) as {id:string;state_json:string}|undefined:undefined;
       const state=row?JSON.parse(row.state_json):null;
@@ -315,6 +321,7 @@ function checkExistingSeat(
   barPlayerId: string,
   tableId: string,
 ): { code: string; playerId: string; sessionSecret: string; pending: boolean } | null {
+  if(db.prepare('SELECT 1 FROM blackjack_members WHERE bar_id=? AND active=1').get(barPlayerId))throw new TableError('Leave your blackjack table first','already_seated',409);
   if(db.prepare('SELECT 1 FROM domino_members WHERE bar_id=? AND active=1').get(barPlayerId))throw new TableError('Leave your domino match first','already_seated',409);
   if(db.prepare('SELECT 1 FROM poker_members WHERE bar_id=? AND active=1').get(barPlayerId))throw new TableError('Leave your poker table first','already_seated',409);
   const seat = resolveActiveSeat(db, barPlayerId);

@@ -7,6 +7,7 @@ import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { installTransactionLogging } from "./actionLog.ts";
+import { migrateBlackjack } from './blackjackSchema.ts';
 import { migratePoker } from './pokerSchema.ts';
 import { migrateDomino } from './dominoSchema.ts';
 import { migrateAccounts } from './accountsSchema.ts';
@@ -29,6 +30,7 @@ export function openDb(path: string): Database.Database {
   installTransactionLogging(db);
   migrate(db);
   migratePoker(db);
+  migrateBlackjack(db);
   migrateDomino(db);
   migrateAccounts(db);
   seedBarFurniture(db);

@@ -1460,6 +1460,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     const GAME_COLORS=['red','blue','green','yellow','purple'];
     const MAX_SEATS=GAME_COLORS.length;
     async function openTableDialog(f,preferredColor){
+      if(f.gameType==='blackjack'){window.dispatchEvent(new CustomEvent('blackjack-open',{detail:{seat:preferredColor}}));return;}
       if(f.gameType==='dominoes'){window.dispatchEvent(new CustomEvent('domino-open',{detail:{mode:'online',seat:preferredColor}}));return;}
       if(f.gameType==='texas'){window.dispatchEvent(new CustomEvent('poker-open',{detail:{mode:'online',seat:preferredColor}}));return;}
       path=[];

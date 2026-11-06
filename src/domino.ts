@@ -12,6 +12,7 @@ export const DOMINO_GRACE_MS=180000;
 const member=(db:Database.Database,id:string)=>db.prepare('SELECT * FROM domino_members WHERE bar_id=? AND active=1').get(id) as Member|undefined;
 function room(db:Database.Database,id:string):Row {const r=db.prepare('SELECT * FROM domino_rooms WHERE id=?').get(id) as Row|undefined;if(!r||r.closed)throw new RoomError('This domino match has ended','domino_closed',410);return r;}
 function assertFree(db:Database.Database,id:string):void {
+  if(db.prepare('SELECT 1 FROM blackjack_members WHERE bar_id=? AND active=1').get(id))throw new RoomError('Leave your blackjack table first','already_seated',409);
   if(member(db,id)||getActiveSeat(db,id)||db.prepare('SELECT 1 FROM poker_members WHERE bar_id=? AND active=1').get(id)||db.prepare('SELECT 1 FROM bar_seats WHERE occupied_by=?').get(id))throw new RoomError('Leave your current seat first','already_seated',409);
   // The eating branch adds its own module. This optional-schema check keeps
   // this independent branch safe both before and after that migration merges.

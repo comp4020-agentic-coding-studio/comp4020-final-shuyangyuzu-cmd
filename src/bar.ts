@@ -305,6 +305,7 @@ const lastLoggedMoveAt = new Map<string, number>();
 
 export function moveBar(db: Database.Database, playerId: string, sessionSecret: string, x: number, y: number): void {
   requireBarSession(db, playerId, sessionSecret);
+  if(db.prepare('SELECT 1 FROM blackjack_members WHERE bar_id=? AND active=1').get(playerId))throw new BarError('Leave your blackjack table first','already_seated',409);
   if(db.prepare('SELECT 1 FROM domino_members WHERE bar_id=? AND active=1').get(playerId))throw new BarError('Leave your domino match first','already_seated',409);
 
   if(db.prepare('SELECT 1 FROM poker_members WHERE bar_id=? AND active=1').get(playerId))throw new BarError('Leave your poker table before walking in the bar','already_seated',409);
@@ -384,6 +385,7 @@ export function getSeatLayout(): PublicSeat[] {
  * chair shouldn't surface a confusing refusal). */
 export function sitAtSeat(db: Database.Database, playerId: string, sessionSecret: string, seatId: string): void {
   requireBarSession(db, playerId, sessionSecret);
+  if(db.prepare('SELECT 1 FROM blackjack_members WHERE bar_id=? AND active=1').get(playerId))throw new BarError('Leave your blackjack table first','already_seated',409);
   if(db.prepare('SELECT 1 FROM domino_members WHERE bar_id=? AND active=1').get(playerId))throw new BarError('Leave your domino match first','already_seated',409);
 
   if(db.prepare('SELECT 1 FROM poker_members WHERE bar_id=? AND active=1').get(playerId))throw new BarError('Leave your poker table before sitting elsewhere','already_seated',409);

@@ -25,6 +25,7 @@ import * as tables from "./tables.ts";
 import type { Color, PublicState } from "./types.ts";
 import { BUILD_VERSION, renderIndexHtml } from "./version.ts";
 import * as voice from "./voice.ts";
+import { registerBlackjack } from './blackjackRoutes.ts';
 import { registerPoker } from './pokerRoutes.ts';
 import { registerDomino } from './dominoRoutes.ts';
 import { registerAccounts } from './accountRoutes.ts';
@@ -266,7 +267,7 @@ app.use("*", async (c, next) => {
 // shows, without asking everyone to hard-refresh.
 app.use("*", async (c, next) => {
   await next();
-  c.header("Cache-Control", (c.req.path.startsWith('/api/poker/')||c.req.path.startsWith('/api/domino/'))?'private, no-store':"no-cache");
+  c.header("Cache-Control", (c.req.path.startsWith('/api/poker/')||c.req.path.startsWith('/api/domino/')||c.req.path.startsWith('/api/blackjack/'))?'private, no-store':"no-cache");
 });
 
 // Best-effort claimed identity for a rejected request — read from the
@@ -293,7 +294,7 @@ async function claimedRejectionActor(c: Context): Promise<{ kind: "bar" | "room"
   const fromQuery = c.req.query("playerId");
   const id = fromBody || fromQuery;
   if (!id) return null;
-  const kind: "bar" | "room" = c.req.path.startsWith("/api/bar") || c.req.path.startsWith('/api/poker') || c.req.path.startsWith('/api/domino') ? "bar" : "room";
+  const kind: "bar" | "room" = c.req.path.startsWith("/api/bar") || c.req.path.startsWith('/api/poker') || c.req.path.startsWith('/api/domino') || c.req.path.startsWith('/api/blackjack') ? "bar" : "room";
   return { kind, id };
 }
 
@@ -1189,6 +1190,7 @@ setInterval(() => {
 // (serveStatic matches by pathname only), which is exactly what makes it
 // work as a cache-busting token rather than a routing concern.
 registerPoker(app,db);
+registerBlackjack(app,db);
 registerDomino(app,db);
 registerAccounts(app,db);
 app.use("/*", serveStatic({ root: "./public" }));
