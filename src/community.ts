@@ -13,6 +13,7 @@ export type Recipe = {
     serves: number;
     imageId: string | null;
     imageWidth: number;
+    heroHeight?: number;
     imageX: number;
     imageY: number;
     imageZoom: number;
@@ -71,7 +72,7 @@ export function validateRecipe(raw: unknown, publish = false): Recipe {
     const imageId = r.imageId === null ? null : str(r.imageId, 80);
     if (imageId && !/^img-[a-f0-9-]{36}$/.test(imageId))
         problem('Invalid image.');
-    return { name, description, equipment, garnish, ingredients, steps, tags, serves, alcoholFree: r.alcoholFree as boolean, imageId, imageWidth: num(r.imageWidth, 20, 60), imageX: num(r.imageX, 0, 100), imageY: num(r.imageY, 0, 100), imageZoom: num(r.imageZoom, 1, 3) };
+    return { name, description, equipment, garnish, ingredients, steps, tags, serves, alcoholFree: r.alcoholFree as boolean, imageId, imageWidth: num(r.imageWidth, 20, 60), heroHeight: num(r.heroHeight ?? 260, 180, 440), imageX: num(r.imageX, 0, 100), imageY: num(r.imageY, 0, 100), imageZoom: num(r.imageZoom, 1, 3) };
 }
 export function houseRecipes(): RecipeView[] { return RECIPES.map(r => ({ id: 'house:' + r.id, name: r.name, description: r.flavour, tags: [r.alcoholFree ? 'Alcohol-free' : 'Classic'], equipment: r.equipment, alcoholFree: r.alcoholFree, serves: r.serves, imageId: null, imageWidth: 30, imageX: 50, imageY: 50, imageZoom: 1, ingredients: r.ingredients.map(i => ({ name: INGREDIENTS[i.id as keyof typeof INGREDIENTS][0], amount: i.amount, unit: i.unit, estimated: !!i.estimated })), steps: r.steps, garnish: r.garnish, author: 'House recipes', source: 'house', revision: 1, sourceUrl: r.source.url, sourceNote: r.source.note })); }
 export const isAdmin = (a: AccountSessionInfo) => (process.env.COMMUNITY_ADMIN_ACCOUNTS ?? '').split(',').map(s => s.trim()).includes(a.accountId);

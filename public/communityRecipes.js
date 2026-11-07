@@ -90,8 +90,22 @@ export function createCommunityBook({ house, model }) {
     function hero(r, editing = false) {
         const pic = n('div', { class: 'cr-photo' }, image(r));
         const copy = n('div', { class: 'cr-hero-copy' }, n('small', {}, editing ? 'YOUR RECIPE' : r.source === 'house' ? 'HOUSE RECIPE' : 'COMMUNITY RECIPE'), n('h2', {}, r.name || 'Your drink name'), n('p', {}, r.description || 'A drink worth sharing.'), n('p', { class: 'cr-muted' }, r.equipment ? 'You’ll need: ' + r.equipment : ''), !editing ? n('small', {}, 'By ' + (r.author || account?.username || 'you')) : null);
-        const h = n('div', { class: 'cr-hero', style: `--photo-width:${r.imageWidth}%` }, pic, copy);
+        const h = n('div', { class: 'cr-hero'+(editing?' cr-hero-edit':''), style: `--photo-width:${r.imageWidth}%;--hero-height:${r.heroHeight??260}px` }, pic, copy);
         if (editing) {
+            const paintPhoto=()=>{
+                const controls=n('div',{class:'cr-photo-actions'});
+                const upload=n('input',{type:'file',hidden:true,accept:'image/jpeg,image/png,image/webp','aria-label':'Choose drink photo',onchange:e=>run(async()=>{
+                    const file=e.target.files[0];if(!file)return;
+                    if(file.size>5*1024*1024)throw Error('Choose a photo up to 5 MB.');
+                    const thisDraft=draft;say('Preparing photo…');
+                    const result=await api('images',file,true);if(draft!==thisDraft)return;
+                    r.imageId=result.id;r.imageX=50;r.imageY=50;r.imageZoom=1;changed();paintPhoto();
+                })});
+                controls.append(button(r.imageId?'Change photo':'+ Add photo',()=>upload.click()));
+                if(r.imageId)controls.append(button('Remove',()=>{r.imageId=null;changed();paintPhoto();}));
+                pic.replaceChildren(image(r),controls,upload);
+            };
+            paintPhoto();
             const grip = n('button', { type: 'button', class: 'cr-divider', 'aria-label': 'Resize photo area', 'aria-valuemin': '20', 'aria-valuemax': '60', 'aria-valuenow': r.imageWidth, role: 'slider', style: `left:${r.imageWidth}%` }, '⋮');
             let dragging = false;
             const update = value => { r.imageWidth = Math.max(20, Math.min(60, Math.round(value))); h.style.setProperty('--photo-width', r.imageWidth + '%'); grip.style.left = r.imageWidth + '%'; grip.setAttribute('aria-valuenow', r.imageWidth); changed(); };
@@ -107,6 +121,14 @@ export function createCommunityBook({ house, model }) {
                 update(r.imageWidth + (e.key === 'ArrowRight' ? 1 : -1));
             } };
             h.append(grip);
+            const bottom=n('button',{type:'button',class:'cr-bottom-edge',role:'slider','aria-label':'Resize header height','aria-orientation':'vertical','aria-valuemin':180,'aria-valuemax':440,'aria-valuenow':r.heroHeight??260,title:'Drag up or down to resize'},'');
+            let resizing=false,startY=0,startHeight=0;
+            const resize=value=>{r.heroHeight=Math.max(180,Math.min(440,Math.round(value)));h.style.setProperty('--hero-height',r.heroHeight+'px');bottom.setAttribute('aria-valuenow',r.heroHeight);changed();};
+            bottom.onpointerdown=e=>{e.preventDefault();resizing=true;startY=e.clientY;startHeight=h.getBoundingClientRect().height;bottom.setPointerCapture(e.pointerId);};
+            bottom.onpointermove=e=>{if(resizing)resize(startHeight+e.clientY-startY);};
+            bottom.onpointerup=()=>resizing=false;bottom.onpointercancel=()=>resizing=false;
+            bottom.onkeydown=e=>{if(['ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();resize((r.heroHeight??260)+(e.key==='ArrowDown'?10:-10));}};
+            h.append(bottom);
         }
         return h;
     }
@@ -199,18 +221,13 @@ export function createCommunityBook({ house, model }) {
         const heroMount = n('div');
         const refreshHero = () => heroMount.replaceChildren(hero(r, true));
         refreshHero();
-        const upload = n('input', { type: 'file', accept: 'image/jpeg,image/png,image/webp', 'aria-label': 'Choose drink photo', onchange: e => run(async () => { const file = e.target.files[0]; if (!file)
-                return; if (file.size > 5 * 1024 * 1024)
-                throw Error('Choose a photo up to 5 MB.'); const thisDraft = draft; say('Preparing photo…'); const result = await api('images', file, true); if (draft !== thisDraft)
-                return; r.imageId = result.id; changed(); refreshHero(); }) });
-        const sliders = n('div', { class: 'cr-tools' }, ...[["imageWidth", "Photo width", 20, 60], ["imageX", "Crop horizontal", 0, 100], ["imageY", "Crop vertical", 0, 100], ["imageZoom", "Zoom", 1, 3]].map(([key, label, min, max]) => field(label, n('input', { type: 'range', min, max, step: key === 'imageZoom' ? .05 : 1, value: r[key], oninput: e => { r[key] = Number(e.target.value); changed(); refreshHero(); } }))));
         const ingredientRows = n('div'), stepRows = n('div');
         function paintIngredients() { ingredientRows.replaceChildren(...r.ingredients.map((i, index) => n('div', { class: 'cr-ingredient-edit' }, n('input', { value: i.name, placeholder: 'Ingredient name', maxlength: 80, 'aria-label': 'Ingredient ' + (index + 1), oninput: e => { i.name = e.target.value; changed(); } }), n('input', { type: 'number', min: .01, max: 10000, step: 'any', value: i.amount ?? '', disabled: i.unit === 'to taste', 'aria-label': 'Amount ' + (index + 1), oninput: e => { i.amount = e.target.value === '' ? null : Number(e.target.value); changed(); } }), select(RECIPE_UNITS.map(u => [u, u]), i.unit, v => { i.unit = v; if (v === 'to taste')
             i.amount = null; changed(); paintIngredients(); }, 'Unit ' + (index + 1)), button('Remove', () => { r.ingredients.splice(index, 1); changed(); paintIngredients(); })))); }
         function paintSteps() { stepRows.replaceChildren(...r.steps.map((s, index) => n('div', { class: 'cr-step-edit' }, n('span', {}, index + 1 + '.'), n('textarea', { value: s, rows: 3, maxlength: 1200, 'aria-label': 'Step ' + (index + 1), oninput: e => { r.steps[index] = e.target.value; changed(); } }), button('Remove', () => { r.steps.splice(index, 1); changed(); paintSteps(); })))); }
         paintIngredients();
         paintSteps();
-        main.replaceChildren(status, n('h1', {}, 'Create something delicious'), n('p', {}, 'Drag the divider or use Photo width. Header height stays fixed; crop controls keep your drink in view.'), heroMount, field('Local photo · JPEG / PNG / WebP · up to 5 MB', upload), button('Remove photo', () => { r.imageId = null; changed(); refreshHero(); }), sliders, n('div', { class: 'cr-columns' }, n('section', {}, text('name', 'Drink name', 80), text('description', 'Short description', 300, true), text('equipment', 'Glass and equipment', 200)), n('section', {}, field('Tags · comma separated', n('input', { value: r.tags.join(', '), maxlength: 240, oninput: e => { r.tags = e.target.value.split(',').map(s => s.trim()).filter(Boolean); changed(); } })), field('Base servings', n('input', { type: 'number', min: 1, max: 20, value: r.serves, oninput: e => { r.serves = Number(e.target.value); changed(); } })), field('Alcohol-free', n('input', { type: 'checkbox', checked: r.alcoholFree, onchange: e => { r.alcoholFree = e.target.checked; changed(); } })), text('garnish', 'Garnish / finishing touch', 300))), n('div', { class: 'cr-columns' }, n('section', {}, n('h2', {}, 'Ingredients'), ingredientRows, button('+ Ingredient', () => { if (r.ingredients.length >= 30)
+        main.replaceChildren(status, n('h1', {}, 'Create something delicious'), n('p', {}, 'Drag the bottom edge to resize the header, or the photo’s right edge to change its width.'), heroMount, n('div', { class: 'cr-columns' }, n('section', {}, text('name', 'Drink name', 80), text('description', 'Short description', 300, true), text('equipment', 'Glass and equipment', 200)), n('section', {}, field('Tags · comma separated', n('input', { value: r.tags.join(', '), maxlength: 240, oninput: e => { r.tags = e.target.value.split(',').map(s => s.trim()).filter(Boolean); changed(); } })), field('Base servings', n('input', { type: 'number', min: 1, max: 20, value: r.serves, oninput: e => { r.serves = Number(e.target.value); changed(); } })), field('Alcohol-free', n('input', { type: 'checkbox', checked: r.alcoholFree, onchange: e => { r.alcoholFree = e.target.checked; changed(); } })), text('garnish', 'Garnish / finishing touch', 300))), n('div', { class: 'cr-columns' }, n('section', {}, n('h2', {}, 'Ingredients'), ingredientRows, button('+ Ingredient', () => { if (r.ingredients.length >= 30)
             throw Error('Up to 30 ingredients.'); r.ingredients.push({ name: '', amount: null, unit: 'ml' }); changed(); paintIngredients(); })), n('section', {}, n('h2', {}, 'Make it'), stepRows, button('+ Step', () => { if (r.steps.length >= 24)
             throw Error('Up to 24 steps.'); r.steps.push(''); changed(); paintSteps(); }))), n('p', { class: 'cr-muted' }, 'Upload a photo you own or have permission to share. Your name appears beside published recipes.'));
     }
