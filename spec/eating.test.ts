@@ -186,7 +186,7 @@ it("a second eat/drink cycle, after the first's lock naturally expires, starts c
   db.prepare(`UPDATE bar_stamina SET value = 10 WHERE player_id = ?`).run(p.playerId);
 
   placeOrder(db, p.playerId, p.sessionSecret, "soda", null, "cycle1");
-  const first = startEating(db, p.playerId, p.sessionSecret, "e-cycle1");
+  startEating(db, p.playerId, p.sessionSecret, "e-cycle1");
   expect(currentStamina(db, p.playerId)).toBeCloseTo(40, 2); // 10 + soda's 30
 
   // Expire the first lock, the same lazy-expiry technique the test above uses.
@@ -198,8 +198,9 @@ it("a second eat/drink cycle, after the first's lock naturally expires, starts c
 
   // A genuinely new order + a genuinely new idempotency key.
   placeOrder(db, p.playerId, p.sessionSecret, "coffee", null, "cycle2");
-  const second = startEating(db, p.playerId, p.sessionSecret, "e-cycle2");
-  expect(second.startedAt).not.toBe(first.startedAt);
+  startEating(db, p.playerId, p.sessionSecret, "e-cycle2");
+  expect(db.prepare(`SELECT idempotency_key FROM bar_eating_actions WHERE player_id = ?`).get(p.playerId))
+    .toEqual({ idempotency_key: "e-cycle2" });
   expect(isEating(db, p.playerId)).toBe(true);
   expect(currentStamina(db, p.playerId)).toBeCloseTo(70, 2); // 40 + coffee's 30, not a re-application of the first restore
 });
