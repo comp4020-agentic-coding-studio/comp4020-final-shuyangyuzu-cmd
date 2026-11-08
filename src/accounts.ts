@@ -110,6 +110,38 @@ function validateUsername(username: string): string {
   return trimmed;
 }
 
+// 2026-11-08 (the user's own explicit instruction): a real-time
+// availability check as the user types a username, distinct from
+// register()'s own throw-on-first-problem validation above. This one
+// must never throw for an ordinary "not valid yet" input (a user mid-
+// keystroke, or genuinely too short) — the client needs a STATUS to
+// show inline, not an HTTP error to catch — so it reuses validateUsername's
+// exact same rules via a local try/catch rather than duplicating the
+// length/character-class checks, which would risk the two silently
+// drifting apart (CLAUDE.md's own long-standing worry about exactly this
+// kind of duplication). An empty input is deliberately its own status
+// ("empty", never "available" — the user's own explicit requirement that
+// an empty field must not claim availability), checked before calling
+// validateUsername so a blank field never has to format-reject itself.
+export type UsernameAvailability =
+  | { status: "available" }
+  | { status: "taken" }
+  | { status: "invalid"; message: string }
+  | { status: "empty" };
+
+export function checkUsernameAvailability(db: Database.Database, usernameInput: string): UsernameAvailability {
+  if (usernameInput.trim().length === 0) return { status: "empty" };
+  let trimmed: string;
+  try {
+    trimmed = validateUsername(usernameInput);
+  } catch (e) {
+    return { status: "invalid", message: e instanceof AccountError ? e.message : "invalid username" };
+  }
+  const normalized = normalizeUsername(trimmed);
+  const existing = db.prepare(`SELECT 1 FROM accounts WHERE username_normalized = ?`).get(normalized);
+  return existing ? { status: "taken" } : { status: "available" };
+}
+
 function validatePassword(password: string): void {
   // Deliberately permissive on composition (letting a password manager
   // generate/paste anything) and only checks length — CLAUDE.md's own
@@ -279,11 +311,23 @@ export function register(
   return transact(db, () => {
     const existing = db.prepare(`SELECT 1 FROM accounts WHERE username_normalized = ?`).get(normalized);
     if (existing) {
-      // Deliberately the same generic message/code a login failure uses
-      // below — CLAUDE.md's own "don't leak whether an account exists"
-      // rule applies just as much to "this username is taken" as to
-      // login, since both let an attacker enumerate real usernames.
-      throw new AccountError("that username is unavailable", "username_taken", 409);
+      // 2026-11-07 correction (user's own explicit instruction): a
+      // registration conflict gets its own distinct, explicit message —
+      // "此用户名已被使用" ("this username is already in use") — rather
+      // than reusing login's generic wording. This is deliberately a
+      // DIFFERENT decision from login's own invalid_credentials below,
+      // not an inconsistency: registration time is exactly when a user
+      // is actively choosing a name and needs to know unambiguously
+      // whether THIS SPECIFIC name is free, which is the entire point of
+      // a registration form offering that feedback (every mainstream
+      // signup flow does the same) — unlike login, where confirming an
+      // account exists before even checking the password would leak
+      // information with no corresponding legitimate need from the
+      // caller. The code (username_taken, 409) was already distinct from
+      // login's (invalid_credentials, 401) before this change; only the
+      // wording is sharpened here to say plainly that the name is taken
+      // rather than vaguely "unavailable".
+      throw new AccountError("this username is already taken", "username_taken", 409);
     }
 
     if (migrateGuest) {

@@ -9,7 +9,8 @@ export function migratePoker(db:Database.Database):void {
     CREATE TABLE IF NOT EXISTS poker_presence(bar_id TEXT PRIMARY KEY,seen INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS poker_invites(id TEXT PRIMARY KEY,room_id TEXT NOT NULL,sender TEXT NOT NULL,target TEXT NOT NULL,expires INTEGER NOT NULL,status TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS poker_events(id INTEGER PRIMARY KEY,room_id TEXT NOT NULL,version INTEGER NOT NULL,actor TEXT,action TEXT NOT NULL,at INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS poker_notices(bar_id TEXT PRIMARY KEY,notice_id TEXT NOT NULL,room_id TEXT NOT NULL,hand INTEGER NOT NULL,result TEXT NOT NULL);`);
+    CREATE TABLE IF NOT EXISTS poker_notices(bar_id TEXT PRIMARY KEY,notice_id TEXT NOT NULL,room_id TEXT NOT NULL,hand INTEGER NOT NULL,result TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS poker_waitlist(room_id TEXT NOT NULL,bar_id TEXT NOT NULL,created INTEGER NOT NULL,notified INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(room_id,bar_id));`);
   // poker_members already exists on any already-deployed volume — the
   // CREATE TABLE above only helps a genuinely fresh database (CLAUDE.md's
   // migration rule). This is purely a display flag this round (phase 7):

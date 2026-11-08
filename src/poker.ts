@@ -35,6 +35,12 @@ function save(db:Database.Database,r:Row,s:PokerState,actor:string|null,action:s
   for(const p of s.players)if(!p.id.startsWith('npc:'))db.prepare('INSERT INTO poker_wallets VALUES(?,?,?) ON CONFLICT(room_id,bar_id) DO UPDATE SET stack=excluded.stack').run(r.id,p.id,p.stack);
   db.prepare('INSERT INTO poker_events(room_id,version,actor,action,at) VALUES(?,?,?,?,?)').run(r.id,r.version+1,actor,action,Date.now());
   logAction(db,{action:`poker_${action}`,outcome:'ok',verified:actor!==null,actor:actor?{kind:'bar',id:actor}:null,room:{code:r.id},detail:{hand:s.hand,phase:s.phase,actingPlayer:subject??actor??'server',result:s.phase==='showdown'?s.result:null}});
+  // 2026-11-07 correction (user's own explicit instruction) — mirrors
+  // src/blackjack.ts's identical save()-driven notification exactly: the
+  // instant this save lands the table back in waiting/showdown (the only
+  // phases addHuman will now actually seat someone new in), notify
+  // everyone waiting for THIS room.
+  if(s.phase==='waiting'||s.phase==='showdown')db.prepare('UPDATE poker_waitlist SET notified=1 WHERE room_id=?').run(r.id);
 }
 function membership(db:Database.Database,id:string){return db.prepare('SELECT room_id,seat FROM poker_members WHERE bar_id=? AND active=1').get(id) as {room_id:string;seat:number}|undefined;}
 function ensureFree(db:Database.Database,id:string,roomId?:string):void {
@@ -49,6 +55,15 @@ function ensureFree(db:Database.Database,id:string,roomId?:string):void {
 function seated(db:Database.Database,r:Row,id:string):void {
   if(membership(db,id)?.room_id!==r.id)throw new RoomError('You are not seated at this poker table','not_seated',403);
 }
+// 2026-11-07 correction (user's own explicit instruction): a hand in
+// progress refuses ANY new seating attempt outright — even one that
+// would land on a genuinely empty seat — rather than silently seating
+// the newcomer as `waiting:true` for the next deal (the previous
+// behavior spec/poker.test.ts used to pin down). Only waiting/showdown
+// (the two moments between hands) ever seat anyone new; mirrors
+// src/blackjack.ts's identical correction exactly. A player ALREADY
+// seated who's merely resuming (existing!==undefined) is unaffected —
+// that's not a new seating attempt, just the same seat continuing.
 function addHuman(db:Database.Database,r:Row,s:PokerState,id:string,preferred?:number):void {
   ensureFree(db,id,r.id);
   let existing=s.players.find(p=>p.id===id);
@@ -57,9 +72,16 @@ function addHuman(db:Database.Database,r:Row,s:PokerState,id:string,preferred?:n
   }
   if(existing){existing.leaving=false;}
   else {
-    const seats=new Set(s.players.filter(p=>!p.leaving||s.phase!=='waiting'&&s.phase!=='showdown').map(p=>p.seat));
+    if(s.phase!=='waiting'&&s.phase!=='showdown'){
+      joinPokerWaitlist(db,r.id,id);
+      throw new RoomError('Wait for this hand to end before joining','hand_in_progress',409);
+    }
+    const seats=new Set(s.players.filter(p=>!p.leaving).map(p=>p.seat));
     const seat=typeof preferred==='number'&&Number.isInteger(preferred)&&preferred>=0&&preferred<5&&!seats.has(preferred)?preferred:[0,1,2,3,4].find(n=>!seats.has(n));
-    if(seat===undefined)throw new RoomError('This table has five occupied seats; try after the current hand','table_full',409);
+    if(seat===undefined){
+      joinPokerWaitlist(db,r.id,id);
+      throw new RoomError('This table has five occupied seats. You will be notified when a seat opens.','table_full',409);
+    }
     const profile=db.prepare('SELECT nickname FROM bar_players WHERE id=?').get(id) as {nickname:string};
     const wallet=db.prepare('SELECT stack FROM poker_wallets WHERE room_id=? AND bar_id=?').get(r.id,id) as {stack:number}|undefined;
     s.players.push(newPokerPlayer(id,profile.nickname,seat,wallet?.stack===0?500:wallet?.stack??500));
@@ -67,23 +89,51 @@ function addHuman(db:Database.Database,r:Row,s:PokerState,id:string,preferred?:n
   const p=s.players.find(p=>p.id===id)!;
   db.prepare('INSERT INTO poker_members(room_id,bar_id,seat,active) VALUES(?,?,?,1) ON CONFLICT(room_id,bar_id) DO UPDATE SET active=1,seat=excluded.seat').run(r.id,id,p.seat);
   db.prepare('INSERT INTO poker_presence VALUES(?,?) ON CONFLICT(bar_id) DO UPDATE SET seen=excluded.seen').run(id,Date.now());
+  db.prepare('DELETE FROM poker_waitlist WHERE room_id=? AND bar_id=?').run(r.id,id);
+}
+// ---- Waitlist — see src/domino.ts's own joinDominoWaitlist comment for
+// the shared reasoning, and src/blackjack.ts's own joinBlackjackWaitlist
+// for the identical one-persistent-room-at-a-time shape poker's own
+// single shared texas-1 table already has. ----
+function joinPokerWaitlist(db:Database.Database,roomId:string,id:string):void {
+  db.prepare('INSERT INTO poker_waitlist(room_id,bar_id,created,notified) VALUES(?,?,?,0) ON CONFLICT(room_id,bar_id) DO UPDATE SET created=excluded.created,notified=0').run(roomId,id,Date.now());
 }
 export function openPoker(db:Database.Database,id:string,secret:string,mode:string,preferred?:number):string {
   auth(db,id,secret);if(!['online','offline'].includes(mode))throw new RoomError('Unknown poker mode','bad_request',400);
-  return transact(db,()=>{
+  // addHuman's own mid-hand/full-table refusals (above) need to record a
+  // waitlist entry that survives even though the overall call still ends
+  // in a thrown error — see src/domino.ts's openDomino for the full
+  // reasoning (a throw inside transact()'s callback rolls back
+  // everything in it, including a waitlist insert made just before the
+  // throw). The callback below returns a result OR a RoomError value
+  // instead of letting addHuman's own throw propagate out of it; only
+  // once that return has actually committed does this function decide
+  // whether to return the room id or throw the error.
+  const outcome=transact(db,():string|RoomError=>{
     const old=membership(db,id);if(old)return old.room_id;
-    ensureFree(db,id);
+    try{ensureFree(db,id);}catch(e){return e as RoomError;}
+    // 2026-11-07 correction (user's own explicit instruction): the
+    // previous "a second person must be invited by a seated friend"
+    // gate (invite_required) is removed — sitting at the shared online
+    // table is now open to anyone, exactly like blackjack and dominoes.
+    // invitePoker/respondPoker still exist unchanged for a seated player
+    // who wants to specifically notify an absent friend, but are no
+    // longer the ONLY way in once the first seat is taken.
     let r=mode==='online'?db.prepare("SELECT * FROM poker_rooms WHERE mode='online' AND closed=0 AND table_id='texas-1'").get() as Row|undefined:undefined;
-    if(r)throw new RoomError('This private table is occupied. Ask a seated friend for an invitation','invite_required',403);
-    r={id:randomUUID(),mode:mode as Row['mode'],table_id:mode==='online'?'texas-1':'texas-npc-1',host:id,state_json:JSON.stringify(newPokerState()),version:0,closed:0};
-    db.prepare('INSERT INTO poker_rooms(id,mode,table_id,host,state_json) VALUES(?,?,?,?,?)').run(r.id,r.mode,r.table_id,id,r.state_json);
-    const s=state(r);addHuman(db,r,s,id,preferred);
+    if(!r){
+      r={id:randomUUID(),mode:mode as Row['mode'],table_id:mode==='online'?'texas-1':'texas-npc-1',host:id,state_json:JSON.stringify(newPokerState()),version:0,closed:0};
+      db.prepare('INSERT INTO poker_rooms(id,mode,table_id,host,state_json) VALUES(?,?,?,?,?)').run(r.id,r.mode,r.table_id,id,r.state_json);
+    }
+    const s=state(r);
+    try{addHuman(db,r,s,id,preferred);}catch(e){return e as RoomError;}
     if(mode==='offline'){
       let n=0;for(let seat=0;seat<5;seat++)if(seat!==s.players[0].seat){s.players.push(newPokerPlayer(`npc:${n}`,['Morgan','Charles','Sadie','John'][n],seat));n++;}
       startPokerHand(s);
     }
     save(db,r,s,id,'open');return r.id;
   });
+  if(outcome instanceof RoomError)throw outcome;
+  return outcome;
 }
 export function leavePoker(db:Database.Database,id:string,secret:string):void {
   auth(db,id,secret);
@@ -152,6 +202,16 @@ export function setPokerAway(db:Database.Database,id:string,secret:string,away:b
     logAction(db,{action:'poker_away',outcome:'ok',verified:true,actor:{kind:'bar',id},room:{code:m.room_id},detail:{away}});
   });
 }
+/** This identity's own pending waitlist entries — mirrors dominoes'
+ * dominoWaitlistFor and blackjack's blackjackWaitlistFor exactly. */
+function pokerWaitlistFor(db:Database.Database,id:string){
+  return db.prepare('SELECT room_id AS roomId,notified FROM poker_waitlist WHERE bar_id=?').all(id) as {roomId:string;notified:number}[];
+}
+/** Explicitly gives up a pending wait for a specific room. */
+export function leavePokerWaitlist(db:Database.Database,id:string,secret:string,roomId:string):void {
+  auth(db,id,secret);
+  db.prepare('DELETE FROM poker_waitlist WHERE room_id=? AND bar_id=?').run(roomId,id);
+}
 export function pokerMe(db:Database.Database,id:string,secret:string){
   auth(db,id,secret);barHeartbeat(db,id,secret);
   db.prepare('INSERT INTO poker_presence VALUES(?,?) ON CONFLICT(bar_id) DO UPDATE SET seen=excluded.seen').run(id,Date.now());
@@ -159,7 +219,8 @@ export function pokerMe(db:Database.Database,id:string,secret:string){
   if(m){reconcileBankruptcy(db,m.room_id);m=membership(db,id);}
   const invites=db.prepare(`SELECT i.id,i.room_id AS roomId,b.nickname AS sender,i.expires FROM poker_invites i JOIN bar_players b ON b.id=i.sender JOIN poker_rooms r ON r.id=i.room_id WHERE i.target=? AND i.status='pending' AND i.expires>? AND r.closed=0 ORDER BY i.expires DESC LIMIT 5`).all(id,Date.now());
   const notice=db.prepare('SELECT notice_id AS id,room_id AS roomId,hand,result FROM poker_notices WHERE bar_id=?').get(id) as {id:string;roomId:string;hand:number;result:string}|undefined;
-  return {room:m?pokerView(db,id,m.room_id):null,invites,departure:notice?{...notice,reason:'bankrupt' as const}:null};
+  const waitlist=pokerWaitlistFor(db,id).map(w=>({roomId:w.roomId,notified:!!w.notified}));
+  return {room:m?pokerView(db,id,m.room_id):null,invites,waitlist,departure:notice?{...notice,reason:'bankrupt' as const}:null};
 }
 export function acknowledgePokerExit(db:Database.Database,id:string,secret:string,noticeId:string):void {
   auth(db,id,secret);
@@ -198,14 +259,22 @@ export function invitePoker(db:Database.Database,id:string,secret:string,roomId:
 }
 export function respondPoker(db:Database.Database,id:string,secret:string,inviteId:string,join:boolean):string|null {
   auth(db,id,secret);
-  return transact(db,()=>{
+  // Same reasoning as openPoker above: accepting an invitation into a
+  // hand that's now mid-play (or a table that filled up while the
+  // invite sat pending) still needs addHuman's own waitlist write to
+  // survive the thrown refusal, so this returns a result/RoomError value
+  // rather than letting addHuman's throw propagate out of the
+  // transaction directly.
+  const outcome=transact(db,():(string|null)|RoomError=>{
     const invite=db.prepare('SELECT * FROM poker_invites WHERE id=? AND target=?').get(inviteId,id) as {room_id:string;expires:number;status:string}|undefined;
-    if(!invite||invite.expires<Date.now()||invite.status!=='pending')throw new RoomError('This invitation has expired or was already handled','invite_expired',410);
+    if(!invite||invite.expires<Date.now()||invite.status!=='pending')return new RoomError('This invitation has expired or was already handled','invite_expired',410);
     const r=getRoom(db,invite.room_id),s=state(r);
-    if(join)addHuman(db,r,s,id);
+    if(join)try{addHuman(db,r,s,id);}catch(e){return e as RoomError;}
     db.prepare('UPDATE poker_invites SET status=? WHERE id=?').run(join?'accepted':'declined',inviteId);
     save(db,r,s,id,join?'join':'decline');return join?r.id:null;
   });
+  if(outcome instanceof RoomError)throw outcome;
+  return outcome;
 }
 export function tickPoker(db:Database.Database):void {
   const now=Date.now();

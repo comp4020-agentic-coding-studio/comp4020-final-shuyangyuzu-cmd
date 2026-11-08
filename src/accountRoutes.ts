@@ -100,6 +100,34 @@ function revokeCharacterCredentials(db: Database.Database, barPlayerId: string):
 }
 
 export function registerAccounts(app: Hono, db: Database.Database): void {
+  // 2026-11-08 (the user's own explicit instruction): a real-time
+  // "is this username available" check, called as the user types —
+  // deliberately GET + query param (no CSRF-relevant mutation, nothing
+  // to forge: this reveals only whether a username string the caller
+  // already knows is taken, the same information register()'s own
+  // 409 already leaks on an actual attempt) and requireSameOrigin is
+  // skipped on purpose for the same reason login/register's own
+  // enumeration-safety concerns don't apply equivalently here — a
+  // cross-site page CAN already learn "is this username taken" one
+  // guess at a time via a real registration attempt, so this adds no
+  // new capability, only a faster/nicer path to the same fact. No
+  // mutation happens here at all; `accounts.register` itself still
+  // re-checks uniqueness server-side inside its own transaction at
+  // submit time, which is what actually prevents a race between two
+  // people registering the identical name at once — this endpoint is
+  // purely advisory, never authoritative.
+  app.get("/api/accounts/username-available", async (c) => {
+    const username = c.req.query("username") ?? "";
+    if (username.length > 64) {
+      // A pathological query string is refused outright rather than fed
+      // into validateUsername (which already rejects anything over 24
+      // chars with a normal error) — this is just cheap input-size
+      // hygiene before that, not a second copy of that rule.
+      return c.json({ status: "invalid", message: "username must be 3-24 characters" });
+    }
+    return c.json(accounts.checkUsernameAvailability(db, username));
+  });
+
   app.post("/api/accounts/register", async (c) => {
     requireSameOrigin(c);
     const body = (await c.req.json().catch(() => ({}))) as {

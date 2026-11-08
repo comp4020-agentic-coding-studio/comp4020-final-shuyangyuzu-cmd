@@ -108,13 +108,53 @@ it('decline does not join and duplicate acceptance cannot create another seat',(
   const accepted=inviteJoin(a,b,r);expect(()=>poker.respondPoker(db,b.playerId,b.sessionSecret,accepted,true)).toThrow();
   expect(poker.pokerView(db,a.playerId,r).players).toHaveLength(2);
 });
-it('joins during a hand without receiving cards until the next deal; stale actions are refused',()=>{
+// 2026-11-07 correction (user's own explicit instruction): a hand in
+// progress now refuses ANY new seating attempt outright — including an
+// accepted invitation — rather than silently seating the newcomer as
+// `waiting:true` for the next deal (the previous behavior this test used
+// to pin down). The refused patron is registered on a waitlist and
+// notified the instant the hand actually ends.
+it('refuses a new arrival mid-hand (even via invite), waitlists them, and notifies once the hand ends; stale actions are refused',()=>{
   const a=patron('Alice'),b=patron('Bob'),c=patron('Carol'),r=poker.openPoker(db,a.playerId,a.sessionSecret,'online');inviteJoin(a,b,r);
   let v=poker.pokerView(db,a.playerId,r);poker.actPoker(db,a.playerId,a.sessionSecret,r,v.version,'deal');
-  inviteJoin(a,c,r);v=poker.pokerView(db,c.playerId,r);
-  expect(v.players.find(p=>p.id===c.playerId)).toMatchObject({stack:500,waiting:true,hole:[]});
+  poker.pokerMe(db,c.playerId,c.sessionSecret);poker.invitePoker(db,a.playerId,a.sessionSecret,r,c.playerId);
+  const invite=poker.pokerMe(db,c.playerId,c.sessionSecret).invites[0] as {id:string};
+  expect(()=>poker.respondPoker(db,c.playerId,c.sessionSecret,invite.id,true)).toThrow(/hand/);
+  let me=poker.pokerMe(db,c.playerId,c.sessionSecret);
+  expect(me.room).toBeNull();
+  expect(me.waitlist).toEqual([{roomId:r,notified:false}]);
   expect(()=>poker.actPoker(db,a.playerId,a.sessionSecret,r,0,'fold')).toThrow('changed');
   expect(()=>poker.pokerView(db,patron('Unseated').playerId,r)).toThrow();
+  // Fold the hand (by whoever actually has the turn) to settle it back to
+  // waiting/showdown, which is what fires the waitlist notification
+  // (save()'s own phase check).
+  v=poker.pokerView(db,a.playerId,r);
+  const actor=v.actor===a.playerId?a:b;
+  poker.actPoker(db,actor.playerId,actor.sessionSecret,r,v.version,'fold');
+  me=poker.pokerMe(db,c.playerId,c.sessionSecret);
+  expect(me.waitlist).toEqual([{roomId:r,notified:true}]);
+  // Once notified, the waitlisted patron can now actually sit.
+  poker.openPoker(db,c.playerId,c.sessionSecret,'online');
+  expect(poker.pokerMe(db,c.playerId,c.sessionSecret).waitlist).toEqual([]);
+});
+it('refuses joining a five-seat table, waitlists the refused patron, and notifies them once a seat opens',()=>{
+  const a=patron('Alice'),r=poker.openPoker(db,a.playerId,a.sessionSecret,'online');
+  const guests=Array.from({length:4},(_,i)=>patron(`Guest${i}`));
+  for(const g of guests)inviteJoin(a,g,r);
+  expect(poker.pokerView(db,a.playerId,r).players).toHaveLength(5);
+  const sixth=patron('Sixth');
+  expect(()=>poker.openPoker(db,sixth.playerId,sixth.sessionSecret,'online')).toThrow(/five|occupied/i);
+  expect(poker.pokerMe(db,sixth.playerId,sixth.sessionSecret).waitlist).toEqual([{roomId:r,notified:false}]);
+  poker.leavePoker(db,guests[0].playerId,guests[0].sessionSecret);
+  expect(poker.pokerMe(db,sixth.playerId,sixth.sessionSecret).waitlist).toEqual([{roomId:r,notified:true}]);
+});
+it('lets anyone sit directly at the shared online table with no invitation, once a seat is free',()=>{
+  const a=patron('Alice'),b=patron('Bob'),r=poker.openPoker(db,a.playerId,a.sessionSecret,'online');
+  // 2026-11-07 correction: the previous invite_required gate for a
+  // second seated player is removed — direct, uninvited open seating now
+  // matches blackjack and dominoes.
+  expect(poker.openPoker(db,b.playerId,b.sessionSecret,'online')).toBe(r);
+  expect(poker.pokerView(db,a.playerId,r).players).toHaveLength(2);
 });
 it('preserves the bankroll on leave/rejoin and transfers host without resetting the hand',()=>{
   const a=patron('Alice'),b=patron('Bob'),r=poker.openPoker(db,a.playerId,a.sessionSecret,'online');inviteJoin(a,b,r);

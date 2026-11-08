@@ -9,7 +9,18 @@
 // furniture rectangle, and inside the grid.
 
 export const GRID_COLS = 40;
-export const GRID_ROWS = 24;
+// 2026-11-08 correction (user's own explicit instruction, with a real
+// screenshot showing the problem): both game-table rows below moved down
+// by 2 tiles to open a genuine walking corridor between the dining row's
+// own south seats and the online row's own nearest chair — GRID_ROWS
+// grows by 2 to make room at the map's own bottom edge rather than
+// compressing the NPC row's own gap from the online row (CLAUDE.md:
+// "必要时扩展地图底部" — extend the map's bottom when needed, not shrink
+// an already-correct gap elsewhere). Every consumer of this constant
+// (inBounds, defaultSpawn, bar.ts's own spawn-search radius) reads it
+// directly rather than hardcoding 24, so this one change propagates
+// correctly everywhere a map boundary matters.
+export const GRID_ROWS = 26;
 export const TILE_SIZE = 32;
 
 export type FurnitureKind = "counter" | "stool" | "dining_table" | "game_table" | "restroom" | "cabinet_wall" | "plant";
@@ -67,10 +78,25 @@ const CORE_FURNITURE: readonly Furniture[] = [
   // constrain this (their own seat is now the stool's own walkable tile,
   // not a tile south of it), so unlike an earlier layout revision, these
   // four columns don't need to dodge a stool column.
-  { id: "dining-a", kind: "dining_table", x: 1, y: 4, w: 2, h: 2, label: "Table" },
-  { id: "dining-b", kind: "dining_table", x: 6, y: 4, w: 2, h: 2, label: "Table" },
-  { id: "dining-c", kind: "dining_table", x: 12, y: 4, w: 2, h: 2, label: "Table" },
-  { id: "dining-d", kind: "dining_table", x: 17, y: 4, w: 2, h: 2, label: "Table" },
+  //
+  // 2026-11-07 correction (user's own explicit instruction): y was 4,
+  // which put a dining table's own north seat directly adjacent to the
+  // stool row (effective y8 stool, y9 north seat — zero clear floor
+  // tiles between the two) — a patron seated at a stool and another
+  // seated at the nearest dining chair left no tile anyone else could
+  // walk through between them, confirmed directly by coordinate
+  // computation before this change (dump_layout-style check, not
+  // eyeballed from a screenshot). y5 opens a genuine one-tile floor gap
+  // (effective y9) between the stool row and the dining north-seat row,
+  // confirmed clear of every other fixture (back-bar ends at y6, the
+  // counter is y7, stools are y8) before and after this shift, and
+  // confirmed not to newly collide with anything below (game-table rows
+  // start at y15, still a full clear row away from the new south seat at
+  // y13).
+  { id: "dining-a", kind: "dining_table", x: 1, y: 5, w: 2, h: 2, label: "Table" },
+  { id: "dining-b", kind: "dining_table", x: 6, y: 5, w: 2, h: 2, label: "Table" },
+  { id: "dining-c", kind: "dining_table", x: 12, y: 5, w: 2, h: 2, label: "Table" },
+  { id: "dining-d", kind: "dining_table", x: 17, y: 5, w: 2, h: 2, label: "Table" },
   // Nine tables, two labelled rows (Crit 9 phase 8's product-direction-
   // update): online (shared, host-approved — see src/rooms.ts's
   // pendingRequests) on top, a visitor's own private NPC game below.
@@ -101,11 +127,24 @@ const CORE_FURNITURE: readonly Furniture[] = [
   // reason, which leaves at least 1 clear tile beside every chair ring
   // for every table-shape pairing (round or square), verified by direct
   // coordinate computation before changing this.
+  //
+  // 2026-11-08 correction (user's own explicit instruction, with a real
+  // screenshot): y was 9, which — after the 2026-11-07 dining-table shift
+  // moved the dining row's own south seats one tile further south without
+  // a matching shift here — left ZERO clear floor tiles between a dining
+  // chair and the online row's own nearest chair (the GAME_CHAIRS north-
+  // chair comment below used to claim this gap was "one full clear row",
+  // which this same round found was no longer true and has been
+  // corrected). y:11 (a +2 shift from the original 9) reopens a genuine
+  // two-tile clear corridor, confirmed by direct coordinate computation
+  // against the dining row's actual post-shift seat positions before
+  // changing this, and reconfirmed by a real pathed walk through it with
+  // both flanking seats occupied.
   {
     id: "vegas-1",
     kind: "game_table",
     x: 1,
-    y: 9,
+    y: 11,
     w: 2,
     h: 2,
     label: "Vegas Online #1",
@@ -117,7 +156,7 @@ const CORE_FURNITURE: readonly Furniture[] = [
     id: "vegas-2",
     kind: "game_table",
     x: 6,
-    y: 9,
+    y: 11,
     w: 2,
     h: 2,
     label: "Vegas Online #2",
@@ -129,7 +168,7 @@ const CORE_FURNITURE: readonly Furniture[] = [
     id: "texas-1",
     kind: "game_table",
     x: 12,
-    y: 9,
+    y: 11,
     w: 2,
     h: 2,
     label: "Texas Hold'em Online",
@@ -141,7 +180,7 @@ const CORE_FURNITURE: readonly Furniture[] = [
     id: "dominoes-1",
     kind: "game_table",
     x: 17,
-    y: 9,
+    y: 11,
     w: 2,
     h: 2,
     label: "All Fives Online",
@@ -153,7 +192,7 @@ const CORE_FURNITURE: readonly Furniture[] = [
     id: "blackjack-1",
     kind: "game_table",
     x: 22,
-    y: 9,
+    y: 11,
     w: 2,
     h: 2,
     label: "Blackjack Online",
@@ -161,12 +200,16 @@ const CORE_FURNITURE: readonly Furniture[] = [
     available: true,
     tableMode: "online",
   },
-  // The NPC row has three clear walkway rows below the online tables.
+  // The NPC row has three clear walkway rows below the online tables —
+  // shifted by the same +2 as the online row above, preserving the exact
+  // same gap between the two rows (GRID_ROWS grew to make room at the
+  // map's own bottom edge, confirmed by direct coordinate computation
+  // that the NPC row's own south-most chair still lands in-bounds).
   {
     id: "vegas-npc-1",
     kind: "game_table",
     x: 1,
-    y: 14,
+    y: 16,
     w: 2,
     h: 2,
     label: "Vegas Offline",
@@ -178,7 +221,7 @@ const CORE_FURNITURE: readonly Furniture[] = [
     id: "texas-npc-1",
     kind: "game_table",
     x: 6,
-    y: 14,
+    y: 16,
     w: 2,
     h: 2,
     label: "Texas Hold'em Offline",
@@ -190,7 +233,7 @@ const CORE_FURNITURE: readonly Furniture[] = [
     id: "dominoes-npc-1",
     kind: "game_table",
     x: 12,
-    y: 14,
+    y: 16,
     w: 2,
     h: 2,
     label: "All Fives Offline",
@@ -202,7 +245,7 @@ const CORE_FURNITURE: readonly Furniture[] = [
     id: "blackjack-npc-1",
     kind: "game_table",
     x: 17,
-    y: 14,
+    y: 16,
     w: 2,
     h: 2,
     label: "Blackjack Offline",
@@ -273,12 +316,19 @@ export const GAME_TABLES: readonly Furniture[] = FURNITURE.filter((f) => f.kind 
 // src/rooms.ts's MAX_PLAYERS comment), so 5 seats is the real base-game
 // max, not an extension past it. North was chosen because the other four
 // chairs already occupy both the west and east sides of both table rows,
-// and every table's own north tile is verified clear: dining tables sit a
-// full row further north (y - 1 here is still one clear row below the
-// nearest dining table's own south-side seat), and no other chair or
-// furniture rectangle covers it. Checked against every real table
-// (vegas-1/2, vegas-npc-1, and all 6 reserved slots, for layout
-// consistency) by direct coordinate computation before adding this.
+// and every table's own north tile is verified clear of every other
+// chair/furniture rectangle. The claim this comment originally made —
+// "dining tables sit a full row further north, so this is still one
+// clear row below the nearest dining seat" — stopped being true the
+// instant an EARLIER round moved the dining row's own south seats one
+// tile further south without a matching shift here (found via this same
+// 2026-11-08 round's own direct coordinate check, confirmed by a real
+// pathing failure before being fixed): the two rows had drifted to zero
+// clear tiles apart. The 2026-11-08 +2 shift to both GAME_TABLES rows
+// (see the online row's own comment above) restores a genuine multi-tile
+// gap, reconfirmed the same way — by direct coordinate computation
+// against the real, current dining-row positions, not by re-asserting
+// the original (and by-then-stale) claim.
 export const GAME_CHAIRS = GAME_TABLES.flatMap((f) => f.gameType === "vegas"
   ? ["red", "blue", "green", "yellow", "purple"].map((color, i) => {
     const angle = (-90 + i * 72) * Math.PI / 180;

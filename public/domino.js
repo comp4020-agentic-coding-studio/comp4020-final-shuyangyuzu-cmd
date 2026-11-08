@@ -24,7 +24,7 @@ export function layoutBones(board) {
 }
 
 export function createDominoUI({el,navigate}) {
-  let mounted=false,busy=false,fetching=false,room=null,selected=null,error='',generation=0,lastSignature='';
+  let mounted=false,busy=false,fetching=false,room=null,selected=null,error='',generation=0,lastSignature='',waitlist=[];
   const saved=()=>{try{return JSON.parse(localStorage.getItem('vegas:bar:session')||'null');}catch{return null;}};
   const resume=el('aside',{class:'domino-resume',hidden:true});document.body.append(resume);
   async function api(action,body={}){
@@ -45,7 +45,7 @@ export function createDominoUI({el,navigate}) {
       el('p',{},'The first double is the spinner. Once its two main sides have been played on, its top and bottom become playable. Unused extra arms add no points; later doubles do not branch.'),
       el('p',{},'If you have no legal move, draw one tile at a time until you can play. Pass only when the stock is empty. Two consecutive passes end a blocked round.'),
       el('p',{},'Empty your hand to earn the opponent’s remaining pips, rounded to the nearest five. In a blocked round the lower hand earns the rounded difference; a tie awards nothing. These are our stated house scoring choices. The host deals the next round; totals carry over.'),
-      el('p',{},'Online: four chairs form two independent facing pairs. The first seated player approves their opponent. Leaving ends only your pair’s match; returning to the bar keeps your seat for up to three minutes. Offline: your own private game against one NPC.'),
+      el('p',{},'Online: four chairs form two independent facing pairs — sit at an empty seat to join immediately. If a pair is occupied or already playing, you join a waitlist for that pair and are notified the moment a seat opens. Leaving ends only your pair’s match; returning to the bar keeps your seat for up to three minutes. Offline: your own private game against one NPC.'),
       el('a',{href:'https://mobilityware.helpshift.com/hc/en/58-dominoes/faq/3806-basic-rules/',target:'_blank',rel:'noopener'},'Rule reference · variant choices above'),
       el('button',{onclick:()=>d.close()},'Close rules')]);d.addEventListener('close',()=>d.remove());document.body.append(d);d.showModal();
   }
@@ -82,11 +82,33 @@ export function createDominoUI({el,navigate}) {
   function draw(){
     if(!mounted)return;document.body.classList.add('table-mode');
     const root=document.getElementById('app');
-    const header=el('header',{class:'domino-header'},[el('div',{},[el('small',{},'LAS VEGAS · THE DOMINO TABLE'),el('h1',{},'All Fives')]),el('button',{onclick:rules,'aria-label':'Game rules'},'▤ Rules'),el('button',{onclick:()=>navigate('/')},'Back to the bar')]);
-    if(!room){root.replaceChildren(el('main',{class:'domino-page'},[header,el('p',{role:'status'},error||'Waiting for the host to approve your seat. If the match has ended, choose another seat in the bar.'),el('button',{onclick:async()=>{await perform('leave');navigate('/');}},'Cancel / return to bar')]));return;}
+    const myOwnPlayer=room?.players?.find(p=>p.id===saved()?.playerId);
+    const header=el('header',{class:'domino-header'},[el('div',{},[el('small',{},'LAS VEGAS · THE DOMINO TABLE'),el('h1',{},'All Fives')]),el('button',{onclick:rules,'aria-label':'Game rules'},'▤ Rules'),
+      // Explicit, display-only away toggle (2026-11-08, mirrors
+      // poker.js's own identical button) — distinct from "Leave match"
+      // below: away keeps the seat reserved (nobody else can take it)
+      // and is visible to the opponent, but never ends the match.
+      ...(room&&myOwnPlayer?[el('button',{onclick:()=>perform('away',{away:!myOwnPlayer.away})},myOwnPlayer.away?"I'm back":"I'm away")]:[]),
+      el('button',{onclick:()=>navigate('/')},'Back to the bar')]);
+    if(!room){
+      // 2026-11-07: no more host-approval step, so a session with no room
+      // can only mean either a waitlist entry for a currently-occupied
+      // lane (shown below, with a live "it's your turn" notice once
+      // notifyDominoWaitlist fires) or a genuine error.
+      const waiting=waitlist.find(w=>!w.notified), ready=waitlist.find(w=>w.notified);
+      const body=ready
+        ? [el('p',{role:'status',class:'domino-waitlist-ready'},`A seat at pair ${ready.lane+1} is free now.`),
+           el('button',{onclick:()=>{const c=ready.lane*2;open('online',['red','blue','green','yellow'][c]);}},'Sit down now'),
+           el('button',{class:'secondary',onclick:()=>perform('leaveWaitlist',{lane:ready.lane})},'Never mind')]
+        : waiting
+        ? [el('p',{role:'status'},`Waiting for a seat to open at pair ${waiting.lane+1}…`),
+           el('button',{class:'secondary',onclick:()=>perform('leaveWaitlist',{lane:waiting.lane})},'Stop waiting')]
+        : [el('p',{role:'status'},error||'Choose another seat in the bar.')];
+      root.replaceChildren(el('main',{class:'domino-page'},[header,...body,el('button',{onclick:()=>navigate('/')},'Back to the bar')]));return;
+    }
     const me=saved()?.playerId,turn=room.turn===room.seat&&room.phase==='playing';
     const opponent=room.players[1-room.seat],own=room.players[room.seat];
-    const score=p=>el('div',{class:`domino-player ${p.seat===room.turn?'active':''}`},[el('strong',{},p.nickname),el('span',{},`${p.score} / ${room.target} points · ${p.count} tiles`)]);
+    const score=p=>el('div',{class:`domino-player ${p.seat===room.turn?'active':''}`},[el('strong',{},p.nickname+(p.away?' · Away':'')),el('span',{},`${p.score} / ${room.target} points · ${p.count} tiles`)]);
     const action=(type,extra={})=>perform('act',{roomId:room.id,version:room.version,type,...extra});
     const controls=el('div',{class:'domino-controls'});
     if(turn){
@@ -96,8 +118,7 @@ export function createDominoUI({el,navigate}) {
     }
     if(room.host===me&&['waiting','round_end'].includes(room.phase))controls.append(el('button',{disabled:busy||room.players.some(p=>!p.id&&!p.npc),onclick:()=>action(room.phase==='waiting'?'start':'next')},room.phase==='waiting'?'Start match':'Deal next round'));
     if(room.phase==='finished')controls.append(el('h2',{},`${room.players[room.winner]?.nickname||'Match'} wins!`));
-    const requests=el('section',{},room.pending.map(p=>el('div',{class:'domino-request'},[el('span',{},`${p.nickname} wants to sit opposite you.`),el('button',{disabled:busy,onclick:()=>perform('respond',{roomId:room.id,target:p.id,accept:true})},'Accept'),el('button',{disabled:busy,onclick:()=>perform('respond',{roomId:room.id,target:p.id,accept:false})},'Decline')])));
-    root.replaceChildren(el('main',{class:'domino-page'},[header,el('p',{class:'domino-meta'},`${room.mode==='online'?'Online':'Offline'} · Pair ${room.lane+1} · Round ${room.round} · Ends total ${room.total}`),requests,score(opponent),el('div',{class:'domino-opponent','aria-label':`${opponent.count} hidden tiles`},Array.from({length:opponent.count},()=>el('span',{class:'domino-back'},'◆'))),boardView(),score(own),el('div',{class:'domino-hand'},room.hand.map(t=>bone(t,{disabled:!turn||busy||!room.legal.some(m=>tileKey(m.tile)===tileKey(t)),class:`domino-bone ${selected&&tileKey(t)===tileKey(selected)?'selected':''}`,onclick:()=>{selected=t;draw();}}))),controls,el('p',{role:'status'},error||room.result),el('button',{class:'secondary',onclick:()=>{
+    root.replaceChildren(el('main',{class:'domino-page'},[header,el('p',{class:'domino-meta'},`${room.mode==='online'?'Online':'Offline'} · Pair ${room.lane+1} · Round ${room.round} · Ends total ${room.total}`),score(opponent),el('div',{class:'domino-opponent','aria-label':`${opponent.count} hidden tiles`},Array.from({length:opponent.count},()=>el('span',{class:'domino-back'},'◆'))),boardView(),score(own),el('div',{class:'domino-hand'},room.hand.map(t=>bone(t,{disabled:!turn||busy||!room.legal.some(m=>tileKey(m.tile)===tileKey(t)),class:`domino-bone ${selected&&tileKey(t)===tileKey(selected)?'selected':''}`,onclick:()=>{selected=t;draw();}}))),controls,el('p',{role:'status'},error||room.result),el('button',{class:'secondary',onclick:()=>{
       const d=el('dialog',{class:'rules-dialog'},[el('h2',{},'Leave this match?'),el('p',{},'Leaving ends this match for both players. The other pair at this table is unaffected.'),el('button',{onclick:()=>d.close()},'Cancel'),el('button',{onclick:async()=>{d.close();await perform('leave');if(!error)navigate('/');}},'Leave match')]);d.addEventListener('close',()=>d.remove());document.body.append(d);d.showModal();
     }},'Leave match')]));
   }
@@ -105,8 +126,7 @@ export function createDominoUI({el,navigate}) {
     const identity=saved();if(fetching||!identity)return;fetching=true;const g=generation,id=identity.playerId;
     try{
       const data=await api('me',{active:mounted});if(g!==generation||saved()?.playerId!==id)return;
-      room=data.room;
-      const latest=data.requests[0];if(!room&&latest?.status==='declined')error='The host declined your request. Choose another pair.';
+      room=data.room;waitlist=data.waitlist;
       const signature=JSON.stringify(data);
       if(mounted&&signature!==lastSignature){lastSignature=signature;draw();}
       resume.hidden=mounted||!room;
@@ -118,7 +138,16 @@ export function createDominoUI({el,navigate}) {
     if(chair<0){
       const d=el('dialog',{class:'rules-dialog'},[el('h2',{},'Choose a facing pair'),el('p',{},'Seats 1–2 play each other; seats 3–4 form a separate match.'),...[0,1,2,3].map(i=>el('button',{onclick:()=>{d.close();open(mode,['red','blue','green','yellow'][i]);}},`Pair ${Math.floor(i/2)+1} · seat ${i%2+1}`)),el('button',{onclick:()=>d.close()},'Cancel')]);d.addEventListener('close',()=>d.remove());document.body.append(d);d.showModal();return;
     }
-    try{const r=await api('open',{mode,chair});error='';navigate(`/?domino=${r.roomId}`);}catch(e){const d=el('dialog',{class:'rules-dialog'},[el('p',{},e.message),el('button',{onclick:()=>d.close()},'Close')]);d.addEventListener('close',()=>d.remove());document.body.append(d);d.showModal();}
+    try{const r=await api('open',{mode,chair});error='';navigate(`/?domino=${r.roomId}`);}
+    catch(e){
+      // seat_taken for an online lane also registered this identity on
+      // that lane's waitlist server-side (openDomino) — navigate into the
+      // dominoes view so draw()'s "no room" branch shows the live
+      // waiting/notified UI instead of a one-shot dialog that would lose
+      // track of the wait the moment it's dismissed.
+      if(e.status===409&&mode==='online'){error='';navigate(`/?domino=waiting`);mount();poll();return;}
+      const d=el('dialog',{class:'rules-dialog'},[el('p',{},e.message),el('button',{onclick:()=>d.close()},'Close')]);d.addEventListener('close',()=>d.remove());document.body.append(d);d.showModal();
+    }
   }
   setInterval(poll,600);window.addEventListener('domino-open',e=>open(e.detail.mode,e.detail.seat));
   return {mount(){mounted=true;lastSignature='';draw();poll();},routeChanged(){mounted=false;generation++;selected=null;error='';resume.hidden=true;document.body.classList.remove('table-mode');}};

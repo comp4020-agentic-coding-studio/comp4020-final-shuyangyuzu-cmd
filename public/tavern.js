@@ -1018,6 +1018,41 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     // server every frame once the local clock passes endsAt. Reset to null
     // whenever a genuinely new eatingUI is reconciled (reconcile() below).
     let eatingExpiryFetchedFor=null;
+    // 2026-11-07 correction — the real cause of the reported "cutscene
+    // replays itself / flickers right at the end" bug. clockSkewMs
+    // (noteServerTime, above) is recomputed from scratch on every single
+    // response with no smoothing, from a `Date` header that's only
+    // second-precision — so two requests landing a fraction of a second
+    // apart can read noticeably different skew estimates, one falling
+    // just inside SKEW_DEADBAND_MS (kept at 0) and the next just outside
+    // it (a multi-second correction applied), or vice versa. Since
+    // serverNow() = Date.now() + clockSkewMs feeds BOTH the "is the
+    // window over" check and the animation's own `progress` every frame,
+    // a single noisy reading near the end of the window could make
+    // serverNow() jump past endMs (hiding the canvas and firing the
+    // catch-up fetch), then the very next reading correct itself back
+    // below endMs — un-hiding the canvas and recomputing `progress` from
+    // a now-lower serverNow(), which visibly snapped the animation
+    // backward and redrew it: exactly the reported repeat-playback/
+    // flicker. Reproduced directly with a single injected +5s `Date`
+    // header on one real heartbeat response mid-window, confirmed to
+    // reopen the cutscene after it had already been hidden.
+    //
+    // Fixed by making this session's own displayed progress and
+    // "finished" decision monotonic, independent of any single noisy
+    // clock reading: once a frame has decided the window is over for
+    // THIS eatingUI (identified by its own endsAt, reset the same place
+    // eatingExpiryFetchedFor already resets per-session), every later
+    // frame keeps treating it as over regardless of what serverNow()
+    // says afterward — this can only ever make the cutscene disappear
+    // earlier/stay hidden, never show gameplay as blocked for longer
+    // than the server's own lock actually is (isEating is still the only
+    // real gate, entirely unaffected by this purely-cosmetic clamp). And
+    // the progress fed to eatingPhaseAt while still active never moves
+    // backward within a session, so a transient skew blip can dip the
+    // estimate down without ever rewinding what's already been drawn.
+    let eatingFinishedFor=null;
+    let eatingMaxProgress=-Infinity;
     const holdCleanups=[];
     // Same-browser, multiple-tabs logout sync: `localStorage.removeItem`
     // fires a `storage` event in every OTHER tab of the same origin (never
@@ -1067,7 +1102,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       el('span',{class:'stamina-track'},[staminaFill]),staminaLabel,
     ]);
     const hud=el('header',{class:'world-hud'},[
-      el('div',{class:'world-brand'},[el('span',{class:'brand-mark'},'◆'),el('div',{},[el('strong',{},'Las Vegas'),el('small',{},'A little place to be together')])]),
+      el('div',{class:'world-brand'},[el('strong',{},'Las Vegas'),el('small',{},'A little place to be together')]),
       el('div',{class:'hud-actions'},[online,standBtn,staminaButton,el('button',{class:'hud-button',onclick:()=>{path=[];chooseCharacter();}},'Your character'),el('button',{class:'hud-button',onclick:()=>openGames()},'Join by code')]),
     ]);
     const directions=el('div',{class:'world-dpad','aria-label':'Movement controls'});
@@ -1405,6 +1440,8 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         if(!eatingUI||eatingUI.startedAt!==mine.eating.startedAt){
           eatingUI={kinds:mine.eating.kinds,startedAt:mine.eating.startedAt,endsAt:mine.eating.endsAt,seatKind:mySeatKind()};
           eatingExpiryFetchedFor=null;
+          eatingFinishedFor=null;
+          eatingMaxProgress=-Infinity;
         }
       }else if(eatingUI){
         eatingUI=null;
@@ -1760,6 +1797,56 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       function renderForm(){
         error.textContent='';
         const username=el('input',{placeholder:'Username',id:'auth-username',maxlength:'24',required:true,autocomplete:'username'});
+        // 2026-11-08 (the user's own explicit instruction): a live
+        // available/taken/checking/format-error status shown under the
+        // username field while signing up — register-mode only, since
+        // logging in has no reason to reveal whether a name exists
+        // (CLAUDE.md's own enumeration-safety rule for login stays
+        // exactly as it was; this is a NEW field only at signup, where
+        // the user is actively choosing a name and needs this feedback,
+        // the same reasoning the 2026-11-07 "this username is already
+        // taken" message correction already established). Two separate
+        // problems to solve, not one: (1) don't fire a request on every
+        // keystroke — debounce until typing actually pauses; (2) a
+        // debounced request can still resolve out of order relative to a
+        // newer one fired after further typing — `usernameCheckToken` is
+        // bumped on every new input event and compared when a response
+        // lands, so a slow, stale response for an earlier value can never
+        // overwrite what a newer, already-resolved (or still in-flight)
+        // check already decided for the CURRENT field value.
+        const usernameStatus=el('p',{class:'auth-username-status',role:'status','aria-live':'polite'});
+        let usernameCheckToken=0,usernameDebounceTimer=null;
+        function setUsernameStatus(kind,text){
+          usernameStatus.textContent=text;
+          usernameStatus.className='auth-username-status'+(kind?' auth-username-'+kind:'');
+        }
+        function scheduleUsernameCheck(){
+          if(mode!=='register')return;
+          clearTimeout(usernameDebounceTimer);
+          const value=username.value;
+          if(!value.trim()){setUsernameStatus('',''); return;}
+          const myToken=++usernameCheckToken;
+          usernameDebounceTimer=setTimeout(async()=>{
+            setUsernameStatus('checking','Checking…');
+            let result;
+            try{result=await accountsApi.checkUsernameAvailable(value);}
+            catch{if(myToken===usernameCheckToken)setUsernameStatus('',''); return;}
+            // This exact check (not just "did a newer request start") is
+            // what stops an old request's own late-arriving result from
+            // overwriting whatever the field actually shows right now —
+            // bumping the token on every keystroke (not just every
+            // actually-fired request) means even a check that was
+            // scheduled but superseded before it ever fired can't matter,
+            // and a check that DID fire but resolves after a newer one
+            // already landed is still correctly discarded here.
+            if(myToken!==usernameCheckToken)return;
+            if(result.status==='available')setUsernameStatus('available','Username is available');
+            else if(result.status==='taken')setUsernameStatus('taken','This username is already taken');
+            else if(result.status==='invalid')setUsernameStatus('taken',result.message);
+            else setUsernameStatus('','');
+          },300);
+        }
+        username.addEventListener('input',scheduleUsernameCheck);
         const passwordField1=passwordField(el,{id:'auth-password',placeholder:'Password',autocomplete:mode==='login'?'current-password':'new-password'});
         const password=passwordField1.input;
         const confirmPasswordField=mode==='register'?passwordField(el,{id:'auth-confirm',placeholder:'Confirm password',autocomplete:'new-password'}):null;
@@ -1829,6 +1916,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         }},[
           el('p',{class:'eyebrow'},'Las Vegas · OPEN ALL EVENING'),el('h1',{},mode==='login'?'Log in':'Sign up'),
           el('label',{for:'auth-username'},'Username'),username,
+          ...(mode==='register'?[usernameStatus]:[]),
           el('label',{for:'auth-password'},'Password'),passwordField1.wrapper,
           ...(confirmPasswordField?[el('label',{for:'auth-confirm'},'Confirm password'),confirmPasswordField.wrapper]:[]),
           ...(migrateCheckbox?[el('div',{class:'auth-migrate-row'},[migrateCheckbox,el('label',{for:'auth-migrate'},'Keep my current guest character')])]:[]),
@@ -2536,11 +2624,22 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
         // serverNow(), not a bare Date.now() — see noteServerTime's own
         // comment above for the real bug this closes (a fast/slow browser
         // clock made the cutscene vanish before, or linger after, the
-        // server's own real window).
-        if(serverNow()>=endMs){
+        // server's own real window). 2026-11-07 correction: serverNow()
+        // itself is NOT monotonic (clockSkewMs is recomputed from a
+        // single noisy Date-header reading on every request, so it can
+        // legitimately jump around near SKEW_DEADBAND_MS's own edge) —
+        // see eatingFinishedFor/eatingMaxProgress's own comment above for
+        // the repeat-playback/flicker bug this caused and why a monotonic
+        // clamp, scoped to this specific eatingUI session via its own
+        // endsAt, is what actually fixes it rather than just reading
+        // serverNow() more often.
+        const alreadyFinished=eatingFinishedFor===eatingUI.endsAt;
+        if(alreadyFinished||serverNow()>=endMs){
           // The local (clock-skew-corrected) estimate has reached the
-          // server's own endsAt. Never decide on our own that the action
-          // is actually over — only the server's next reported `eating`
+          // server's own endsAt (or this exact session already decided
+          // that once before — never re-opened by a later, lower
+          // reading). Never decide on our own that the action is
+          // actually over — only the server's next reported `eating`
           // (null once its lazy expiry check sees it) does that, via
           // reconcile() above — but don't keep drawing a cutscene for a
           // window that's visibly finished either, and don't just sit
@@ -2556,6 +2655,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
           // this timer; a real clock-skew test confirmed a direct move
           // attempt during this exact window is still correctly refused
           // server-side even though the local canvas already hid.
+          eatingFinishedFor=eatingUI.endsAt;
           eatCanvas.style.display='none';
           if(eatingExpiryFetchedFor!==eatingUI.endsAt){
             eatingExpiryFetchedFor=eatingUI.endsAt;
@@ -2563,7 +2663,15 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
           }
         }else{
           eatCanvas.style.display='block';
-          const progress=(serverNow()-startMs)/(endMs-startMs);
+          const rawProgress=(serverNow()-startMs)/(endMs-startMs);
+          // Never lets a transient skew correction (or its reversal) walk
+          // the displayed animation backward within this same session —
+          // the actual fix for the reported flicker/replay. This can only
+          // ever hold progress steady or advance it, never rewind
+          // something already drawn, and resets to -Infinity on every
+          // genuinely new eatingUI above.
+          const progress=Math.max(eatingMaxProgress,rawProgress);
+          eatingMaxProgress=progress;
           const phase=eatingPhaseAt(eatingUI.kinds,progress);
           drawEatingScene(eatCtx,vw,vh,{color:colors[mine.color]||colors.green,skin:skins[mine.skin]||skins.warm,phase,seatKind:eatingUI.seatKind,reduceMotion:eatReduceMotion.matches});
         }

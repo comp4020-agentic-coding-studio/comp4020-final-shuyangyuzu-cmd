@@ -71,13 +71,48 @@ it('keeps seats before three minutes, expires them afterwards and refuses stale 
   vi.advanceTimersByTime(2);tickBlackjack(db);expect(blackjackMe(db,a.playerId,a.sessionSecret).room).toBeNull();
   expect(()=>openBlackjack(db,a.playerId,a.sessionSecret,0,id)).toThrow(/closed/);
 });
-it('waits for the next deal when joining during a hand and does not add cards mid-hand',()=>{
+// 2026-11-07 correction (user's own explicit instruction): a hand in
+// progress now refuses ANY new seating attempt outright, including one
+// with a genuinely empty chair — replacing the previous "wait silently
+// for the next deal" behavior this test used to pin down. The refused
+// patron is also registered on a waitlist and notified the instant the
+// hand actually ends (save()'s own notified=1 update).
+it('refuses a new seat mid-hand even with an empty chair, waitlists the refused patron, and notifies them once the hand ends',()=>{
   const a=person('A'),b=person('B');const id=openBlackjack(db,a.playerId,a.sessionSecret,0);
   const s=engine(['10♣','10♥','6♦','7♠'],1);s.players[0].id=a.playerId;s.hands[0].owner=a.playerId;
   db.prepare('UPDATE blackjack_rooms SET state_json=? WHERE id=?').run(JSON.stringify(s),id);
+  expect(()=>openBlackjack(db,b.playerId,b.sessionSecret,1,id)).toThrow(/round|hand/i);
+  let me=blackjackMe(db,b.playerId,b.sessionSecret);
+  expect(me.room).toBeNull();
+  expect(me.waitlist).toEqual([{roomId:id,notified:false}]);
+  // Still mid-hand — nothing notifies yet.
+  expect(blackjackMe(db,b.playerId,b.sessionSecret).waitlist[0].notified).toBe(false);
+  // Settle the hand directly (mirrors the engine-level settlement tests
+  // elsewhere in this file) and save it through the same save() path
+  // actBlackjack/tickBlackjack already use, which is what fires the
+  // waitlist notification once the phase is genuinely back to settled.
+  act(s,a.playerId,'Stand');stepDealer(s);stepDealer(s);
+  expect(['betting','settled']).toContain(s.phase);
+  db.prepare('UPDATE blackjack_rooms SET state_json=? WHERE id=?').run(JSON.stringify(s),id);
+  tickBlackjack(db); // re-saves nothing new, but exercises the normal read path
+  // Directly invoke the same notify-on-save logic tickBlackjack's own
+  // save() calls would trigger, by performing a real, tiny mutating
+  // action (Ready) that goes through actBlackjack -> save().
+  action(a,'Ready',10);
+  me=blackjackMe(db,b.playerId,b.sessionSecret);
+  expect(me.waitlist).toEqual([{roomId:id,notified:true}]);
+  // Once notified, the waitlisted patron can now actually sit.
   openBlackjack(db,b.playerId,b.sessionSecret,1,id);
-  expect(view(b).hands).toHaveLength(1);expect(view(b).choices).toEqual([]);
-  expect(()=>action(b,'Hit')).toThrow(/turn/);
+  expect(blackjackMe(db,b.playerId,b.sessionSecret).waitlist).toEqual([]);
+});
+it('refuses joining a table with four active players, waitlists the refused patron, and notifies them once a seat opens',()=>{
+  const people=Array.from({length:5},(_,i)=>person('P'+i));
+  const id=openBlackjack(db,people[0].playerId,people[0].sessionSecret,0);
+  for(let i=1;i<4;i++)openBlackjack(db,people[i].playerId,people[i].sessionSecret,i,id);
+  expect(()=>openBlackjack(db,people[4].playerId,people[4].sessionSecret,0,id)).toThrow(/four|occupied/i);
+  expect(blackjackMe(db,people[4].playerId,people[4].sessionSecret).waitlist).toEqual([{roomId:id,notified:false}]);
+  leaveBlackjack(db,people[0].playerId,people[0].sessionSecret);
+  expect(blackjackMe(db,people[4].playerId,people[4].sessionSecret).waitlist).toEqual([{roomId:id,notified:true}]);
 });
 it('times out a turn into Stand without drawing and advances the dealer at paced ticks',()=>{
   vi.useFakeTimers();const a=person('A');const id=openBlackjack(db,a.playerId,a.sessionSecret,0);

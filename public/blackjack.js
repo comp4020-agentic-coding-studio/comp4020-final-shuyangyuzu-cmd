@@ -1,6 +1,18 @@
 // Online Blackjack: the server owns the shoe, turn order, chips and settlement.
 export function createBlackjackUI({el,navigate,render}) {
-  let mounted=false,generation=0,polling=false,busy=false,room=null,owner='',error='',bet=10,lastVersion=null,lastMove='',animate=false;
+  let mounted=false,generation=0,polling=false,busy=false,room=null,owner='',error='',bet=10,lastVersion=null,lastMove='',animate=false,waitlist=[],lastAwaySignature='';
+  // 2026-11-08 correction — the exact same gap CLAUDE.md already
+  // documents for poker's own away flag: setBlackjackAway deliberately
+  // never bumps blackjack_rooms.version (version is also actBlackjack's
+  // own optimistic-concurrency counter, and a presence/display-only
+  // change must never race a real in-flight action over it). Without an
+  // independent redraw trigger, another seated player's own browser
+  // never noticed someone else's away toggle at all — found by a real
+  // two-browser click-through (B's own page kept showing "Choosing
+  // wager" after A clicked "I'm away", even though the server's own
+  // state was already correct) — mirrors poker.js's identical
+  // awaySignature fix exactly.
+  const awaySignature=r=>r?r.players.map(p=>`${p.id}:${p.away?1:0}`).join(','):'';
   const resume=el('aside',{class:'domino-resume',hidden:true});document.body.append(resume);
   const identity=()=>{try{return JSON.parse(localStorage.getItem('vegas:bar:session')||'null')}catch{return null}};
   let noticeDialog=null,noticeOwner='';
@@ -32,13 +44,14 @@ export function createBlackjackUI({el,navigate,render}) {
     try {
       const data=await api('me',{active:mounted});if(gen!==generation||who.playerId!==identity()?.playerId)return;
       if(owner!==who.playerId){owner=who.playerId;lastVersion=null;lastMove='';room=null;}
-      room=data.room;
+      room=data.room;waitlist=data.waitlist||[];
       if(data.notice){showNotice(data.notice,who.playerId);if(mounted){room=null;error=data.notice;}}
       resume.hidden=mounted||!room||location.search!=='';
       if(!resume.hidden)resume.replaceChildren(button('Return to Blackjack',()=>navigate('/?blackjackOnline='+room.id)),button('Leave table',()=>command('leave')));
-      if(mounted&&(lastVersion!==room?.version||!room||error)){
+      const nextAwaySignature=awaySignature(room);
+      if(mounted&&(lastVersion!==room?.version||nextAwaySignature!==lastAwaySignature||!room||error)){
         const key=room?JSON.stringify([room.hand,room.lastMove]):'';animate=!!lastMove&&lastMove!==key;lastMove=key;
-        lastVersion=room?.version;draw();animate=false;
+        lastVersion=room?.version;lastAwaySignature=nextAwaySignature;draw();animate=false;
       }
     }catch(e){if(gen===generation&&mounted){error=e.message;draw();}}
     finally{polling=false;}
@@ -46,15 +59,32 @@ export function createBlackjackUI({el,navigate,render}) {
   async function join(seat='red',target){
     if(busy)return;busy=true;const gen=generation;
     try {const result=await api('open',{seat,roomId:target});if(gen===generation)navigate('/?blackjackOnline='+result.roomId);}
-    catch(e){error=e.message;if(mounted)draw();else {resume.hidden=false;resume.replaceChildren(el('p',{role:'alert'},error),button('Close',()=>{resume.hidden=true;}));}}
+    catch(e){
+      error=e.message;
+      // 2026-11-07: a refused mid-hand/full-table join also registered
+      // this identity on the server's own waitlist (openBlackjack) — poll
+      // right away so draw()'s "no room" branch picks up the fresh
+      // waitlist entry instead of just showing the one-shot error text.
+      if(mounted){lastVersion=null;await poll();}
+      else{resume.hidden=false;resume.replaceChildren(el('p',{role:'alert'},error),button('Close',()=>{resume.hidden=true;}));}
+    }
     finally{busy=false;}
   }
   function draw(){
     if(!mounted)return;
     if(!room){
       const target=new URLSearchParams(location.search).get('blackjackOnline');
-      render(el('main',{class:'poker-page bj-room'},[el('h1',{},'Blackjack Online'),el('p',{role:'status'},error||'Join this table and play against the dealer with your friends.'),
-        ...(identity()?[button('Join table',()=>join('red',target||undefined))]:[]),
+      const ready=waitlist.find(w=>w.notified),waiting=waitlist.find(w=>!w.notified);
+      const body=ready
+        ? [el('p',{role:'status',class:'bj-waitlist-ready'},'A seat is free now.'),
+           button('Sit down now',()=>join('red',ready.roomId)),
+           button('Never mind',()=>command('leaveWaitlist',{roomId:ready.roomId}))]
+        : waiting
+        ? [el('p',{role:'status'},'Waiting for a seat to open…'),
+           button('Stop waiting',()=>command('leaveWaitlist',{roomId:waiting.roomId}))]
+        : [el('p',{role:'status'},error||'Join this table and play against the dealer with your friends.'),
+           ...(identity()?[button('Join table',()=>join('red',target||undefined))]:[])];
+      render(el('main',{class:'poker-page bj-room'},[el('h1',{},'Blackjack Online'),...body,
         button('Back to the bar',()=>navigate('/'))]));return;
     }
     const r=room,me=r.players.find(p=>p.id===owner),between=['betting','settled'].includes(r.phase);
@@ -81,12 +111,19 @@ export function createBlackjackUI({el,navigate,render}) {
     const move=r.lastMove;const moveName=move?.seat==='dealer'?'Dealer':r.players.find(p=>p.seat===move?.seat)?.nickname;
     const link=location.origin+'/?blackjackOnline='+r.id;
     render(el('main',{class:'poker-page bj-room','aria-label':'Blackjack Online'},[
-      el('header',{class:'poker-header bj-header'},[el('h1',{},'Blackjack'),el('strong',{},'Online · Hand '+r.hand),button('Back to the bar',()=>navigate('/'))]),
+      el('header',{class:'poker-header bj-header'},[el('h1',{},'Blackjack'),el('strong',{},'Online · Hand '+r.hand),
+        // Explicit, display-only away toggle (2026-11-08, mirrors
+        // poker.js's own identical button exactly) — distinct from
+        // "Leave table" below: away keeps the seat reserved (no one else
+        // can take it) and is visible to every other seated player, but
+        // never releases the seat or affects turn-taking/timeouts.
+        ...(me?[button(me.away?"I'm back":"I'm away",()=>command('away',{away:!me.away}))]:[]),
+        button('Back to the bar',()=>navigate('/'))]),
       el('div',{class:'bj-actions'},[el('input',{readonly:true,value:link,'aria-label':'Invite link'}),button('Copy invite',async()=>{try{await navigator.clipboard.writeText(link)}catch{error='Copy the link from the field above.';draw()}})]),felt,
       el('section',{class:'poker-controls','aria-label':'Blackjack actions'},[el('p',{role:'status'},status),el('p',{},moveName&&move?moveName+' · '+move.action:''),el('p',{role:'alert',class:'error'},error),el('div',{class:'bj-actions'},controls),
         button('Leave table',async()=>{if(busy)return;busy=true;try{await api('leave');room=null;navigate('/')}catch(e){error=e.message;draw()}finally{busy=false}}),
         el('p',{class:'note'},'Back to the bar keeps your seat for 3 minutes. Leave table releases it immediately. A 45-second turn timeout stands automatically.')]),
-      el('details',{},[el('summary',{},'Table rules'),el('p',{},'Beat the dealer without exceeding 21. Dealer stands on all 17s. Natural blackjack pays 3:2; other wins pay 1:1. Double draws exactly one card. Split equal-value cards once; split aces receive one card each. Insurance costs half your wager and pays 2:1. Everyone starts with 500 play chips. New arrivals during a hand wait for the next deal.')])
+      el('details',{},[el('summary',{},'Table rules'),el('p',{},'Beat the dealer without exceeding 21. Dealer stands on all 17s. Natural blackjack pays 3:2; other wins pay 1:1. Double draws exactly one card. Split equal-value cards once; split aces receive one card each. Insurance costs half your wager and pays 2:1. Everyone starts with 500 play chips. A hand in progress refuses new arrivals until it ends — you are notified the moment a seat opens.')])
     ]));
   }
   window.addEventListener('blackjack-open',e=>join(e.detail?.seat||'red'));

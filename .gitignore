@@ -5,6 +5,10 @@ dist/
 # local SQLite file for `node src/server.ts` run outside Docker (DATA_DIR
 # defaults to ./data); the real data lives on the Fly volume at /data
 data/
+preview-data/
+preview-data-v2/
+preview-pid.txt
+preview-pid-v2.txt
 
 # editor and OS junk
 .DS_Store

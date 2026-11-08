@@ -42,7 +42,7 @@ export function renderPokerTable(el,room,viewerId) {
 }
 
 export function createPokerUI({el,navigate}) {
-  let session=null,room=null,lastVersion=null,lastAwaySignature='',mounted=false,polling=false,error='',query='',results=[],raiseTo='',lastInvite='',generation=0;
+  let session=null,room=null,lastVersion=null,lastAwaySignature='',mounted=false,polling=false,error='',query='',results=[],raiseTo='',lastInvite='',generation=0,waitlist=[];
   // away (phase 7) is a display-only flag that deliberately never bumps
   // poker_rooms.version (src/poker.ts's own comment on setPokerAway
   // explains why: version is also actPoker's optimistic-concurrency
@@ -96,7 +96,7 @@ export function createPokerUI({el,navigate}) {
     const id=session.playerId,current=generation;polling=true;
     try{
       const data=await api('me');if(saved()?.playerId!==id||current!==generation)return;
-      room=data.room;
+      room=data.room;waitlist=data.waitlist||[];
       if(data.departure){
         banner.hidden=true;resume.hidden=true;lastInvite='';
         if(mounted&&!room){
@@ -106,8 +106,8 @@ export function createPokerUI({el,navigate}) {
         showBankruptcy(data.departure,id);return;
       }
       if(bankruptcyDialog)dismissBankruptcy();
-      if(mounted&&!room)error='You are no longer seated. Return to the bar to join a table.';
-      const nextAwaySignature=awaySignature(room);
+      if(mounted&&!room&&!waitlist.length)error='You are no longer seated. Return to the bar to join a table.';
+      const nextAwaySignature=awaySignature(room)+'|'+waitlist.map(w=>`${w.roomId}:${w.notified?1:0}`).join(',');
       if(mounted&&(room?.version!==lastVersion||nextAwaySignature!==lastAwaySignature||!room)){lastVersion=room?.version;lastAwaySignature=nextAwaySignature;draw();}
       const invite=data.invites[0];
       if(invite&&invite.id!==lastInvite){
@@ -123,7 +123,18 @@ export function createPokerUI({el,navigate}) {
   }
   function draw(){
     const root=document.getElementById('app');if(!mounted||!root)return;
-    if(!room){root.replaceChildren(el('main',{class:'poker-page'},[el('h1',{},'Texas Hold’em'),el('p',{},error||'Loading your table…'),el('button',{onclick:()=>navigate('/')},'Back to the bar')]));return;}
+    if(!room){
+      const ready=waitlist.find(w=>w.notified),waiting=waitlist.find(w=>!w.notified);
+      const body=ready
+        ?[el('p',{role:'status',class:'poker-waitlist-ready'},'A seat is free now.'),
+          el('button',{onclick:async()=>{try{const r=await api('open',{mode:'online',seat:-1});waitlist=[];navigate(`/?poker=${r.roomId}`);await poll();}catch(e){notify(e);}}},'Sit down now'),
+          el('button',{onclick:async()=>{try{await api('leaveWaitlist',{roomId:ready.roomId});waitlist=waitlist.filter(w=>w.roomId!==ready.roomId);draw();}catch(e){notify(e);}}},'Never mind')]
+        :waiting
+        ?[el('p',{role:'status'},'Waiting for a seat to open…'),
+          el('button',{onclick:async()=>{try{await api('leaveWaitlist',{roomId:waiting.roomId});waitlist=waitlist.filter(w=>w.roomId!==waiting.roomId);draw();}catch(e){notify(e);}}},'Stop waiting')]
+        :[el('p',{},error||'Loading your table…')];
+      root.replaceChildren(el('main',{class:'poker-page'},[el('h1',{},'Texas Hold’em'),...body,el('button',{onclick:()=>navigate('/')},'Back to the bar')]));return;
+    }
     const me=room.players.find(p=>p.id===session.playerId),turn=room.actor===session.playerId;
     const between=['waiting','showdown'].includes(room.phase),buttons=[];
     const perform=async(type,to)=>{try{await api('act',{roomId:room.id,version:room.version,type,to});error='';raiseTo='';await poll();}catch(e){notify(e);}};
@@ -138,7 +149,7 @@ export function createPokerUI({el,navigate}) {
       }
     }
     if(between&&room.host===session.playerId)buttons.push(el('button',{disabled:room.players.filter(p=>!p.leaving&&(p.stack>0||p.npc)).length<2,onclick:()=>perform('deal')},room.hand?'Deal next hand':'Start game'));
-    const controls=el('section',{class:'poker-controls'},[el('p',{},turn?'Your turn':between?(room.hand?'Review the result. The host deals the next hand.':'Invite a friend. At least two funded players are needed to start.'):`Waiting for ${room.players.find(p=>p.id===room.actor)?.nickname||'the table'}`),...buttons]);
+    const controls=el('section',{class:'poker-controls'},[el('p',{},turn?'Your turn':between?(room.hand?'Review the result. The host deals the next hand.':'Invite a friend, or wait for other patrons to sit down. At least two funded players are needed to start.'):`Waiting for ${room.players.find(p=>p.id===room.actor)?.nickname||'the table'}`),...buttons]);
     const invitePanel=[];
     if(room.mode==='online'){
       const input=el('input',{'aria-label':'Search online players',placeholder:'Search online player nickname',value:query,oninput:e=>{query=e.target.value;}});
@@ -148,9 +159,9 @@ export function createPokerUI({el,navigate}) {
         el('ul',{},results.map(p=>el('li',{},[`${p.nickname} · ${p.id.slice(0,6)} `,el('button',{onclick:async()=>{try{await api('invite',{roomId:room.id,target:p.id});error=`Invitation sent to ${p.nickname}`;draw();}catch(e){notify(e);}}},'Invite')]))),
       ]));
     }
-    const rules=el('details',{class:'poker-rules'},[el('summary',{},'📜 How to play'),el('p',{},'No-limit Texas Hold’em · 2–5 players · 500 play chips · blinds 1/2. Two private cards, five community cards; make the best five-card hand. Fold, check, call, bet or raise. All-in players can win only pots they contributed to; equal hands split the pot. Dealer and blinds rotate each hand. New arrivals wait for the next deal. Leaving folds your hand, except an all-in remains eligible. 45-second turn limit: check if free, otherwise fold on timeout. Disconnects reserve your seat for three minutes; Leave table exits immediately. If you have zero chips after settlement, you automatically leave the table. A popup explains the result; click Return to the bar to continue. An all-in is never removed before payouts. There is no in-place rebuy. No real-money stakes.'),el('a',{href:'https://www.pokerstars.com/poker/games/texas-holdem/',target:'_blank',rel:'noopener'},'Hold’em rules reference')]);
+    const rules=el('details',{class:'poker-rules'},[el('summary',{},'📜 How to play'),el('p',{},'No-limit Texas Hold’em · 2–5 players · 500 play chips · blinds 1/2. Two private cards, five community cards; make the best five-card hand. Fold, check, call, bet or raise. All-in players can win only pots they contributed to; equal hands split the pot. Dealer and blinds rotate each hand. A hand in progress refuses new arrivals until it ends — you are notified the moment a seat opens. Leaving folds your hand, except an all-in remains eligible. 45-second turn limit: check if free, otherwise fold on timeout. Disconnects reserve your seat for three minutes; Leave table exits immediately. If you have zero chips after settlement, you automatically leave the table. A popup explains the result; click Return to the bar to continue. An all-in is never removed before payouts. There is no in-place rebuy. No real-money stakes.'),el('a',{href:'https://www.pokerstars.com/poker/games/texas-holdem/',target:'_blank',rel:'noopener'},'Hold’em rules reference')]);
     root.replaceChildren(el('main',{class:'poker-page'},[
-      el('header',{class:'poker-header'},[el('h1',{},'Texas Hold’em'),el('span',{},`${room.mode==='offline'?'Offline · NPC opponents':'Online · invitation table'} · Hand ${room.hand}`),
+      el('header',{class:'poker-header'},[el('h1',{},'Texas Hold’em'),el('span',{},`${room.mode==='offline'?'Offline · NPC opponents':'Online'} · Hand ${room.hand}`),
         // Display-only badge toggle (CLAUDE.md) — online tables only,
         // where another seated human can actually see it; no automated
         // standby play exists underneath it, unlike Vegas's awayMode.
@@ -163,7 +174,17 @@ export function createPokerUI({el,navigate}) {
   }
   function mount(){document.body.classList.add('table-mode');mounted=true;error='';lastVersion=null;draw();poll();}
   function routeChanged(){if(mounted&&!new URLSearchParams(location.search).has('poker')){generation++;document.body.classList.remove('table-mode');mounted=false;room=null;api('leave').catch(()=>{});}}
-  async function open(mode,seat){try{const data=await api('open',{mode,seat});navigate(`/?poker=${data.roomId}`);}catch(e){notify(e);}}
+  async function open(mode,seat){
+    try{const data=await api('open',{mode,seat});navigate(`/?poker=${data.roomId}`);}
+    catch(e){
+      notify(e);
+      // 2026-11-07: a refused mid-hand/full-table join also registered
+      // this identity on the server's own waitlist — repoll right away
+      // so the waitlist UI (above) picks up the fresh entry rather than
+      // only showing the one-shot error banner.
+      if(mounted)await poll();
+    }
+  }
   setInterval(poll,1000);poll();
   window.addEventListener('poker-open',e=>open(e.detail.mode,e.detail.seat));
   return {mount,routeChanged};

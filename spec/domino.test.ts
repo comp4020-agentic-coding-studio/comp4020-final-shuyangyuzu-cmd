@@ -7,7 +7,7 @@ import {openDb} from '../src/db.ts';
 import {joinBar,moveBar,sitAtSeat,standFromSeat} from '../src/bar.ts';
 import {GAME_CHAIRS,BAR_SEATS} from '../src/barLayout.ts';
 import {deal,deck,moves,play,drawOrPass,endTotal,npcMove,type DominoState,type Tile} from '../src/dominoEngine.ts';
-import {openDomino,respondDomino,actDomino,dominoMe,leaveDomino,tickDomino} from '../src/domino.ts';
+import {openDomino,actDomino,dominoMe,leaveDomino,leaveDominoWaitlist,setDominoAway,tickDomino} from '../src/domino.ts';
 import {layoutBones} from '../public/domino.js';
 import {getTablesStatus} from '../src/tables.ts';
 import {placeOrder,startEating} from '../src/orders.ts';
@@ -54,20 +54,116 @@ describe('two isolated facing pairs',()=>{
   afterEach(()=>{db.close();rmSync(dir,{recursive:true,force:true});});
   const patron=(name:string)=>joinBar(db,name,'red','warm');
   it('has exactly four chairs per domino table, two opposing pairs',()=>{for(const id of ['dominoes-1','dominoes-npc-1']){const c=GAME_CHAIRS.filter(c=>c.tableId===id);expect(c).toHaveLength(4);expect(c[0].y).toBe(c[1].y);expect(c[2].y).toBe(c[3].y);expect(c[0].x).not.toBe(c[1].x);}});
-  it('runs two online matches on one fixture with host approval and independent actions',()=>{
+  it('runs two online matches on one fixture with no approval step, seating opposite immediately',()=>{
     const a=patron('A'),b=patron('B'),c=patron('C'),d=patron('D');
     const r1=openDomino(db,a.playerId,a.sessionSecret,'online',0),r2=openDomino(db,c.playerId,c.sessionSecret,'online',2);
     expect(r1.roomId).not.toBe(r2.roomId);
-    expect(openDomino(db,b.playerId,b.sessionSecret,'online',1).pending).toBe(true);
-    expect(openDomino(db,d.playerId,d.sessionSecret,'online',3).pending).toBe(true);
-    expect(()=>respondDomino(db,b.playerId,b.sessionSecret,r1.roomId,b.playerId,true)).toThrow(/host/);
-    respondDomino(db,a.playerId,a.sessionSecret,r1.roomId,b.playerId,true);respondDomino(db,c.playerId,c.sessionSecret,r2.roomId,d.playerId,true);
+    // 2026-11-07 correction (user's own explicit instruction): sitting at
+    // the empty facing seat joins and seats immediately — no approval
+    // step, no pending state.
+    expect(openDomino(db,b.playerId,b.sessionSecret,'online',1).roomId).toBe(r1.roomId);
+    expect(openDomino(db,d.playerId,d.sessionSecret,'online',3).roomId).toBe(r2.roomId);
     const view=dominoMe(db,a.playerId,a.sessionSecret).room!;
     actDomino(db,a.playerId,a.sessionSecret,r1.roomId,view.version,'start');
     expect(dominoMe(db,c.playerId,c.sessionSecret).room!.phase).toBe('waiting');
     expect(()=>actDomino(db,c.playerId,c.sessionSecret,r1.roomId,view.version,'start')).toThrow(/not seated/);
     expect(getTablesStatus(db).find(t=>t.id==='dominoes-1')!.playerCount).toBe(4);
-    leaveDomino(db,a.playerId,a.sessionSecret);expect(dominoMe(db,b.playerId,b.sessionSecret).room).toBeNull();expect(dominoMe(db,c.playerId,c.sessionSecret).room).not.toBeNull();
+    // 2026-11-08 correction (user's own explicit instruction, confirmed
+    // via AskUserQuestion): A explicitly leaving now only releases A's
+    // OWN seat and ends the current match's state — B stays SEATED,
+    // waiting for a new opponent — rather than closing the whole room
+    // and kicking B out too (the previous behavior this test used to
+    // pin down). Confirmed directly: B's own room view survives.
+    leaveDomino(db,a.playerId,a.sessionSecret);
+    const bMe=dominoMe(db,b.playerId,b.sessionSecret);
+    expect(bMe.room).not.toBeNull();
+    expect(bMe.room!.id).toBe(r1.roomId);
+    expect(bMe.room!.phase).toBe('waiting'); // the old match's state is cleared, not carried over to whoever sits next
+    expect(dominoMe(db,c.playerId,c.sessionSecret).room).not.toBeNull();
+  });
+  it('a departing player releases only their own seat; a substitute pairs with the remaining player and the OLD match correctly ends, leaving the other pair untouched',()=>{
+    // The user's own explicit substitute scenario: A vs B playing, B
+    // leaves, A stays seated, C sits opposite A and a brand-new match is
+    // dealt for A+C once the host (A) deals — the OLD A-vs-B match must
+    // be genuinely over (no stale board/hand carried forward), and a
+    // completely separate pair (D vs E) at the other lane must be
+    // entirely unaffected throughout.
+    const a=patron('A'),b=patron('B'),c=patron('C'),d=patron('D'),e=patron('E');
+    const r1=openDomino(db,a.playerId,a.sessionSecret,'online',0);
+    openDomino(db,b.playerId,b.sessionSecret,'online',1);
+    const r2=openDomino(db,d.playerId,d.sessionSecret,'online',2);
+    openDomino(db,e.playerId,e.sessionSecret,'online',3);
+    let view=dominoMe(db,a.playerId,a.sessionSecret).room!;
+    actDomino(db,a.playerId,a.sessionSecret,r1.roomId,view.version,'start'); // the OLD A-vs-B match is actually dealt
+    expect(dominoMe(db,a.playerId,a.sessionSecret).room!.phase).toBe('playing');
+
+    leaveDomino(db,b.playerId,b.sessionSecret); // B exits
+    let aMe=dominoMe(db,a.playerId,a.sessionSecret);
+    expect(aMe.room).not.toBeNull(); // A remains seated, not kicked out
+    expect(aMe.room!.phase).toBe('waiting'); // the OLD match genuinely ended (no stale board/hand)
+    expect(aMe.room!.board).toEqual([]);
+
+    const r3=openDomino(db,c.playerId,c.sessionSecret,'online',1); // C sits opposite A
+    expect(r3.roomId).toBe(r1.roomId); // same physical lane/room, a fresh pairing
+    let cMe=dominoMe(db,c.playerId,c.sessionSecret);
+    expect(cMe.room!.players.map(p=>p.id).sort()).toEqual([a.playerId,c.playerId].sort());
+
+    view=dominoMe(db,a.playerId,a.sessionSecret).room!;
+    actDomino(db,a.playerId,a.sessionSecret,r1.roomId,view.version,'start'); // host deals the NEW A-vs-C match
+    expect(dominoMe(db,c.playerId,c.sessionSecret).room!.phase).toBe('playing');
+
+    // The entirely separate D-vs-E pair at the other lane was never
+    // touched by any of this churn.
+    const dMe=dominoMe(db,d.playerId,d.sessionSecret);
+    expect(dMe.room!.id).toBe(r2.roomId);
+    expect(dMe.room!.players.map(p=>p.id).sort()).toEqual([d.playerId,e.playerId].sort());
+  });
+  it('a merely-away (not exited) player keeps their seat; nobody else can take it, and they return to the same match',()=>{
+    const a=patron('A'),b=patron('B'),c=patron('C');
+    const r1=openDomino(db,a.playerId,a.sessionSecret,'online',0);
+    openDomino(db,b.playerId,b.sessionSecret,'online',1);
+    setDominoAway(db,b.playerId,b.sessionSecret,true);
+    expect(dominoMe(db,a.playerId,a.sessionSecret).room!.players.find(p=>p.id===b.playerId)?.away).toBe(true);
+    // C cannot take B's seat while B is merely away, not exited.
+    expect(()=>openDomino(db,c.playerId,c.sessionSecret,'online',1)).toThrow(/occupied|started/);
+    // B returns — flag clears, same match/seat resumed.
+    setDominoAway(db,b.playerId,b.sessionSecret,false);
+    const bMe=dominoMe(db,b.playerId,b.sessionSecret);
+    expect(bMe.room!.id).toBe(r1.roomId);
+    expect(bMe.room!.players.find(p=>p.id===b.playerId)?.away).toBe(false);
+  });
+  it('waitlists a patron refused a taken/started seat and notifies them the moment that lane frees up',()=>{
+    const a=patron('A'),b=patron('B'),e=patron('E');
+    const r1=openDomino(db,a.playerId,a.sessionSecret,'online',0);
+    openDomino(db,b.playerId,b.sessionSecret,'online',1);
+    // The pair is now full and already playing (both seated) — a third
+    // patron targeting either chair of this same lane is refused, not
+    // silently queued without their knowledge, and lands on the waitlist.
+    expect(()=>openDomino(db,e.playerId,e.sessionSecret,'online',0)).toThrow(/occupied|started/);
+    let me=dominoMe(db,e.playerId,e.sessionSecret);
+    expect(me.room).toBeNull();
+    expect(me.waitlist).toEqual([{lane:0,notified:false}]);
+    // The lane is still occupied — nothing notifies yet.
+    leaveDomino(db,a.playerId,a.sessionSecret); // 2026-11-08: releases only A's own seat — B stays seated at r1
+    leaveDomino(db,b.playerId,b.sessionSecret); // B also leaves — both seats now empty, so the room genuinely closes
+    me=dominoMe(db,e.playerId,e.sessionSecret);
+    expect(me.waitlist).toEqual([{lane:0,notified:true}]);
+    // Once notified, the waitlisted patron can now actually sit — in a
+    // brand-NEW room, since both original occupants are genuinely gone
+    // and r1 itself closed (a fresh room is created the same way the
+    // very first seating at an empty lane always creates one).
+    const r=openDomino(db,e.playerId,e.sessionSecret,'online',0);
+    expect(r.roomId).not.toBe(r1.roomId);
+    expect(dominoMe(db,e.playerId,e.sessionSecret).waitlist).toEqual([]);
+  });
+  it('lets a waitlisted patron explicitly give up waiting',()=>{
+    const a=patron('A'),b=patron('B'),e=patron('E');
+    openDomino(db,a.playerId,a.sessionSecret,'online',0);
+    openDomino(db,b.playerId,b.sessionSecret,'online',1);
+    expect(()=>openDomino(db,e.playerId,e.sessionSecret,'online',0)).toThrow();
+    expect(dominoMe(db,e.playerId,e.sessionSecret).waitlist).toHaveLength(1);
+    leaveDominoWaitlist(db,e.playerId,e.sessionSecret,0);
+    expect(dominoMe(db,e.playerId,e.sessionSecret).waitlist).toEqual([]);
   });
   it('isolates private NPC games, redacts hidden hands, rejects stale mutations, and advances NPC turns',()=>{
     const a=patron('A'),b=patron('B');openDomino(db,a.playerId,a.sessionSecret,'offline',0);openDomino(db,b.playerId,b.sessionSecret,'offline',0);
@@ -127,7 +223,7 @@ describe('dominoes and seated eating, merged on one identity layer',()=>{
     expect(isEating(db,a.playerId)).toBe(false);
     standFromSeat(db,a.playerId,a.sessionSecret);
     const r=openDomino(db,a.playerId,a.sessionSecret,'offline',0);
-    expect(r.pending).toBe(false);
+    expect(r.roomId).toBeTruthy();
   });
 
   it('a seated domino player cannot also occupy a dining/stool seat or start eating',()=>{
@@ -142,10 +238,8 @@ describe('dominoes and seated eating, merged on one identity layer',()=>{
     const a=patron('A'),b=patron('B'),c=patron('C'),d=patron('D');
     const r1=openDomino(db,a.playerId,a.sessionSecret,'online',0);
     openDomino(db,b.playerId,b.sessionSecret,'online',1);
-    respondDomino(db,a.playerId,a.sessionSecret,r1.roomId,b.playerId,true);
     const r2=openDomino(db,c.playerId,c.sessionSecret,'online',2);
     openDomino(db,d.playerId,d.sessionSecret,'online',3);
-    respondDomino(db,c.playerId,c.sessionSecret,r2.roomId,d.playerId,true);
 
     // A completely separate bar identity eating/drinking at the same time
     // must have zero effect on either pair's own match.
@@ -153,8 +247,14 @@ describe('dominoes and seated eating, merged on one identity layer',()=>{
     seatAndStartEating(bystander.playerId,bystander.sessionSecret);
     expect(isEating(db,bystander.playerId)).toBe(true);
 
+    // 2026-11-08 correction: A leaving now only releases A's own seat —
+    // B stays seated at the SAME room, waiting for a substitute — rather
+    // than the whole match closing out from under B (the previous
+    // behavior this test used to pin down).
     leaveDomino(db,a.playerId,a.sessionSecret);
-    expect(dominoMe(db,b.playerId,b.sessionSecret).room).toBeNull();
+    const bMe=dominoMe(db,b.playerId,b.sessionSecret);
+    expect(bMe.room).not.toBeNull();
+    expect(bMe.room!.id).toBe(r1.roomId);
     const pairTwoView=dominoMe(db,c.playerId,c.sessionSecret).room;
     expect(pairTwoView).not.toBeNull();
     expect(pairTwoView!.id).toBe(r2.roomId);

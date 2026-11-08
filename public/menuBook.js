@@ -132,27 +132,113 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
 
   // ---- Page builders — each returns a Node for one physical page. ----
 
+  // 2026-11-08 redesign (the user's own reference photo: a vintage
+  // catalog's ornate title page + a hand-drawn table-of-contents page) —
+  // original inline-SVG line-art, drawn the same way public/tavern.js's
+  // own woodSignIcon()/app.js's casinoRing() already build one
+  // (createElementNS, no external asset, no network request), per
+  // CLAUDE.md's visual-assets rule. A tiny shared helper since every
+  // icon here is just a handful of stroked paths/circles on one
+  // currentColor-free viewBox.
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  function svgIcon(className, viewBox, parts) {
+    const svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('viewBox', viewBox);
+    svg.setAttribute('class', className);
+    svg.setAttribute('aria-hidden', 'true');
+    for (const [tag, attrs] of parts) {
+      const node = document.createElementNS(SVG_NS, tag);
+      for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+      svg.appendChild(node);
+    }
+    return svg;
+  }
+  // A simple stemmed wine glass, drawn with open strokes (never a filled
+  // silhouette) to read as pen-and-ink line art, matching the reference
+  // photo's own thin-line illustration style.
+  function glassIcon() {
+    return svgIcon('book-deco-icon', '0 0 40 56', [
+      ['path', { d: 'M9 4 C9 20 15 26 20 26 C25 26 31 20 31 4', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6' }],
+      ['line', { x1: '20', y1: '26', x2: '20', y2: '46', stroke: 'currentColor', 'stroke-width': '1.6' }],
+      ['line', { x1: '10', y1: '50', x2: '30', y2: '50', stroke: 'currentColor', 'stroke-width': '1.6' }],
+      ['line', { x1: '20', y1: '46', x2: '20', y2: '50', stroke: 'currentColor', 'stroke-width': '1.6' }],
+      ['ellipse', { cx: '20', cy: '8', rx: '8.5', ry: '2.6', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.1' }],
+    ]);
+  }
+  // A single wheat sprig — paired alternating husks up a central stem,
+  // the same loose, hand-drawn-looking line-art treatment.
+  function wheatIcon() {
+    const husks = [];
+    for (let i = 0; i < 6; i++) {
+      const y = 6 + i * 6.5;
+      husks.push(['path', { d: `M20 ${y} C 14 ${y - 2} 11 ${y + 2} 8 ${y + 1}`, fill: 'none', stroke: 'currentColor', 'stroke-width': '1.3' }]);
+      husks.push(['path', { d: `M20 ${y} C 26 ${y - 2} 29 ${y + 2} 32 ${y + 1}`, fill: 'none', stroke: 'currentColor', 'stroke-width': '1.3' }]);
+    }
+    return svgIcon('book-deco-icon', '0 0 40 56', [
+      ['line', { x1: '20', y1: '4', x2: '20', y2: '52', stroke: 'currentColor', 'stroke-width': '1.4' }],
+      ...husks,
+    ]);
+  }
+  // A small open hand with an extended index finger — the catalog
+  // reference's own "pointing hand" margin mark, drawn as a plain glyph
+  // (U+261E) styled through CSS rather than another hand-built SVG,
+  // since a single Unicode dingbat already reads correctly at this size
+  // and every browser ships a real glyph for it (no image, no font
+  // request — matches this file's own existing '🍸'/'❧' glyph usage
+  // elsewhere in this module).
+  function pointingHand(flip) {
+    return el('span', { class: 'book-toc-hand' + (flip ? ' book-toc-hand--flip' : ''), 'aria-hidden': 'true' }, '☞');
+  }
+
   function coverLeftPage() {
+    // A vintage tavern title page: a thin double-rule ornamental frame,
+    // a small eyebrow, a large display title, a short rule, the
+    // secondary tagline, and two original line-art flourishes (a glass
+    // and a wheat sprig) flanking a short in-fiction blurb — matching
+    // the reference photo's own layered large/small titles + a line
+    // illustration + a short descriptive paragraph, re-themed for this
+    // tavern's own food/drink content rather than copying the reference
+    // photo's actual clothing-catalog text.
     return el('div', { class: 'book-page book-cover-face' }, [
-      el('p', { class: 'book-eyebrow' }, 'LAS VEGAS · THE COUNTER'),
-      el('h1', { class: 'book-title' }, 'The Counter’s Book'),
-      el('p', { class: 'book-cover-note' }, 'A recipe book, a meal menu and a drinks menu, bound as one.'),
-      el('div', { class: 'book-cover-mark', 'aria-hidden': 'true' }, '🍸'),
+      el('div', { class: 'book-cover-frame' }, [
+        el('p', { class: 'book-cover-kicker' }, 'LAS VEGAS'),
+        el('h1', { class: 'book-cover-title' }, 'The Tavern Book'),
+        el('div', { class: 'book-cover-rule', 'aria-hidden': 'true' }),
+        el('p', { class: 'book-cover-tagline' }, 'Good food. Fine drinks. Great company.'),
+        el('div', { class: 'book-cover-deco' }, [glassIcon(), wheatIcon()]),
+        el('p', { class: 'book-cover-blurb' },
+          'Within these pages: a bartender’s own recipes, a kitchen’s meals, and a cellar’s drinks — everything the counter has to offer, bound as one.'),
+      ]),
     ]);
   }
 
   function coverRightPage() {
-    return el('div', { class: 'book-page' }, [
-      el('p', { class: 'book-running-head' }, 'Contents'),
-      el('ul', { class: 'book-toc' }, [
-        ['mixology', 'The Mixology Book', 'Plan real drinks from what’s in your own kitchen.'],
-        ['meal', 'Meals', 'Order something to eat.'],
-        ['drink', 'Drinks', 'Order something to drink.'],
-      ].map(([key, label, desc]) => el('li', {}, [
-        el('button', { class: 'book-toc-entry', onclick: () => goToChapter(key) }, [
-          el('strong', {}, label), el('span', {}, desc),
+    // A hand-written-looking table of contents, in the reference
+    // photo's own style — no card/box chrome around each entry; the
+    // text sits directly on the page, separated by thin horizontal
+    // rules with a small centred diamond, with a pointing-hand mark on
+    // either side of the page title. Each entry is one wide clickable
+    // row (not just its own label text) with a book-toc-hint span that
+    // CSS reveals on hover/focus/touch as the "you can click this"
+    // affordance the reference's own pointing hands suggest.
+    const entries = [
+      ['mixology', 'The Mixology Book'],
+      ['meal', 'Meals'],
+      ['drink', 'Drinks'],
+    ];
+    return el('div', { class: 'book-page book-toc-page' }, [
+      el('div', { class: 'book-toc-heading' }, [pointingHand(false), el('h2', {}, 'Contents'), pointingHand(true)]),
+      el('div', { class: 'book-toc-rule' }),
+      el('ul', { class: 'book-toc' }, entries.map(([key, label], i) => el('li', { class: 'book-toc-row' }, [
+        i > 0 ? el('div', { class: 'book-toc-divider', 'aria-hidden': 'true' }, el('span', {}, '◆')) : null,
+        el('button', {
+          class: 'book-toc-entry', onclick: () => goToChapter(key),
+          'aria-label': label,
+        }, [
+          el('span', { class: 'book-toc-label' }, label),
+          el('span', { class: 'book-toc-hint', 'aria-hidden': 'true' }, '☞'),
         ]),
-      ]))),
+      ].filter(Boolean)))),
     ]);
   }
 
@@ -254,7 +340,16 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
     return []; // 'mixology' doesn't paginate — see buildPagesContent
   }
 
-  function perPage() { return stage === 'cover' ? 2 : (spreadQuery.matches ? 2 : 1); }
+  // The cover's left (title) + right (Contents) pages follow the exact
+  // same mobile single-page rule every other stage already uses — the
+  // CSS below 820px width unconditionally hides .book-slot--right (so a
+  // narrow viewport only ever has room to show one real page at a time).
+  // An earlier version hardcoded 2 for 'cover' unconditionally, which
+  // disagreed with that CSS: the Contents page was built into the DOM
+  // but never actually visible on mobile, with .book-bookmarks' own
+  // always-present tab strip being the only "Mixology Book/Meals/Drinks"
+  // text a mobile reader could actually see.
+  function perPage() { return spreadQuery.matches ? 2 : 1; }
 
   function pagerInfo() {
     const pages = flatPages();
@@ -463,7 +558,12 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
       btn.classList.toggle('is-active', active);
     }
 
-    const paginated = stage === 'list' || stage === 'detail';
+    // On mobile (single visible page) the cover's own Contents page is a
+    // second page a reader must be able to turn to, exactly like any
+    // other stage's second page — the Prev/Next buttons and the edge-tap
+    // gesture both already work generically off pagerInfo()/perPage(),
+    // this just stops hiding them specifically for 'cover'.
+    const paginated = stage === 'list' || stage === 'detail' || (stage === 'cover' && perPage() === 1);
     if (!paginated) {
       navEl.replaceChildren();
       navEl.hidden = true;

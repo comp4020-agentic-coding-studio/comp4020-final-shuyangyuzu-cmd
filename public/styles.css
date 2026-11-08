@@ -344,10 +344,74 @@ body.world-mode { padding:0; overflow:hidden; background:#3e3036; }
    eating action is actually in progress for this viewer. */
 .eating-cutscene { position:absolute; inset:0; z-index:30; display:none; image-rendering:pixelated; }
 .world-hud { position:absolute; top:22px; left:24px; right:24px; display:flex; justify-content:space-between; gap:16px; align-items:center; pointer-events:none; }
-.world-brand { display:flex; align-items:center; gap:12px; color:#fae9cd; padding:12px 18px; border:1px solid #d9b27b40; background:#272531e8; border-radius:14px; box-shadow:0 5px 24px #0003; }
-.brand-mark { color:#e9b86a; font-size:28px; }
-.world-brand strong { font-size:14px; letter-spacing:2px; display:block; }
-.world-brand small { display:block; color:#c0af9d; font-size:11px; margin-top:3px; }
+/* 2026-11-08 correction (user's own explicit instruction, with a real
+   screenshot marking the whole brand box): the entire area — background,
+   border and text — is now one single hand-carved wooden tavern plaque,
+   not a dark glass panel with a small wood icon beside it. Layered CSS
+   gradients stand in for real wood grain (a base warm-brown tone, a
+   repeating diagonal grain texture, and radial highlights/shadows for a
+   gently rounded, lightly carved plank surface) — no image asset, per
+   CLAUDE.md's visual-assets rule (drawn in code, nothing borrowed from a
+   reference). A thick, uneven-looking border (a darker wood tone plus an
+   inset highlight/shadow pair) reads as a real plank edge rather than a
+   flat CSS rule; the text sits directly on the wood in a dark,
+   handwriting-style font stack (every one of these is either a system
+   font already on the device or Georgia/serif as the final fallback — no
+   new network font request, consistent with every other font stack this
+   file already uses) with a carved/routed-looking text-shadow. */
+/* 2026-11-08 second correction (user's own reference photo: a weathered
+   wooden "Hobbiton"-style hanging village sign) — darker, aged wood
+   (not the lighter honey tone the previous round used), beveled/cut
+   corners rather than a plain rounded rectangle, small forged-metal
+   corner rivets, and pale gold/cream lettering for real contrast against
+   the dark wood (replacing the previous round's own dark-brown-on-wood
+   text, which the user explicitly superseded with this round's colour
+   direction). `clip-path` cuts the four corners at an angle (an
+   elongated octagon, matching the reference photo's own corner
+   treatment) rather than rounding them; the four rivets are plain
+   radial-gradient dots layered into `background-image` (a dark rim plus
+   a small off-centre highlight each, no extra DOM elements needed) sitting
+   just inside each cut corner, the position a real metal corner-bracket
+   bolt would occupy. Horizontal wood grain (the reference's own grain
+   direction, not diagonal) plus a few longer, fainter streaks stand in
+   for real weathering — still pure CSS gradients, nothing borrowed from
+   a reference image, per CLAUDE.md's visual-assets rule. */
+.world-brand {
+  position:relative;
+  display:flex; flex-direction:column; justify-content:center; gap:3px;
+  padding:16px 26px 18px;
+  color:#3a2518;
+  clip-path:polygon(14px 0,calc(100% - 14px) 0,100% 14px,100% calc(100% - 14px),calc(100% - 14px) 100%,14px 100%,0 calc(100% - 14px),0 14px);
+  background-image:
+    radial-gradient(circle at 16px 16px, #d9b06c 0 2px, #0000 3px),
+    radial-gradient(circle at 16px 16px, #241408 0 4px, #0000 5px),
+    radial-gradient(circle at calc(100% - 16px) 16px, #d9b06c 0 2px, #0000 3px),
+    radial-gradient(circle at calc(100% - 16px) 16px, #241408 0 4px, #0000 5px),
+    radial-gradient(circle at 16px calc(100% - 16px), #d9b06c 0 2px, #0000 3px),
+    radial-gradient(circle at 16px calc(100% - 16px), #241408 0 4px, #0000 5px),
+    radial-gradient(circle at calc(100% - 16px) calc(100% - 16px), #d9b06c 0 2px, #0000 3px),
+    radial-gradient(circle at calc(100% - 16px) calc(100% - 16px), #241408 0 4px, #0000 5px),
+    repeating-linear-gradient(0deg, #0000 0 3px, #00000022 3px 4px, #0000 4px 9px),
+    repeating-linear-gradient(0deg, #ffffff0a 0 1px, #0000 1px 14px),
+    linear-gradient(115deg, #ffffff10 0%, #0000 22% 78%, #00000022 100%),
+    radial-gradient(135% 170% at 25% 8%, #5c3f26 0%, #42301f 55%, #2f2115 100%);
+  box-shadow:
+    inset 0 0 0 3px #1c1109,
+    inset 0 0 0 5px #6b4a2c,
+    inset 0 3px 5px #ffe6b833,
+    inset 0 -5px 10px #0000007d,
+    0 7px 18px #00000066;
+}
+.world-brand strong {
+  font-family:'Luminari','Herculanum','Copperplate','Papyrus',Georgia,fantasy,serif;
+  font-size:20px; font-weight:700; letter-spacing:1.5px; display:block;
+  color:#f3dfa8; text-shadow:0 1px 0 #00000090, 0 0 10px #f3dfa83d;
+}
+.world-brand small {
+  font-family:'Bradley Hand','Segoe Print','Comic Sans MS',Georgia,cursive,serif;
+  display:block; color:#d8c190; font-size:12px; margin-top:1px; font-weight:600;
+  text-shadow:0 1px 1px #00000090;
+}
 .hud-actions { display:flex; gap:10px; align-items:center; pointer-events:auto; }
 .online-count { background:#272531e8; color:#e6d6bd; padding:11px 15px; border-radius:12px; font-size:12px; }
 .online-count::before { content:'●'; color:#9cc9a3; margin-right:8px; }
@@ -389,6 +453,16 @@ button.stamina-chip { display:flex; align-items:center; gap:7px; padding:9px 12p
 .password-toggle:hover,.password-toggle:focus-visible { color:#453b3f; background:#00000008; outline:none; }
 .password-toggle-active { color:#6b5a8a; }
 .auth-migrate-row { display:flex; align-items:center; gap:8px; margin:12px 0; }
+/* Real-time username-availability status (2026-11-08), shown under the
+   username field only while signing up. Empty/no-status text collapses
+   to nothing rather than reserving blank space, since "no check has run
+   yet" (a blank field) is a real, distinct state from any of the three
+   colored ones below. */
+.auth-username-status { margin:4px 0 0; font-size:12px; min-height:0; }
+.auth-username-status:empty { display:none; }
+.auth-username-status.auth-username-available { color:#2f8f52; font-weight:650; }
+.auth-username-status.auth-username-taken { color:#c04b3f; font-weight:650; }
+.auth-username-status.auth-username-checking { color:#8a7a68; }
 .auth-migrate-row label { margin:0; font-weight:400; color:#453b3f; }
 .auth-migrate-row input { width:auto; padding:0; }
 .auth-forgot-link { background:transparent; border:none; color:#6b5a8a; font-size:12px; text-decoration:underline; padding:4px 0; margin:4px 0 0; width:auto; display:block; }
@@ -465,10 +539,44 @@ button.enter-world { background:#62506e; color:#fff6e6; border-radius:10px; padd
 button.speech-send { padding:11px 18px; margin:0; }
 @media(max-width:600px) {
   .world-hud { top:12px; left:12px; right:12px; align-items:flex-start; }
-  .world-brand { padding:9px 11px; gap:6px; }
-  .world-brand strong { font-size:10px; letter-spacing:1px; }
+  /* The plaque itself shrinks but stays a real cut-corner wood plank at
+     every width — the clip-path's own corner-cut size and the rivets'
+     own radial-gradient positions are both re-declared at a smaller,
+     proportional scale (8-9px cuts/rivet-inset instead of 14/16px)
+     rather than just shrinking the padding around an unchanged full-size
+     cut, which would make a phone-sized plaque look like a much larger
+     sign cropped down rather than a correctly-proportioned smaller one.
+     The subtitle is dropped (not shrunk further) at this width purely
+     for space, matching this file's own existing mobile-HUD-density
+     pattern elsewhere; the brand name itself stays a legible, readable
+     size instead of shrinking to the illegible 10px the previous
+     icon+label layout used, since it's now the plaque's own only line
+     of text. */
+  .world-brand {
+    padding:9px 14px 11px; gap:0;
+    clip-path:polygon(8px 0,calc(100% - 8px) 0,100% 8px,100% calc(100% - 8px),calc(100% - 8px) 100%,8px 100%,0 calc(100% - 8px),0 8px);
+    background-image:
+      radial-gradient(circle at 9px 9px, #d9b06c 0 1.2px, #0000 2px),
+      radial-gradient(circle at 9px 9px, #241408 0 2.4px, #0000 3px),
+      radial-gradient(circle at calc(100% - 9px) 9px, #d9b06c 0 1.2px, #0000 2px),
+      radial-gradient(circle at calc(100% - 9px) 9px, #241408 0 2.4px, #0000 3px),
+      radial-gradient(circle at 9px calc(100% - 9px), #d9b06c 0 1.2px, #0000 2px),
+      radial-gradient(circle at 9px calc(100% - 9px), #241408 0 2.4px, #0000 3px),
+      radial-gradient(circle at calc(100% - 9px) calc(100% - 9px), #d9b06c 0 1.2px, #0000 2px),
+      radial-gradient(circle at calc(100% - 9px) calc(100% - 9px), #241408 0 2.4px, #0000 3px),
+      repeating-linear-gradient(0deg, #0000 0 3px, #00000022 3px 4px, #0000 4px 9px),
+      repeating-linear-gradient(0deg, #ffffff0a 0 1px, #0000 1px 14px),
+      linear-gradient(115deg, #ffffff10 0%, #0000 22% 78%, #00000022 100%),
+      radial-gradient(135% 170% at 25% 8%, #5c3f26 0%, #42301f 55%, #2f2115 100%);
+    box-shadow:
+      inset 0 0 0 2px #1c1109,
+      inset 0 0 0 3.5px #6b4a2c,
+      inset 0 2px 3px #ffe6b833,
+      inset 0 -3px 6px #0000007d,
+      0 5px 12px #00000066;
+  }
+  .world-brand strong { font-size:15px; letter-spacing:.5px; }
   .world-brand small { display:none; }
-  .brand-mark { font-size:18px; }
   .hud-actions { flex-wrap:wrap; justify-content:flex-end; gap:4px; max-width:155px; }
   .online-count,button.hud-button { padding:9px 10px; font-size:10px; }
   .stamina-track { width:30px; height:6px; }
@@ -716,15 +824,105 @@ body.table-mode { --bg:#50372a; --panel:#49372f; --fg:#f5e7ca; --muted:#d0b997; 
 .book-page .mix-primary{background:#93653c;color:#fff4df;border-color:#93653c}.book-page .mix-primary:hover{background:#794f2e}
 .book-page a{color:#86603c}
 
-.book-cover-face{align-items:flex-start;justify-content:center}
-.book-title{font-size:38px!important}
-.book-cover-note{color:#846d50;max-width:420px}
-.book-cover-mark{margin-top:auto;align-self:center;font-size:72px;opacity:.5;filter:grayscale(.3)}
-.book-toc{list-style:none;padding:0;margin:14px 0 0;display:flex;flex-direction:column;gap:12px}
-.book-toc-entry{display:flex;flex-direction:column;align-items:flex-start;gap:4px;width:100%;padding:16px 18px;text-align:left;background:#fffaf0;border:1px solid #ddcdb6;border-radius:10px}
-.book-toc-entry strong{font:400 20px Georgia,serif;color:#4a3223}
-.book-toc-entry span{font-size:12px;color:#846d50}
-.book-toc-entry:hover{background:#f3e6c8}
+/* 2026-11-08 redesign of the book's own opened-cover spread (the user's
+   own reference photo: a vintage catalog title page + a hand-written
+   table of contents) — see public/menuBook.js's own coverLeftPage/
+   coverRightPage comment for the content-level reasoning. Both pages
+   keep the book's own existing warm cream paper (#f6ecd4, unchanged)
+   and existing open/turn interactions untouched; only what's drawn ON
+   the page changes. */
+.book-cover-face{align-items:center;justify-content:center;text-align:center}
+.book-cover-frame{
+  width:100%; max-width:440px; display:flex; flex-direction:column; align-items:center; gap:14px;
+  padding:28px 22px; box-sizing:border-box;
+  border:2px solid #b4976c;
+  position:relative;
+}
+/* A thin double-rule frame (an outer solid border plus an inset second
+   line with its own small corner gap, the exact "ornate double border"
+   the reference photo's own title page uses) — built from one extra
+   pseudo-element's own inset box-shadow rather than a second nested DOM
+   node, since the two lines never need independent content. */
+.book-cover-frame::before{
+  content:''; position:absolute; inset:7px; border:1px solid #c7ac7f; pointer-events:none;
+}
+.book-cover-kicker{font:700 12px/1 Georgia,serif;letter-spacing:5px;color:#8a6a40;margin:0;text-transform:uppercase}
+.book-cover-title{
+  font-family:'Luminari','Herculanum','Copperplate','Papyrus',Georgia,fantasy,serif;
+  font-size:40px!important; font-weight:700; color:#4a3223; margin:0; letter-spacing:1px; line-height:1.1;
+}
+.book-cover-rule{width:120px;height:1px;background:linear-gradient(90deg,#0000,#a9875a,#0000);margin:0}
+.book-cover-tagline{font:italic 400 15px/1.4 Georgia,serif;color:#6e5436;margin:0;max-width:360px}
+.book-cover-deco{display:flex;align-items:center;justify-content:center;gap:28px;color:#a9875a;margin:4px 0}
+.book-deco-icon{width:30px;height:42px}
+.book-cover-blurb{font:400 13px/1.6 Georgia,serif;color:#846d50;max-width:380px;margin:0}
+
+/* 2026-11-08: the whole heading+rule+list group is centered as ONE flex
+   block within the page — exactly the same mechanism .book-cover-face
+   already uses for the left page's title frame (justify-content:center
+   on a flex column of equal page height), rather than a second,
+   independently-tuned centering scheme. Because both pages share the
+   identical rendered height, this guarantees the two blocks' CENTRES
+   land on the same pixel row for free; matching their overall heights
+   (via the list's own increased row gap below) is what then also keeps
+   their top/bottom edges close, without hardcoding either page's exact
+   pixel geometry against the other (which would silently drift out of
+   sync the next time either page's own content changes). "Contents"
+   itself is unaffected by this — it's still the first element of the
+   centered group, so it still visually reads as sitting above the
+   entries, the user's own explicit requirement; what moves is the
+   group's position as a whole, not Contents relative to the list. */
+.book-toc-page{align-items:center;justify-content:center}
+.book-toc-heading{display:flex;align-items:center;justify-content:center;gap:14px;margin:0}
+.book-toc-heading h2{font-family:'Luminari','Herculanum','Copperplate','Papyrus',Georgia,fantasy,serif!important;font-size:26px!important;color:#4a3223;letter-spacing:2px;margin:0!important}
+.book-toc-hand{font-size:22px;color:#a9875a;transform:scaleX(-1);display:inline-block}
+.book-toc-hand--flip{transform:scaleX(1)}
+.book-toc-rule{width:100%;max-width:320px;height:2px;background:linear-gradient(90deg,#0000,#a9875a 15%,#a9875a 85%,#0000);margin:0 0 8px}
+/* A generous, even gap between the three rows (rather than relying on
+   each entry's own small internal padding alone) is what actually
+   spreads the three entries out — this is also most of what grows the
+   block's total height to approximately match the left frame's own
+   height, which is what keeps the two blocks' edges close once both are
+   centered about the same page midpoint. */
+.book-toc{list-style:none;padding:0;margin:0;width:100%;max-width:340px;display:flex;flex-direction:column;align-items:center;gap:22px}
+.book-toc-row{display:flex;flex-direction:column;width:100%;align-items:center}
+.book-toc-divider{display:flex;align-items:center;justify-content:center;color:#c2a981;font-size:11px;margin:2px 0}
+/* The clickable entry itself — text directly on the page (no card/box
+   background, per the user's own explicit "删除原来的卡片／文本框外观"
+   instruction), the whole row is the hit target, and hover/focus/touch
+   all reveal the same "you can click this" affordance: the text darkens
+   toward ink-black, a faint warm-gold wash fills the row, and the
+   pointing-hand hint (invisible at rest) fades in just beside the now-
+   centred label (previously pushed hard to the row's own far right edge
+   by a space-between layout, back when the label itself was left-
+   aligned). A real <button> — keyboard-focusable with the same
+   :focus-visible outline every other control in this book already
+   uses — so Tab/Enter and a screen reader both work identically to a
+   mouse click; "the whole row is clickable" is the button's own
+   full-width box, not a separate click-catching wrapper around a
+   smaller, centred visual label. */
+.book-toc-entry{
+  display:flex; align-items:center; justify-content:center; gap:10px;
+  width:100%; padding:14px 6px; margin:0!important;
+  background:transparent!important; border:none!important; border-radius:0!important;
+  text-align:center; box-shadow:none!important;
+  transition:background-color .15s ease, color .15s ease;
+}
+.book-toc-label{
+  font-family:'Bradley Hand','Segoe Print','Comic Sans MS',Georgia,cursive,serif;
+  font-size:21px; color:#5c4530;
+}
+.book-toc-hint{font-size:17px;color:#a9875a;opacity:0;transform:translateX(-4px);transition:opacity .15s ease,transform .15s ease}
+.book-toc-entry:hover,.book-toc-entry:focus-visible{background-color:#a9875a14!important}
+.book-toc-entry:hover .book-toc-label,.book-toc-entry:focus-visible .book-toc-label{color:#2e2013}
+.book-toc-entry:hover .book-toc-hint,.book-toc-entry:focus-visible .book-toc-hint{opacity:1;transform:translateX(0)}
+/* A touch tap has no hover state to linger in, so :active gives the
+   identical highlight for the duration of the actual press — the phone
+   equivalent of "pointing hand appears", confirmed necessary since
+   :hover alone never fires on a touchscreen at all. */
+.book-toc-entry:active{background-color:#a9875a22!important}
+.book-toc-entry:active .book-toc-label{color:#2e2013}
+
 .book-blank{align-items:center;justify-content:center}
 .book-blank-mark{font-size:40px;color:#d8c6a4}
 
@@ -790,7 +988,13 @@ body.table-mode { --bg:#50372a; --panel:#49372f; --fg:#f5e7ca; --muted:#d0b997; 
   .book-pages{border-width:9px}
   .book-slot{padding:18px 16px 44px}
   .book-leaf-face>.book-page{padding:18px 16px 44px}
-  .book-title{font-size:28px!important}
+  .book-cover-title{font-size:28px!important}
+  .book-cover-frame{padding:18px 14px;gap:10px}
+  .book-cover-blurb{font-size:12px}
+  .book-deco-icon{width:24px;height:34px}
+  .book-cover-deco{gap:18px}
+  .book-toc-heading h2{font-size:21px!important}
+  .book-toc-label{font-size:18px}
   .book-page h2{font-size:22px}
   .menu-img,.menu-img-fallback{aspect-ratio:16/9}
 }
@@ -812,6 +1016,7 @@ body.table-mode { --bg:#50372a; --panel:#49372f; --fg:#f5e7ca; --muted:#d0b997; 
 @media(max-width:750px){.mix-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.mix-filters{grid-template-columns:1fr 1fr}.mix-filters>input{grid-column:1/-1}.mix-ingredients{grid-template-columns:repeat(2,minmax(0,1fr))}.mix-intro{padding:18px}.mix-intro h2{font-size:28px}.mix-detail-columns{gap:20px}.hud-actions{flex-wrap:wrap;justify-content:flex-end}}
 @media(max-width:500px){.mixology-book{width:calc(100vw - 16px);height:calc(100dvh - 16px);max-height:calc(100dvh - 16px);border-radius:12px}.mix-header{padding:15px}.mix-header h1{font-size:23px}.mixology-book nav{padding:8px;gap:0}.mixology-book nav button{flex:1;font-size:11px;padding:10px 6px}.mix-main{padding:18px 15px}.mix-storage{padding:8px 15px;font-size:10px}.mix-intro{gap:4px;padding:15px}.mix-intro h2{font-size:25px}.mix-intro p:last-child{font-size:12px}.mix-intro>.drink-art{display:none}.mix-grid{gap:10px}.mix-card-art{height:113px}.mix-card-copy{padding:12px}.mix-card h3{font-size:20px}.mix-card button{font-size:11px;padding:10px 6px}.mix-flavour{min-height:36px}.mix-match{min-height:55px}.mix-ingredients{grid-template-columns:1fr}.mixology-book h2{font-size:27px}.mix-detail-hero{gap:10px;padding:14px}.mix-detail-hero>.drink-art{transform:scale(.85);margin-left:-12px;width:95px}.mix-detail-hero h2{font-size:28px}.mix-detail-columns{grid-template-columns:1fr}.mix-detail-hero small{font-size:11px}.mix-planned>div{gap:8px}.mix-pantry-tools button{font-size:11px}.mix-pantry-callout{font-size:11px}.mix-shopping{font-size:12px}.mix-shopping strong{font-size:11px}.order-grid{grid-template-columns:1fr}}
 .poker-controls{margin-top:1rem;padding:1rem;background:#281e18;border-radius:8px;display:flex;align-items:center;gap:.6rem;flex-wrap:wrap}.poker-controls p{flex-basis:100%;margin:.2rem 0}.poker-controls input{width:95px}.poker-search{margin-top:1rem}.poker-search ul{list-style:none;padding:0}.poker-search li{padding:.5rem;display:flex;gap:.8rem;align-items:center;flex-wrap:wrap}.poker-rules{margin:.8rem 0}.poker-rules a{color:#efd08f}.poker-invite,.poker-resume{position:fixed;right:1rem;top:90px;z-index:120;background:#33271f;color:#f5e7c9;padding:1rem;max-width:min(360px,calc(100vw - 2rem));border:1px solid #d2aa68;border-radius:10px;box-shadow:0 8px 24px #0007}.poker-invite[hidden],.poker-resume[hidden]{display:none}.poker-invite button,.poker-resume button{margin:.3rem;padding:.5rem .8rem}.poker-resume{top:auto;bottom:1rem;right:auto;left:1rem}
+.poker-waitlist-ready{color:#9ee6a8;font-weight:600}
 @media(max-width:520px){.poker-page{margin:.3rem;padding:.65rem}.poker-header h1{font-size:1.4rem;flex-basis:100%}.poker-seat-label{padding:3px 4px}.poker-seat small{max-width:78px}.poker-table-scene{margin:.6rem auto}.poker-controls{padding:.65rem}}
 
 /* All Fives: a private hand near the viewer, opponent across the felt. */
@@ -819,11 +1024,12 @@ body.table-mode { --bg:#50372a; --panel:#49372f; --fg:#f5e7ca; --muted:#d0b997; 
 .domino-header{display:flex;align-items:center;gap:14px;flex-wrap:wrap}.domino-header>div{flex:1}.domino-header h1{font-family:Georgia,serif;font-size:36px;margin:6px 0}.domino-meta{color:#e1bf8c}
 .domino-board{display:flex;box-sizing:border-box;width:min(100%,70vh);aspect-ratio:1;overflow:auto;border:14px solid #795333;border-radius:42px;background:radial-gradient(ellipse,#356c57,#1c4439);box-shadow:inset 0 4px 20px #102a21;margin:18px auto}.domino-layout{position:relative;flex:none;margin:auto}.domino-played{position:absolute;display:grid;justify-items:center;gap:5px}.domino-played .domino-bone{position:absolute;width:74px;height:40px;box-sizing:border-box}.domino-empty{margin:auto}.domino-played small{font-size:10px;color:#fff2c2}.domino-played.spinner .domino-bone{outline:3px solid #d7b875}.domino-empty{text-align:center;padding:70px 15px;color:#f0dfb6}
 .domino-bone{display:inline-flex!important;flex-direction:row;align-items:center;justify-content:center;gap:0;padding:4px!important;background:#fff3d5!important;color:#342c26!important;border:2px solid #c8b793!important;border-radius:7px!important;box-shadow:0 4px 0 #ac9576!important;min-width:62px;min-height:40px;font-size:26px!important;line-height:1}.domino-bone>span{width:27px;text-align:center}.domino-bone>span+span{border-left:1px solid #b5a383}.domino-bone.selected{outline:3px solid #f1bd51;transform:translateY(-5px)}.domino-bone:disabled{opacity:.55}
-.domino-hand{display:flex;flex-wrap:wrap;gap:12px;justify-content:center;margin:20px 0}.domino-player{display:flex;justify-content:center;gap:18px;flex-wrap:wrap;padding:10px;border:1px solid #88633f;border-radius:8px}.domino-player.active{border-color:#efc16a;box-shadow:0 0 0 1px #efc16a}.domino-opponent{display:flex;gap:5px;justify-content:center;flex-wrap:wrap;margin:10px}.domino-back{display:inline-block;background:#886345;color:#e2c494;border:2px solid #c4a074;border-radius:4px;padding:8px 3px}.domino-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.domino-controls p{width:100%}.domino-request{padding:12px;background:#55422e;display:flex;gap:10px;align-items:center}.domino-resume{position:fixed;bottom:28px;left:20px;z-index:60;display:flex;gap:8px}.domino-resume[hidden]{display:none}.domino-rules{max-height:85vh;overflow:auto}
+.domino-hand{display:flex;flex-wrap:wrap;gap:12px;justify-content:center;margin:20px 0}.domino-player{display:flex;justify-content:center;gap:18px;flex-wrap:wrap;padding:10px;border:1px solid #88633f;border-radius:8px}.domino-player.active{border-color:#efc16a;box-shadow:0 0 0 1px #efc16a}.domino-opponent{display:flex;gap:5px;justify-content:center;flex-wrap:wrap;margin:10px}.domino-back{display:inline-block;background:#886345;color:#e2c494;border:2px solid #c4a074;border-radius:4px;padding:8px 3px}.domino-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.domino-controls p{width:100%}.domino-request{padding:12px;background:#55422e;display:flex;gap:10px;align-items:center}.domino-waitlist-ready{color:#9ee6a8;font-weight:600}.domino-resume{position:fixed;bottom:28px;left:20px;z-index:60;display:flex;gap:8px}.domino-resume[hidden]{display:none}.domino-rules{max-height:85vh;overflow:auto}
 @media(max-width:600px){body.table-mode:has(.domino-page){padding:8px}.domino-page{padding:12px;border-radius:12px}.domino-header h1{font-size:26px}.domino-board{border-width:8px;border-radius:22px}.domino-header button{font-size:12px}.domino-resume{bottom:14px;left:10px}}
 .domino-bone .domino-pips{display:grid;grid-template-columns:repeat(3,5px);grid-template-rows:repeat(3,5px);gap:2px;padding:3px;width:25px;box-sizing:content-box}.domino-pips i{display:block;width:5px;height:5px}.domino-pips i.pip{background:#342c26;border-radius:50%}
 /* The straight rail belongs to the dealer. The four nameplates follow the arc. */
 .bj-room {min-height:calc(100dvh - 4rem)}
+.bj-waitlist-ready {color:#9ee6a8;font-weight:600}
 .bj-actions {display:flex;align-items:center;gap:.65rem;flex-wrap:wrap}
 .bj-header strong {color:#f4d084}
 .bj-felt {

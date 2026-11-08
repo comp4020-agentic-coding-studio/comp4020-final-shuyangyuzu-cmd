@@ -1,20 +1,24 @@
 import { expect, inject, it } from 'vitest';
 const base=inject('baseUrl');
 async function post(path:string,body:unknown){const r=await fetch(base+path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});return {status:r.status,body:await r.json(),cache:r.headers.get('cache-control')};}
-it('plays invitation-only poker over HTTP, hides cards, waits mid-hand arrivals and preserves refresh state',async()=>{
+// 2026-11-07 correction (user's own explicit instruction): poker's
+// second-seat "invite_required" gate is removed — direct, uninvited open
+// seating now matches blackjack and dominoes — and a hand in progress now
+// refuses ANY new seating attempt outright (including an accepted
+// invitation) rather than silently seating the newcomer to wait for the
+// next deal. Renamed and rewritten accordingly; invitePoker/respondPoker
+// still work unchanged for a seated player who wants to specifically
+// notify an absent friend.
+it('plays open-seating poker over HTTP, hides cards, refuses+waitlists mid-hand arrivals, and preserves refresh state',async()=>{
   expect((await post('/api/poker/me',null)).status).toBe(400);
   const a=(await post('/api/bar/join',{nickname:'Poker HTTP Alice',color:'teal'})).body;
   const b=(await post('/api/bar/join',{nickname:'Poker HTTP Bob',color:'orange'})).body;
   const c=(await post('/api/bar/join',{nickname:'Poker HTTP Carol',color:'pink'})).body;
   const sessions=[a,b,c],opened=await post('/api/poker/open',{...a,mode:'online'});expect(opened.status).toBe(200);const roomId=opened.body.roomId;
   const me=async(s:typeof a)=>(await post('/api/poker/me',s)).body;
-  const invite=async(s:typeof a)=>{
-    await me(s);expect((await post('/api/poker/invite',{...a,roomId,target:s.playerId})).status).toBe(200);
-    const invitation=(await me(s)).invites[0];expect(invitation.sender).toBe('Poker HTTP Alice');
-    expect((await post('/api/poker/respond',{...s,inviteId:invitation.id,join:true})).status).toBe(200);
-  };
   try {
-    await invite(b);
+    // Direct open seating — no invitation needed now.
+    expect((await post('/api/poker/open',{...b,mode:'online'})).status).toBe(200);
     expect((await post('/api/poker/me',a)).cache).toBe('private, no-store');
     let state=(await me(a)).room;
     expect((await post('/api/poker/act',{...b,roomId,version:state.version,type:'deal'})).status).toBe(409);
@@ -24,15 +28,28 @@ it('plays invitation-only poker over HTTP, hides cards, waits mid-hand arrivals 
     expect(state.players.find((p:any)=>p.id===b.playerId).hole).toEqual([]);expect(state.deck).toBeUndefined();
     expect((await post('/api/poker/me',{playerId:a.playerId,sessionSecret:b.sessionSecret})).status).toBe(403);
     expect((await me(a)).room).toEqual(state); // reads / refresh do not redeal
-    const oldVersion=state.version;await invite(c);state=(await me(a)).room;
-    expect(state.players.find((p:any)=>p.id===c.playerId)).toMatchObject({waiting:true,hole:[],stack:500});
-    expect((await post('/api/poker/act',{...a,roomId,version:oldVersion,type:'fold'})).status).toBe(409);
+    // Mid-hand, a new direct-join attempt is refused outright (no more
+    // silent "wait for next deal" seating) and lands on the waitlist —
+    // and, unlike the old accepted-invitation path, a refused join never
+    // mutates room state at all, so the room's own version is untouched
+    // (confirmed directly below) rather than silently advancing.
+    const refused=await post('/api/poker/open',{...c,mode:'online'});
+    expect(refused.status).toBe(409);
+    const cMe=await me(c);
+    expect(cMe.room).toBeNull();
+    expect(cMe.waitlist).toEqual([{roomId,notified:false}]);
+    expect((await me(a)).room.version).toBe(state.version);
     for(let n=0;state.phase!=='showdown'&&n<10;n++){
       const actor=sessions.find(s=>s.playerId===state.actor)!;
       expect((await post('/api/poker/act',{...actor,roomId,version:state.version,type:'allin'})).status).toBe(200);
-      state=(await Promise.all(sessions.map(me))).map(s=>s.room).find(Boolean);
+      state=(await Promise.all([a,b].map(me))).map(s=>s.room).find(Boolean);
     }
-    expect(state.phase).toBe('showdown');expect(state.board).toHaveLength(5);expect(state.players.reduce((sum:number,p:any)=>sum+p.stack,0)).toBe(1500);
+    expect(state.phase).toBe('showdown');expect(state.board).toHaveLength(5);expect(state.players.reduce((sum:number,p:any)=>sum+p.stack,0)).toBe(1000);
+    // Showdown settled the table back to a between-hands phase — the
+    // waitlisted patron is now notified and can sit.
+    expect((await me(c)).waitlist).toEqual([{roomId,notified:true}]);
+    expect((await post('/api/poker/open',{...c,mode:'online'})).status).toBe(200);
+    expect((await me(c)).waitlist).toEqual([]);
     expect((await post('/api/poker/leave',a)).status).toBe(200);
     const seated=(await Promise.all(sessions.map(me))).map(s=>s.room).filter(Boolean);
     expect(seated.length).toBeGreaterThan(0);

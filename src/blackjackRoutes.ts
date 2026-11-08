@@ -14,6 +14,8 @@ export function registerBlackjack(app:Hono,db:Database.Database):void {
       case 'me':return c.json(bj.blackjackMe(db,id,secret,b.active===true));
       case 'act':bj.actBlackjack(db,id,secret,String(b.roomId),Number(b.version),String(b.action),b.bet);return c.json({ok:true});
       case 'leave':bj.leaveBlackjack(db,id,secret);return c.json({ok:true});
+      case 'leaveWaitlist':bj.leaveBlackjackWaitlist(db,id,secret,String(b.roomId));return c.json({ok:true});
+      case 'away':bj.setBlackjackAway(db,id,secret,b.away===true);return c.json({ok:true});
       case 'ack':requireBarSession(db,id,secret);db.prepare('DELETE FROM blackjack_notices WHERE bar_id=?').run(id);return c.json({ok:true});
       default:return c.json({message:'Unknown blackjack action'},404);
     }
