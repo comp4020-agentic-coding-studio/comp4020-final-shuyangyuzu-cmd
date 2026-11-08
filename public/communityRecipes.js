@@ -15,8 +15,13 @@ export function createCommunityBook({ house, model }) {
     const button = (text, fn, cls = '') => n('button', { type: 'button', class: cls, onclick: () => run(fn) }, text);
     let root, main, notice, nav, account = null, lib = null, screen = 'discover', draft = null, editRevision = 0, dirty = false, editId, saveTimer, savePromise = null, saveError = null, disposed = true, epoch = 0, readSeq = 0, poll, dialog;
     let reloadDiscover = null, identityPending = false;
-    let query = '', source = 'all', alcohol = 'all', match = 'all', page = 0, searchTimer, preview = false, partyTab = 'saved', importedLegacy = null;
-    const empty = () => ({ name: '', description: '', tags: [], equipment: '', alcoholFree: false, serves: 1, imageId: null, imageWidth: 35, imageX: 50, imageY: 50, imageZoom: 1, ingredients: [{ name: '', amount: null, unit: 'ml' }], steps: [''], garnish: '' });
+    let query = '', source = 'all', alcohol = 'all', match = 'all', kindFilter = 'all', page = 0, searchTimer, preview = false, partyTab = 'saved', importedLegacy = null;
+    // Drink vs. Food (this round): a player chooses one at publish time.
+    // Existing house/community recipes and every already-saved draft or
+    // party-plan snapshot predate this field entirely and default to
+    // 'drink' server-side (src/community.ts's withKind) — this client
+    // template only needs the default for a BRAND NEW draft.
+    const empty = () => ({ name: '', description: '', tags: [], equipment: '', kind: 'drink', alcoholFree: false, prepMinutes: null, cookMinutes: null, serves: 1, imageId: null, imageWidth: 35, imageX: 50, imageY: 50, imageZoom: 1, ingredients: [{ name: '', amount: null, unit: 'ml' }], steps: [''], garnish: '' });
     const say = (text, bad = false) => { if (notice) {
         notice.textContent = text;
         notice.className = 'cr-notice' + (bad ? ' cr-error' : '');
@@ -85,11 +90,11 @@ export function createCommunityBook({ house, model }) {
     const select = (items, value, change, label) => n('select', { 'aria-label': label, value, onchange: e => change(e.target.value) }, items.map(([v, t]) => n('option', { value: v, selected: v === value }, t)));
     function image(r) { if (!r.imageId) {
         const original = house.RECIPES.find(x => 'house:' + x.id === r.id);
-        return n('div', { class: 'cr-placeholder', 'aria-label': 'Drink illustration' }, original ? n('div', { class: 'drink-art drink-' + original.glass, style: '--drink-tone:' + original.tone, 'aria-hidden': 'true' }, n('span', { class: 'drink-vessel' }), n('span', { class: 'drink-garnish' }), n('span', { class: 'drink-stem' })) : '🍹');
-    } return n('img', { src: '/api/community/images/' + encodeURIComponent(r.imageId), alt: r.name || 'Drink photograph', loading: 'lazy', style: `object-position:${r.imageX}% ${r.imageY}%;transform:scale(${r.imageZoom})` }); }
+        return n('div', { class: 'cr-placeholder', 'aria-label': r.kind === 'food' ? 'Dish illustration' : 'Drink illustration' }, original ? n('div', { class: 'drink-art drink-' + original.glass, style: '--drink-tone:' + original.tone, 'aria-hidden': 'true' }, n('span', { class: 'drink-vessel' }), n('span', { class: 'drink-garnish' }), n('span', { class: 'drink-stem' })) : (r.kind === 'food' ? '🍽️' : '🍹'));
+    } return n('img', { src: '/api/community/images/' + encodeURIComponent(r.imageId), alt: r.name || (r.kind === 'food' ? 'Dish photograph' : 'Drink photograph'), loading: 'lazy', style: `object-position:${r.imageX}% ${r.imageY}%;transform:scale(${r.imageZoom})` }); }
     function hero(r, editing = false) {
         const pic = n('div', { class: 'cr-photo' }, image(r));
-        const copy = n('div', { class: 'cr-hero-copy' }, n('small', {}, editing ? 'YOUR RECIPE' : r.source === 'house' ? 'HOUSE RECIPE' : 'COMMUNITY RECIPE'), n('h2', {}, r.name || 'Your drink name'), n('p', {}, r.description || 'A drink worth sharing.'), n('p', { class: 'cr-muted' }, r.equipment ? 'You’ll need: ' + r.equipment : ''), !editing ? n('small', {}, 'By ' + (r.author || account?.username || 'you')) : null);
+        const copy = n('div', { class: 'cr-hero-copy' }, n('small', {}, editing ? 'YOUR RECIPE' : r.source === 'house' ? 'HOUSE RECIPE' : 'COMMUNITY RECIPE'), n('h2', {}, r.name || 'Your recipe name'), n('p', {}, r.description || 'A recipe worth sharing.'), n('p', { class: 'cr-muted' }, r.equipment ? 'You’ll need: ' + r.equipment : ''), !editing ? n('small', {}, 'By ' + (r.author || account?.username || 'you')) : null);
         const h = n('div', { class: 'cr-hero'+(editing?' cr-hero-edit':''), style: `--photo-width:${r.imageWidth}%;--hero-height:${r.heroHeight??260}px` }, pic, copy);
         if (editing) {
             const paintPhoto=()=>{
@@ -140,14 +145,25 @@ export function createCommunityBook({ house, model }) {
         lib = state.library;
         throw e;
     } }
-    function card(r, extras = []) { return n('article', { class: 'cr-card' }, n('div', { class: 'cr-card-image' }, image(r)), n('div', {}, n('small', {}, r.source === 'house' ? 'HOUSE RECIPE' : 'COMMUNITY · ' + r.author), n('h3', {}, r.name), n('p', {}, r.description), button('View recipe', () => showRecipe(r.id)), ...extras)); }
+    function card(r, extras = []) { return n('article', { class: 'cr-card' }, n('div', { class: 'cr-card-image' }, image(r)), n('div', {}, n('small', {}, (r.source === 'house' ? 'HOUSE RECIPE' : 'COMMUNITY · ' + r.author) + ' · ' + (r.kind === 'food' ? 'Food' : 'Drink')), n('h3', {}, r.name), n('p', {}, r.description), button('View recipe', () => showRecipe(r.id)), ...extras)); }
     async function discover() {
         let lastResult = '';
-        const search = n('input', { type: 'search', placeholder: 'Drink, ingredient, tag or creator…', value: query, 'aria-label': 'Search recipes', maxlength: 120, oninput: e => { query = e.target.value; page = 0; clearTimeout(searchTimer); searchTimer = setTimeout(() => run(load), 220); } });
-        const filters = n('div', { class: 'cr-tools' }, search, select([['all', 'All recipes'], ['house', 'House recipes'], ['community', 'Community recipes']], source, v => { source = v; page = 0; run(load); }, 'Recipe source'), select([['all', 'All drinks'], ['free', 'Alcohol-free'], ['cocktail', 'With alcohol']], alcohol, v => { alcohol = v; page = 0; run(load); }, 'Alcohol filter'), select([['all', 'Any ingredients'], ['ready', 'Ready from my pantry'], ['almost', 'Missing 1–2 ingredients']], match, v => { match = v; page = 0; run(load); }, 'Pantry filter'), button('+ Create recipe', () => newDraft(), 'cr-primary'));
+        const search = n('input', { type: 'search', placeholder: 'Recipe, ingredient, tag or creator…', value: query, 'aria-label': 'Search recipes', maxlength: 120, oninput: e => { query = e.target.value; page = 0; clearTimeout(searchTimer); searchTimer = setTimeout(() => run(load), 220); } });
+        // Alcohol filtering only ever means something for a drink
+        // (CLAUDE.md: "酒精筛选仅适用于饮品") — switching the kind filter
+        // to Food resets and disables the alcohol select rather than
+        // leaving it offering a combination the server will always
+        // return zero results for.
+        const alcoholSelect = select([['all', 'All drinks'], ['free', 'Alcohol-free'], ['cocktail', 'With alcohol']], alcohol, v => { alcohol = v; page = 0; run(load); }, 'Alcohol filter');
+        alcoholSelect.disabled = kindFilter === 'food';
+        const kindSelect = select([['all', 'All'], ['drink', 'Drinks'], ['food', 'Food']], kindFilter, v => { kindFilter = v; if (v === 'food') {
+            alcohol = 'all';
+            alcoholSelect.value = 'all';
+        } alcoholSelect.disabled = v === 'food'; page = 0; run(load); }, 'Recipe kind');
+        const filters = n('div', { class: 'cr-tools' }, search, select([['all', 'All recipes'], ['house', 'House recipes'], ['community', 'Community recipes']], source, v => { source = v; page = 0; run(load); }, 'Recipe source'), kindSelect, alcoholSelect, select([['all', 'Any ingredients'], ['ready', 'Ready from my pantry'], ['almost', 'Missing 1–2 ingredients']], match, v => { match = v; page = 0; run(load); }, 'Pantry filter'), button('+ Create recipe', () => newDraft(), 'cr-primary'));
         const list = n('div', { class: 'cr-grid' }), pager = n('div', { class: 'cr-tools' }), count = n('p', { class: 'cr-muted' });
-        main.replaceChildren(n('h1', {}, 'A recipe worth sharing'), n('p', {}, 'House favourites and drinks made by this community.'), filters, count, list, pager);
-        async function load() { const seq = ++readSeq; const result = await api('discover?' + new URLSearchParams({ q: query, source, alcohol, match, page: String(page) })); if (seq !== readSeq || screen !== 'discover' || disposed)
+        main.replaceChildren(n('h1', {}, 'A recipe worth sharing'), n('p', {}, 'House favourites, drinks and food made by this community.'), filters, count, list, pager);
+        async function load() { const seq = ++readSeq; const result = await api('discover?' + new URLSearchParams({ q: query, source, alcohol, match, kind: kindFilter, page: String(page) })); if (seq !== readSeq || screen !== 'discover' || disposed)
             return; const fingerprint = JSON.stringify(result); if (fingerprint === lastResult)
             return; lastResult = fingerprint; count.textContent = result.total + ' recipes' + (query ? ' · closest and related matches' : ''); list.replaceChildren(...result.recipes.map(r => card(r))); if (!result.total)
             list.append(n('p', {}, 'No recipes found. Try another name or ingredient.')); pager.replaceChildren(button('← Previous', () => { if (page) {
@@ -160,25 +176,173 @@ export function createCommunityBook({ house, model }) {
         reloadDiscover = load;
         await load();
     }
-    function detail(r, { isPreview = false, plan = false } = {}) {
-        let glasses = r.serves;
-        const measures = n('div'), steps = n('section', {}, n('h3', {}, 'Make it'), n('ol', {}, r.steps.map(s => n('li', {}, s))), r.garnish ? n('p', {}, 'Garnish: ' + r.garnish) : null);
-        const paint = () => { const have = new Set((lib?.pantry ?? []).map(ingredientKey)); measures.replaceChildren(...recipeMeasures(r, glasses).map(i => n('div', { class: 'cr-measure' }, n('span', {}, i.name, account && !have.has(ingredientKey(i.name)) ? n('small', {}, 'Not in pantry') : null), n('strong', {}, i.amount === null ? i.unit : (i.estimated ? '≈ ' : '') + i.amount + ' ' + i.unit)))); };
+    // The detail page — the user's own reference layout (the book's
+    // existing Meals/Drinks two-page paper spread: a left page of photo +
+    // identity, a right page of measures/method/actions), replacing the
+    // old single wide dialog-style card (cr-detail/cr-columns) that used
+    // to span the whole page width. Only this View-recipe destination
+    // changes shape; Discover/My pantry/Party list/My Recipes (card grids,
+    // the editor) are untouched — CLAUDE.md's own scope line for this
+    // round. The left/right pages share the book's own existing
+    // .book-page/.book-slot paper styling (public/styles.css), not a new
+    // visual language, and keep this module's existing cr- prefixed
+    // classes for every control so none of its existing behaviour
+    // (save/plan/report, pantry match, scaling) has to be reimplemented.
+    function detailPages(r, { isPreview = false, plan = false, onBack = null, backLabel = '← Back to the list' } = {}) {
+        const glassesLabel = r.kind === 'food' ? 'Servings' : 'Number of glasses';
+        let servings = r.serves;
+        const left = n('div', { class: 'book-page cr-recipe-left' }, [
+            n('p', { class: 'book-running-head' }, r.kind === 'food' ? 'Food' : 'Drinks'),
+            n('div', { class: 'cr-zoom-frame' }, [n('div', { class: 'cr-zoom-layer' }, image(r))]),
+            n('h2', {}, r.name || (r.kind === 'food' ? 'Your dish name' : 'Your recipe name')),
+            n('p', { class: 'menu-item-desc' }, r.description || (r.kind === 'food' ? 'A dish worth sharing.' : 'A recipe worth sharing.')),
+            n('p', { class: 'cr-muted' }, 'By ' + (r.author || account?.username || 'you')),
+            r.equipment ? n('p', { class: 'cr-muted' }, 'You’ll need: ' + r.equipment) : null,
+            r.kind === 'food' && (r.prepMinutes != null || r.cookMinutes != null)
+                ? n('p', { class: 'cr-muted' }, [r.prepMinutes != null ? `Prep ${r.prepMinutes} min` : null, r.prepMinutes != null && r.cookMinutes != null ? ' · ' : null, r.cookMinutes != null ? `Cook ${r.cookMinutes} min` : null].filter(Boolean))
+                : null,
+            r.kind === 'drink' ? n('p', { class: 'menu-item-allergens' }, r.alcoholFree ? 'Alcohol-free.' : 'Contains alcohol.') : null,
+            r.tags?.length ? n('p', { class: 'cr-tags' }, r.tags.join(' · ')) : null,
+        ].filter(Boolean));
+        setupZoom(left.querySelector('.cr-zoom-frame'));
+
+        const measures = n('div'), steps = n('section', {}, n('h3', {}, 'Steps'), n('ol', {}, r.steps.map(s => n('li', {}, s))), r.garnish ? n('p', {}, 'Garnish: ' + r.garnish) : null);
+        const paint = () => { const have = new Set((lib?.pantry ?? []).map(ingredientKey)); measures.replaceChildren(...recipeMeasures(r, servings).map(i => n('div', { class: 'cr-measure' }, n('span', {}, i.name, account && !have.has(ingredientKey(i.name)) ? n('small', {}, 'Not in pantry') : null), n('strong', {}, i.amount === null ? i.unit : (i.estimated ? '≈ ' : '') + i.amount + ' ' + i.unit)))); };
         paint();
         const controls = n('div', { class: 'cr-tools' });
         if (!isPreview) {
-            controls.append(button(lib?.saved.some(s => s.id === r.id) ? 'Remove from saved' : 'Save recipe', async () => { requireLogin(); await updateLibrary(lib.saved.some(s => s.id === r.id) ? 'unsave' : 'save', { id: r.id }); say('Saved recipes updated.'); await showRecipe(r.id); }), button('Add to party plan', async () => { await updateLibrary('plan', { id: r.id, glasses }); say('Added to your party plan. The recipe is saved as it is today.'); }));
+            controls.append(button(lib?.saved.some(s => s.id === r.id) ? 'Remove from saved' : 'Save recipe', async () => { requireLogin(); await updateLibrary(lib.saved.some(s => s.id === r.id) ? 'unsave' : 'save', { id: r.id }); say('Saved recipes updated.'); await showRecipe(r.id); }), button('Add to party plan', async () => { await updateLibrary('plan', { id: r.id, glasses: servings }); say('Added to your party plan. The recipe is saved as it is today.'); }));
             if (r.source === 'community')
                 controls.append(button('Report', () => reportDialog(r)));
         }
-        return n('div', { class: 'cr-detail' }, hero(r), r.tags?.length ? n('p', { class: 'cr-tags' }, r.tags.join(' · ')) : null, plan ? n('p', { class: 'cr-muted' }, 'Saved party-plan version. Later author changes do not change these measures.') : null, n('div', { class: 'cr-columns' }, n('section', {}, n('h3', {}, 'Your measures'), field('Number of glasses', n('input', { type: 'number', min: 1, max: 20, value: glasses, onchange: e => { const v = Number(e.target.value); if (Number.isInteger(v) && v >= 1 && v <= 20) {
-                glasses = v;
+        const right = n('div', { class: 'book-page cr-recipe-right' }, [
+            onBack ? n('button', { type: 'button', class: 'book-backlink', onclick: onBack }, backLabel) : null,
+            plan ? n('p', { class: 'cr-muted' }, 'Saved party-plan version. Later author changes do not change these measures.') : null,
+            n('h3', {}, 'Ingredients'),
+            field(glassesLabel, n('input', { type: 'number', min: 1, max: 20, value: servings, 'aria-label': glassesLabel, onchange: e => { const v = Number(e.target.value); if (Number.isInteger(v) && v >= 1 && v <= 20) {
+                servings = v;
                 paint();
             }
             else
-                e.target.value = glasses; } })), measures), steps), controls, r.sourceNote ? n('p', { class: 'cr-muted' }, r.sourceNote) : null, r.sourceUrl ? n('a', { href: r.sourceUrl, target: '_blank', rel: 'noopener noreferrer' }, 'Original recipe source') : null);
+                e.target.value = servings; } })),
+            measures,
+            steps,
+            r.sourceNote ? n('p', { class: 'cr-muted' }, r.sourceNote) : null,
+            r.sourceUrl ? n('a', { href: r.sourceUrl, target: '_blank', rel: 'noopener noreferrer' }, 'Original recipe source') : null,
+            controls,
+        ].filter(Boolean));
+        return [left, right];
     }
-    async function showRecipe(id) { await flush(); draft = null; screen = 'detail'; renderNav(); const r = await api('recipe/' + encodeURIComponent(id)); main.replaceChildren(button('← Back to recipes', () => changeScreen('discover')), detail(r)); main.scrollTop = 0; }
+    // Temporary, reading-only pinch/scroll zoom on the left page's photo —
+    // never touches r.imageX/Y/Zoom (the author's saved crop) or anything
+    // persisted; resets on leaving the page. Clamped so the image can
+    // never be panned to reveal empty space around its own frame (never
+    // "stretched/distorted" — this only ever scales+translates the
+    // existing object-fit:cover image, and only within its own frame).
+    function setupZoom(frame) {
+        if (!frame)
+            return;
+        const layer = frame.querySelector('.cr-zoom-layer');
+        let scale = 1, x = 0, y = 0;
+        const MAX = 3;
+        const clamp = () => {
+            const maxX = (frame.clientWidth * (scale - 1)) / 2;
+            const maxY = (frame.clientHeight * (scale - 1)) / 2;
+            x = Math.max(-maxX, Math.min(maxX, x));
+            y = Math.max(-maxY, Math.min(maxY, y));
+        };
+        const apply = () => { clamp(); layer.style.transform = `translate(${x}px,${y}px) scale(${scale})`; };
+        const reset = () => { scale = 1; x = 0; y = 0; apply(); };
+        frame.append(n('div', { class: 'cr-zoom-controls' }, [
+            button('+', () => { scale = Math.min(MAX, scale + 0.4); apply(); }),
+            button('−', () => { scale = Math.max(1, scale - 0.4); apply(); }),
+            button('Reset', reset),
+        ]));
+        // Ctrl+wheel (trackpad pinch on most browsers) or a plain wheel —
+        // either way this only ever reads the gesture already happening
+        // over the photo frame itself, never the page's own scroll.
+        frame.addEventListener('wheel', e => { e.preventDefault(); scale = Math.max(1, Math.min(MAX, scale - e.deltaY * 0.01)); apply(); }, { passive: false });
+        // Real two-finger pinch: track every active pointer by id so the
+        // distance between the two most recent touches drives scale,
+        // and their midpoint's own movement drives pan — independent of
+        // single-finger drag-to-pan below, which only ever runs with
+        // exactly one active pointer.
+        const pointers = new Map();
+        let pinchStartDist = null, pinchStartScale = 1, dragStart = null;
+        const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+        frame.addEventListener('pointerdown', e => {
+            // A real pointerdown on the +/−/Reset buttons must reach them
+            // as an ordinary click — found as a real bug by browser
+            // verification: capturing the pointer here unconditionally,
+            // even when the event actually started on a descendant
+            // button, swallowed every real click on those three controls
+            // (only a direct `.click()` call, which skips pointer
+            // capture entirely, ever worked). Same "walk up from the real
+            // target" guard public/menuBook.js's own isInteractiveTarget
+            // already uses for its own edge-click gesture.
+            if (e.target.closest('button'))
+                return;
+            frame.setPointerCapture(e.pointerId);
+            pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+            if (pointers.size === 2) {
+                const [a, b] = [...pointers.values()];
+                pinchStartDist = dist(a, b);
+                pinchStartScale = scale;
+                dragStart = null;
+            }
+            else if (pointers.size === 1 && scale > 1) {
+                dragStart = { x: e.clientX - x, y: e.clientY - y };
+            }
+        });
+        frame.addEventListener('pointermove', e => {
+            if (!pointers.has(e.pointerId))
+                return;
+            pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+            if (pointers.size === 2 && pinchStartDist) {
+                const [a, b] = [...pointers.values()];
+                scale = Math.max(1, Math.min(MAX, pinchStartScale * (dist(a, b) / pinchStartDist)));
+                apply();
+            }
+            else if (dragStart) {
+                x = e.clientX - dragStart.x;
+                y = e.clientY - dragStart.y;
+                apply();
+            }
+        });
+        const endPointer = e => { pointers.delete(e.pointerId); if (pointers.size < 2)
+            pinchStartDist = null; dragStart = null; };
+        frame.addEventListener('pointerup', endPointer);
+        frame.addEventListener('pointercancel', endPointer);
+        apply();
+    }
+    // Where "Back to the list" returns to from a detail page reached via
+    // Discover or Party list's Saved Recipes — that screen's own search/
+    // filter state (query/source/alcohol/match/kindFilter/partyTab are
+    // all already held in this closure's own outer variables, untouched
+    // by viewing a detail page, so simply re-entering that screen already
+    // restores them) plus its exact scroll position (CLAUDE.md: "返回列表
+    // 时恢复搜索、筛选和滚动位置").
+    let detailReturn = { screen: 'discover', scrollTop: 0 };
+    function detailSpread(r, opts = {}) {
+        const [leftPage, rightPage] = detailPages(r, opts);
+        return n('div', { class: 'cr-recipe-spread' }, [
+            n('div', { class: 'cr-recipe-slot' }, [leftPage]),
+            n('div', { class: 'cr-recipe-spine', 'aria-hidden': 'true' }),
+            n('div', { class: 'cr-recipe-slot' }, [rightPage]),
+        ]);
+    }
+    async function leaveDetail() { screen = detailReturn.screen; renderNav(); await render(); main.scrollTop = detailReturn.scrollTop; }
+    async function showRecipe(id) {
+        await flush();
+        draft = null;
+        if (screen !== 'detail')
+            detailReturn = { screen, scrollTop: main.scrollTop };
+        screen = 'detail';
+        renderNav();
+        const r = await api('recipe/' + encodeURIComponent(id));
+        main.replaceChildren(detailSpread(r, { onBack: leaveDetail }));
+        main.scrollTop = 0;
+    }
     function modal(title, content, accept, label = 'Confirm') {
         const d = n('dialog', { class: 'cr-dialog' }, n('h2', {}, title), content, n('div', { class: 'cr-tools' }, button('Cancel', () => d.close()), button(label, async () => { await accept(); d.close(); }, 'cr-primary')));
         root.append(d);
@@ -214,7 +378,7 @@ export function createCommunityBook({ house, model }) {
         const status = n('div', { class: 'cr-tools' }, button('← My Recipes', () => changeScreen('mine')), button(preview ? 'Edit recipe' : 'Preview', async () => { await flush(); preview = !preview; editor(); }), button('Save draft', async () => { saveError = null; await flush(); }), button('Publish / update', async () => { await flush(); const result = await api('draft', { id: editId, revision: editRevision, recipe: draft, publish: true }); editId = result.id; editRevision = result.revision; dirty = false; const key = backupKey(); if (key)
             sessionStorage.removeItem(key); say('Recipe published. Everyone can now discover it.'); await changeScreen('mine'); }, 'cr-primary'));
         if (preview) {
-            main.replaceChildren(status, n('p', { class: 'cr-muted' }, 'Preview · nothing is published until you choose Publish / update.'), detail({ ...r, author: account.username, source: 'community' }, { isPreview: true }));
+            main.replaceChildren(status, n('p', { class: 'cr-muted' }, 'Preview · nothing is published until you choose Publish / update.'), detailSpread({ ...r, author: account.username, source: 'community' }, { isPreview: true }));
             return;
         }
         const text = (key, label, max, area = false) => field(label, n(area ? 'textarea' : 'input', { value: r[key], maxlength: max, rows: area ? 3 : undefined, oninput: e => { r[key] = e.target.value; changed(); refreshHero(); } }));
@@ -227,7 +391,23 @@ export function createCommunityBook({ house, model }) {
         function paintSteps() { stepRows.replaceChildren(...r.steps.map((s, index) => n('div', { class: 'cr-step-edit' }, n('span', {}, index + 1 + '.'), n('textarea', { value: s, rows: 3, maxlength: 1200, 'aria-label': 'Step ' + (index + 1), oninput: e => { r.steps[index] = e.target.value; changed(); } }), button('Remove', () => { r.steps.splice(index, 1); changed(); paintSteps(); })))); }
         paintIngredients();
         paintSteps();
-        main.replaceChildren(status, n('h1', {}, 'Create something delicious'), n('p', {}, 'Drag the bottom edge to resize the header, or the photo’s right edge to change its width.'), heroMount, n('div', { class: 'cr-columns' }, n('section', {}, text('name', 'Drink name', 80), text('description', 'Short description', 300, true), text('equipment', 'Glass and equipment', 200)), n('section', {}, field('Tags · comma separated', n('input', { value: r.tags.join(', '), maxlength: 240, oninput: e => { r.tags = e.target.value.split(',').map(s => s.trim()).filter(Boolean); changed(); } })), field('Base servings', n('input', { type: 'number', min: 1, max: 20, value: r.serves, oninput: e => { r.serves = Number(e.target.value); changed(); } })), field('Alcohol-free', n('input', { type: 'checkbox', checked: r.alcoholFree, onchange: e => { r.alcoholFree = e.target.checked; changed(); } })), text('garnish', 'Garnish / finishing touch', 300))), n('div', { class: 'cr-columns' }, n('section', {}, n('h2', {}, 'Ingredients'), ingredientRows, button('+ Ingredient', () => { if (r.ingredients.length >= 30)
+        // Drink or Food, chosen once per recipe (the user's own explicit
+        // ask). Switching kind re-renders the whole editor so the
+        // alcohol-free checkbox / prep-cook fields below swap in or out
+        // immediately, and so the servings label on this same page stays
+        // in sync (CLAUDE.md: "饮品份数显示 Number of glasses，食物显示
+        // Servings").
+        const kindFields = n('div');
+        const paintKindFields = () => kindFields.replaceChildren(r.kind === 'drink'
+            ? field('Alcohol-free', n('input', { type: 'checkbox', checked: r.alcoholFree, onchange: e => { r.alcoholFree = e.target.checked; changed(); } }))
+            : n('div', { class: 'cr-tools' }, field('Prep time (minutes, optional)', n('input', { type: 'number', min: 0, max: 1440, value: r.prepMinutes ?? '', oninput: e => { r.prepMinutes = e.target.value === '' ? null : Number(e.target.value); changed(); } })), field('Cook time (minutes, optional)', n('input', { type: 'number', min: 0, max: 1440, value: r.cookMinutes ?? '', oninput: e => { r.cookMinutes = e.target.value === '' ? null : Number(e.target.value); changed(); } }))));
+        paintKindFields();
+        const servingsLabel = () => r.kind === 'food' ? 'Servings' : 'Number of glasses';
+        const servingsField = n('div');
+        const paintServingsField = () => servingsField.replaceChildren(field(servingsLabel(), n('input', { type: 'number', min: 1, max: 20, value: r.serves, oninput: e => { r.serves = Number(e.target.value); changed(); } })));
+        paintServingsField();
+        const kindPicker = n('div', { class: 'cr-field' }, [n('span', {}, 'Drink or Food'), n('div', { class: 'cr-tools', role: 'radiogroup', 'aria-label': 'Recipe kind' }, [['drink', 'Drink'], ['food', 'Food']].map(([value, label]) => n('label', {}, [n('input', { type: 'radio', name: 'cr-kind', checked: r.kind === value, onchange: () => { r.kind = value; changed(); paintKindFields(); paintServingsField(); refreshHero(); } }), ' ' + label])))]);
+        main.replaceChildren(status, n('h1', {}, 'Create something delicious'), n('p', {}, 'Drag the bottom edge to resize the header, or the photo’s right edge to change its width.'), heroMount, kindPicker, n('div', { class: 'cr-columns' }, n('section', {}, text('name', 'Recipe name', 80), text('description', 'Short description', 300, true), text('equipment', 'Equipment', 200)), n('section', {}, field('Tags · comma separated', n('input', { value: r.tags.join(', '), maxlength: 240, oninput: e => { r.tags = e.target.value.split(',').map(s => s.trim()).filter(Boolean); changed(); } })), servingsField, kindFields, text('garnish', 'Garnish / finishing touch', 300))), n('div', { class: 'cr-columns' }, n('section', {}, n('h2', {}, 'Ingredients'), ingredientRows, button('+ Ingredient', () => { if (r.ingredients.length >= 30)
             throw Error('Up to 30 ingredients.'); r.ingredients.push({ name: '', amount: null, unit: 'ml' }); changed(); paintIngredients(); })), n('section', {}, n('h2', {}, 'Make it'), stepRows, button('+ Step', () => { if (r.steps.length >= 24)
             throw Error('Up to 24 steps.'); r.steps.push(''); changed(); paintSteps(); }))), n('p', { class: 'cr-muted' }, 'Upload a photo you own or have permission to share. Your name appears beside published recipes.'));
     }
@@ -260,7 +440,7 @@ export function createCommunityBook({ house, model }) {
                 list.append(n('p', {}, 'Save a recipe from Discover to find it here.'));
             return;
         }
-        list.append(n('p', {}, 'Each plan keeps a snapshot. Refresh a recipe explicitly to use its author’s latest version.'), ...lib.plans.map(p => n('article', { class: 'cr-plan' }, n('h3', {}, p.snapshot.name), field('Glasses', n('input', { type: 'number', min: 1, max: 20, value: p.glasses, onchange: e => run(async () => { await updateLibrary('plan', { id: p.id, glasses: Number(e.target.value) }); party(); }) })), n('div', { class: 'cr-tools' }, button('View saved version', () => { main.replaceChildren(button('← Party plan', () => party()), detail(p.snapshot, { isPreview: true, plan: true })); }), button('Refresh from latest', () => modal('Replace the saved recipe version?', n('p', {}, 'Ingredients and measures may change.'), async () => { await updateLibrary('plan', { id: p.id, glasses: p.glasses, refresh: true }); party(); }, 'Refresh')), button('Remove', async () => { await updateLibrary('remove-plan', { id: p.id }); party(); })))));
+        list.append(n('p', {}, 'Each plan keeps a snapshot. Refresh a recipe explicitly to use its author’s latest version.'), ...lib.plans.map(p => n('article', { class: 'cr-plan' }, n('h3', {}, p.snapshot.name), field(p.snapshot.kind === 'food' ? 'Servings' : 'Glasses', n('input', { type: 'number', min: 1, max: 20, value: p.glasses, onchange: e => run(async () => { await updateLibrary('plan', { id: p.id, glasses: Number(e.target.value) }); party(); }) })), n('div', { class: 'cr-tools' }, button('View saved version', () => { main.replaceChildren(detailSpread(p.snapshot, { isPreview: true, plan: true, onBack: () => party(), backLabel: '← Back to party plan' })); }), button('Refresh from latest', () => modal('Replace the saved recipe version?', n('p', {}, 'Ingredients and measures may change.'), async () => { await updateLibrary('plan', { id: p.id, glasses: p.glasses, refresh: true }); party(); }, 'Refresh')), button('Remove', async () => { await updateLibrary('remove-plan', { id: p.id }); party(); })))));
         const shopping = recipeShopping(lib.plans, lib.pantry);
         list.append(n('h2', {}, 'Shopping list'), ...shopping.map(i => n('div', { class: 'cr-measure' }, n('label', {}, n('input', { type: 'checkbox', checked: lib.purchased.includes(i.key), 'aria-label': 'Bought ' + i.name, onchange: e => run(async () => { await updateLibrary('purchased', { keys: e.target.checked ? [...lib.purchased, i.key] : lib.purchased.filter(k => k !== i.key) }); }) }), i.name, i.onHand ? ' · in pantry' : ''), n('strong', {}, i.amount === null ? i.unit : (i.estimated ? '≈ ' : '') + i.amount + ' ' + i.unit))), button('Copy shopping list', async () => { await navigator.clipboard.writeText(shopping.map(i => `${i.name}: ${i.amount ?? ''} ${i.unit}${i.onHand ? ' (in pantry)' : ''}`).join('\n')); say('Shopping list copied.'); }));
         if (!lib.plans.length)

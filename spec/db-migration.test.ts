@@ -405,3 +405,43 @@ it("adds account_recovery_codes to a database with the prior round's own account
     db.close();
   }
 });
+
+// 2026-11-08: Drink vs. Food adds community_recipes.kind to a table that
+// already exists on any already-deployed volume via communitySchema.ts's
+// own CREATE TABLE IF NOT EXISTS — exactly the same migration shape as
+// `closed_at`/`account_id`/`away` above. Built against a database that
+// already has the community-recipes feature's full prior schema (every
+// table from the 2026-11-07 round) but predates `kind` entirely.
+function createPreRecipeKindSchema(path: string): void {
+  const db = new Database(path);
+  db.exec(`
+    CREATE TABLE accounts (
+      id TEXT PRIMARY KEY, username TEXT NOT NULL, username_normalized TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    CREATE TABLE community_recipes(
+      id TEXT PRIMARY KEY,owner TEXT NOT NULL REFERENCES accounts(id),draft TEXT NOT NULL,published TEXT,
+      revision INTEGER NOT NULL DEFAULT 1,published_revision INTEGER NOT NULL DEFAULT 0,
+      hidden INTEGER NOT NULL DEFAULT 0,deleted INTEGER NOT NULL DEFAULT 0,updated INTEGER NOT NULL,
+      search_text TEXT NOT NULL DEFAULT '',ingredient_keys TEXT NOT NULL DEFAULT '[]',alcohol_free INTEGER NOT NULL DEFAULT 0);
+    INSERT INTO accounts VALUES ('old-owner', 'OldOwner', 'oldowner', 'scrypt:16384:8:1:aa:bb', '2026-11-07');
+    INSERT INTO community_recipes (id,owner,draft,published,revision,published_revision,updated,search_text,ingredient_keys,alcohol_free)
+      VALUES ('old-recipe','old-owner','{"name":"Old Fizz"}','{"name":"Old Fizz","alcoholFree":true,"ingredients":[],"steps":[]}',1,1,0,'old fizz','[]',1);
+  `);
+  db.close();
+}
+
+it("adds community_recipes.kind to a database with the prior round's own community schema, defaulting existing rows to drink", () => {
+  const path = join(dir, "vegas.db");
+  createPreRecipeKindSchema(path);
+
+  const db = openDb(path);
+  try {
+    const columns = (db.prepare("PRAGMA table_info(community_recipes)").all() as Array<{ name: string }>).map((c) => c.name);
+    expect(columns).toContain("kind");
+    const row = db.prepare(`SELECT kind FROM community_recipes WHERE id = 'old-recipe'`).get() as { kind: string };
+    expect(row.kind).toBe("drink");
+  } finally {
+    db.close();
+  }
+});

@@ -222,7 +222,7 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
     // CSS reveals on hover/focus/touch as the "you can click this"
     // affordance the reference's own pointing hands suggest.
     const entries = [
-      ['mixology', 'The Mixology Book'],
+      ['mixology', 'The Recipe Book'],
       ['meal', 'Meals'],
       ['drink', 'Drinks'],
     ];
@@ -547,7 +547,7 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
 
   function updateChrome() {
     const title = stage === 'cover' ? 'The Counter’s Book'
-      : stage === 'mixology' ? 'The Mixology Book'
+      : stage === 'mixology' ? 'The Recipe Book'
       : stage === 'detail' ? detailItem.name
       : listKind === 'meal' ? 'Meals' : 'Drinks';
     srTitle.textContent = title;
@@ -773,7 +773,7 @@ export function createMenuBook({ el, mixologyModule, ordersApi }) {
     const closeBtn = el('button', { class: 'book-close', 'aria-label': 'Close the book', onclick: close }, '×');
     const coverLink = el('button', { class: 'book-cover-link', 'aria-label': 'Back to cover', onclick: () => goHome() }, '📖');
     bookmarksEl = el('div', { class: 'book-bookmarks' }, [
-      el('button', { class: 'book-bookmark', 'data-bookmark': 'mixology', onclick: () => goToChapter('mixology') }, 'The Mixology Book'),
+      el('button', { class: 'book-bookmark', 'data-bookmark': 'mixology', onclick: () => goToChapter('mixology') }, 'The Recipe Book'),
       el('button', { class: 'book-bookmark', 'data-bookmark': 'meal', onclick: () => goToChapter('meal') }, 'Meals'),
       el('button', { class: 'book-bookmark', 'data-bookmark': 'drink', onclick: () => goToChapter('drink') }, 'Drinks'),
     ]);

@@ -49,12 +49,12 @@ export function registerCommunity(app: Hono, db: Database.Database) {
     };
     app.get('/api/community/me', c => { const a = optional(c); return c.json({ account: a ? { id: a.accountId, username: a.username, admin: recipes.isAdmin(a) } : null, library: a ? recipes.library(db, a) : null }); });
     app.get('/api/community/discover', c => {
-        const q = (c.req.query('q') ?? '').slice(0, 120), source = c.req.query('source') ?? 'all', alcohol = c.req.query('alcohol') ?? 'all', match = c.req.query('match') ?? 'all';
+        const q = (c.req.query('q') ?? '').slice(0, 120), source = c.req.query('source') ?? 'all', alcohol = c.req.query('alcohol') ?? 'all', match = c.req.query('match') ?? 'all', kind = c.req.query('kind') ?? 'all';
         const page = Number(c.req.query('page') ?? 0);
-        if (!Number.isInteger(page) || page < 0 || page > 10000 || !['all', 'house', 'community'].includes(source) || !['all', 'free', 'cocktail'].includes(alcohol) || !['all', 'ready', 'almost'].includes(match))
+        if (!Number.isInteger(page) || page < 0 || page > 10000 || !['all', 'house', 'community'].includes(source) || !['all', 'free', 'cocktail'].includes(alcohol) || !['all', 'ready', 'almost'].includes(match) || !['all', 'drink', 'food'].includes(kind))
             recipes.problem('Invalid search.');
         const a = optional(c);
-        return c.json(recipes.discover(db, q, source, page, alcohol, a ? recipes.library(db, a).pantry : [], match));
+        return c.json(recipes.discover(db, q, source, page, alcohol, a ? recipes.library(db, a).pantry : [], match, kind));
     });
     app.get('/api/community/mine', c => c.json({ recipes: recipes.myRecipes(db, auth(c)) }));
     app.get('/api/community/recipe/:id', c => { const r = recipes.publicRecipe(db, c.req.param('id')); if (!r)

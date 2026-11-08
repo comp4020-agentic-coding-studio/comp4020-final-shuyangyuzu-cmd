@@ -20,4 +20,16 @@ CREATE TABLE IF NOT EXISTS community_audit(id INTEGER PRIMARY KEY,actor TEXT NOT
         name: string;
     }[]).some(c => c.name === 'purchased'))
         db.exec("ALTER TABLE community_library ADD COLUMN purchased TEXT NOT NULL DEFAULT '[]'");
+    // Drink vs. Food (this round). community_recipes already exists on
+    // any already-deployed volume via the CREATE TABLE IF NOT EXISTS
+    // above, so — exactly like `purchased` just above, and per
+    // CLAUDE.md's own migration rule — this needs addColumnIfMissing,
+    // not a wider CREATE TABLE. Every existing row predates `kind`
+    // entirely and defaults to 'drink' (the user's own explicit
+    // compatibility requirement), matching src/community.ts's identical
+    // default for a stored JSON blob that also predates this field.
+    if (!(db.prepare('PRAGMA table_info(community_recipes)').all() as {
+        name: string;
+    }[]).some(c => c.name === 'kind'))
+        db.exec("ALTER TABLE community_recipes ADD COLUMN kind TEXT NOT NULL DEFAULT 'drink'");
 }

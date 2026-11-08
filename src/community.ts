@@ -9,7 +9,19 @@ export type Recipe = {
     description: string;
     tags: string[];
     equipment: string;
+    // A player chooses Drink or Food at publish time (the user's own
+    // explicit ask). Absent entirely from any recipe/plan snapshot JSON
+    // written before this round — every reader defaults a missing kind to
+    // 'drink' (see publicRecipe/myRecipes/library below), never throws,
+    // so no existing favourite, image, party-plan snapshot or published
+    // post is lost by this addition.
+    kind: 'drink' | 'food';
     alcoholFree: boolean;
+    // Food-only, optional, purely informational — never affects
+    // restoreAmount or any stamina math (there is none here at all; this
+    // is the player-authored community book, not src/orders.ts's MENU).
+    prepMinutes: number | null;
+    cookMinutes: number | null;
     serves: number;
     imageId: string | null;
     imageWidth: number;
@@ -67,14 +79,43 @@ export function validateRecipe(raw: unknown, publish = false): Recipe {
         problem('Base servings must be a whole number.');
     if (publish && (!name || !ingredients.length || !steps.length || steps.some(s => !s)))
         problem('Add a name, ingredients and all preparation steps before publishing.');
-    if (typeof r.alcoholFree !== 'boolean')
+    // A missing kind defaults to 'drink' rather than erroring — every
+    // existing house/community recipe and every already-saved draft or
+    // party-plan snapshot predates this field entirely, and CLAUDE.md's
+    // own compatibility rule ("existing system and player recipes
+    // default to Drink... compatible with old data, no loss of
+    // favourites, images, party plan or published content") means a
+    // record written before this round must still validate exactly as
+    // it always did, not be rejected or silently dropped on next load.
+    const kind: 'drink' | 'food' = r.kind === 'food' ? 'food' : 'drink';
+    // Alcohol-free only means something for a drink (CLAUDE.md: "酒精筛选仅适用于饮品").
+    // Food completely ignores whatever boolean arrives here; it is never
+    // surfaced, never filterable, and never required at publish time for
+    // a food post.
+    if (kind === 'drink' && typeof r.alcoholFree !== 'boolean')
         problem('Choose whether this drink contains alcohol.');
+    const alcoholFree = kind === 'drink' ? (r.alcoholFree as boolean) : false;
+    // Food's own optional prep/cook time — minutes, purely informational,
+    // never required, never shown for a drink.
+    const prepMinutes = kind === 'food' && r.prepMinutes !== null && r.prepMinutes !== undefined ? Math.round(num(r.prepMinutes, 0, 1440)) : null;
+    const cookMinutes = kind === 'food' && r.cookMinutes !== null && r.cookMinutes !== undefined ? Math.round(num(r.cookMinutes, 0, 1440)) : null;
     const imageId = r.imageId === null ? null : str(r.imageId, 80);
     if (imageId && !/^img-[a-f0-9-]{36}$/.test(imageId))
         problem('Invalid image.');
-    return { name, description, equipment, garnish, ingredients, steps, tags, serves, alcoholFree: r.alcoholFree as boolean, imageId, imageWidth: num(r.imageWidth, 20, 60), heroHeight: num(r.heroHeight ?? 260, 180, 440), imageX: num(r.imageX, 0, 100), imageY: num(r.imageY, 0, 100), imageZoom: num(r.imageZoom, 1, 3) };
+    return { name, description, equipment, garnish, ingredients, steps, tags, serves, kind, alcoholFree, prepMinutes, cookMinutes, imageId, imageWidth: num(r.imageWidth, 20, 60), heroHeight: num(r.heroHeight ?? 260, 180, 440), imageX: num(r.imageX, 0, 100), imageY: num(r.imageY, 0, 100), imageZoom: num(r.imageZoom, 1, 3) };
 }
-export function houseRecipes(): RecipeView[] { return RECIPES.map(r => ({ id: 'house:' + r.id, name: r.name, description: r.flavour, tags: [r.alcoholFree ? 'Alcohol-free' : 'Classic'], equipment: r.equipment, alcoholFree: r.alcoholFree, serves: r.serves, imageId: null, imageWidth: 30, imageX: 50, imageY: 50, imageZoom: 1, ingredients: r.ingredients.map(i => ({ name: INGREDIENTS[i.id as keyof typeof INGREDIENTS][0], amount: i.amount, unit: i.unit, estimated: !!i.estimated })), steps: r.steps, garnish: r.garnish, author: 'House recipes', source: 'house', revision: 1, sourceUrl: r.source.url, sourceNote: r.source.note })); }
+// Every existing house recipe is a drink (public/mixology.js's own
+// RECIPES list has never had a food entry) — explicit kind:'drink' here
+// is what CLAUDE.md calls "现有系统...配方默认归为 Drink", made true by
+// construction rather than by a reader-side default alone.
+export function houseRecipes(): RecipeView[] { return RECIPES.map(r => ({ id: 'house:' + r.id, name: r.name, description: r.flavour, tags: [r.alcoholFree ? 'Alcohol-free' : 'Classic'], equipment: r.equipment, kind: 'drink', alcoholFree: r.alcoholFree, prepMinutes: null, cookMinutes: null, serves: r.serves, imageId: null, imageWidth: 30, imageX: 50, imageY: 50, imageZoom: 1, ingredients: r.ingredients.map(i => ({ name: INGREDIENTS[i.id as keyof typeof INGREDIENTS][0], amount: i.amount, unit: i.unit, estimated: !!i.estimated })), steps: r.steps, garnish: r.garnish, author: 'House recipes', source: 'house', revision: 1, sourceUrl: r.source.url, sourceNote: r.source.note })); }
+// A recipe/plan-snapshot JSON blob written before this round has no
+// `kind` field at all. Every reader of a stored blob goes through this
+// first so a pre-existing favourite, image, party-plan snapshot or
+// published post still parses and displays exactly as it always did —
+// silently treated as 'drink', never thrown away or requiring a
+// migration pass over every stored row.
+function withKind(recipe: Recipe): Recipe { return recipe.kind === 'food' ? recipe : { ...recipe, kind: 'drink' }; }
 export const isAdmin = (a: AccountSessionInfo) => (process.env.COMMUNITY_ADMIN_ACCOUNTS ?? '').split(',').map(s => s.trim()).includes(a.accountId);
 function audit(db: Database.Database, a: AccountSessionInfo, action: string, target: string) { db.prepare('INSERT INTO community_audit(actor,action,target,at) VALUES(?,?,?,?)').run(a.accountId, action, target, Date.now()); }
 export function limit(db: Database.Database, owner: string, kind: string, max: number, window = 3600000): void {
@@ -98,33 +139,46 @@ export function publicRecipe(db: Database.Database, id: string): RecipeView | nu
     const r = db.prepare('SELECT r.*,a.username FROM community_recipes r JOIN accounts a ON a.id=r.owner WHERE r.id=? AND r.published IS NOT NULL AND r.deleted=0 AND r.hidden=0').get(id) as (Row & {
         username: string;
     }) | undefined;
-    return r ? { ...JSON.parse(r.published!), id: r.id, author: r.username, source: 'community', revision: r.published_revision } : null;
+    return r ? { ...withKind(JSON.parse(r.published!)), id: r.id, author: r.username, source: 'community', revision: r.published_revision } : null;
 }
-export function discover(db: Database.Database, q: string, source: string, page: number, alcohol: string, pantry: string[] = [], match = 'all') {
+export function discover(db: Database.Database, q: string, source: string, page: number, alcohol: string, pantry: string[] = [], match = 'all', kind = 'all') {
     const results: {
         id: string;
         score: number;
         updated: number;
     }[] = [], have = new Set(pantry.map(ingredientKey));
     const matches = (keys: string[]) => { const missing = keys.filter(k => !have.has(k)).length; return match === 'all' || match === 'ready' && missing === 0 || match === 'almost' && missing > 0 && missing <= 2; };
+    // All / Drinks / Food — the user's own explicit new Discover filter,
+    // combined with (never replacing) the existing search/alcohol/pantry
+    // filters. Alcohol filtering stays drink-only below: a food item is
+    // never alcoholFree=true (validateRecipe forces that), so the
+    // 'cocktail' filter already naturally excludes every food item on its
+    // own, but 'free' (alcohol-free) would otherwise also wrongly include
+    // every food item — excluded explicitly here instead of relying on
+    // that coincidence.
     if (source !== 'community')
         for (const r of houseRecipes()) {
-            if (alcohol !== 'all' && (alcohol === 'free') !== r.alcoholFree || !matches(r.ingredients.map(i => ingredientKey(i.name))))
+            if (kind !== 'all' && r.kind !== kind)
+                continue;
+            if (alcohol !== 'all' && (r.kind !== 'drink' || (alcohol === 'free') !== r.alcoholFree) || !matches(r.ingredients.map(i => ingredientKey(i.name))))
                 continue;
             const score = searchScore([r.name, r.description, r.author, ...r.ingredients.map(i => i.name)].join(' '), q);
             if (score)
                 results.push({ id: r.id, score, updated: 0 });
         }
     if (source !== 'house')
-        for (const raw of db.prepare('SELECT id,search_text,ingredient_keys,alcohol_free,updated FROM community_recipes WHERE published IS NOT NULL AND hidden=0 AND deleted=0').iterate()) {
+        for (const raw of db.prepare('SELECT id,search_text,ingredient_keys,alcohol_free,kind,updated FROM community_recipes WHERE published IS NOT NULL AND hidden=0 AND deleted=0').iterate()) {
             const r = raw as {
                 id: string;
                 search_text: string;
                 ingredient_keys: string;
                 alcohol_free: number;
+                kind: string;
                 updated: number;
             };
-            if (alcohol !== 'all' && (alcohol === 'free') !== !!r.alcohol_free || !matches(JSON.parse(r.ingredient_keys)))
+            if (kind !== 'all' && r.kind !== kind)
+                continue;
+            if (alcohol !== 'all' && (r.kind !== 'drink' || (alcohol === 'free') !== !!r.alcohol_free) || !matches(JSON.parse(r.ingredient_keys)))
                 continue;
             const score = searchScore(r.search_text, q);
             if (score)
@@ -164,12 +218,12 @@ export function saveDraft(db: Database.Database, a: AccountSessionInfo, id: stri
         const next = revision + 1;
         db.prepare('UPDATE community_recipes SET draft=?,revision=?,updated=? WHERE id=?').run(data, next, Date.now(), id);
         if (publish)
-            db.prepare('UPDATE community_recipes SET published=?,published_revision=?,search_text=?,ingredient_keys=?,alcohol_free=? WHERE id=?').run(data, next, [recipe.name, recipe.description, a.username, ...recipe.tags, ...recipe.ingredients.map(i => i.name)].join(' '), JSON.stringify(recipe.ingredients.map(i => ingredientKey(i.name))), recipe.alcoholFree ? 1 : 0, id);
+            db.prepare('UPDATE community_recipes SET published=?,published_revision=?,search_text=?,ingredient_keys=?,alcohol_free=?,kind=? WHERE id=?').run(data, next, [recipe.name, recipe.description, a.username, ...recipe.tags, ...recipe.ingredients.map(i => i.name)].join(' '), JSON.stringify(recipe.ingredients.map(i => ingredientKey(i.name))), recipe.alcoholFree ? 1 : 0, recipe.kind, id);
         audit(db, a, publish ? 'publish' : 'save-draft', id!);
         return { id, revision: next, published: publish || !!r.published, hidden: !!r.hidden };
     });
 }
-export function myRecipes(db: Database.Database, a: AccountSessionInfo) { return (db.prepare('SELECT * FROM community_recipes WHERE owner=? AND deleted=0 ORDER BY updated DESC').all(a.accountId) as Row[]).map(r => ({ id: r.id, revision: r.revision, publishedRevision: r.published_revision, published: !!r.published, hidden: !!r.hidden, recipe: JSON.parse(r.draft) as Recipe })); }
+export function myRecipes(db: Database.Database, a: AccountSessionInfo) { return (db.prepare('SELECT * FROM community_recipes WHERE owner=? AND deleted=0 ORDER BY updated DESC').all(a.accountId) as Row[]).map(r => ({ id: r.id, revision: r.revision, publishedRevision: r.published_revision, published: !!r.published, hidden: !!r.hidden, recipe: withKind(JSON.parse(r.draft)) })); }
 export function deleteRecipes(db: Database.Database, a: AccountSessionInfo, items: {
     id: string;
     revision: number;
@@ -201,7 +255,7 @@ export function library(db: Database.Database, a: AccountSessionInfo) {
             recipe: string;
             snapshot: string;
             glasses: number;
-        }[]).map(p => ({ id: p.recipe, snapshot: JSON.parse(p.snapshot) as RecipeView, glasses: p.glasses })) };
+        }[]).map(p => ({ id: p.recipe, snapshot: withKind(JSON.parse(p.snapshot)) as RecipeView, glasses: p.glasses })) };
 }
 export function updateLibrary(db: Database.Database, a: AccountSessionInfo, body: Record<string, unknown>) {
     return transact(db, () => {
