@@ -805,7 +805,7 @@ function passwordField(el, { id, placeholder, autocomplete, required=true }) {
   return {wrapper,input};
 }
 
-export function createTavern({ el, render, navigate, buildClassicPanel, saveSession, shouldApplyLiveUpdate, createMenuBook, mixologyModule, ordersApi, accountsApi }) {
+export function createTavern({ el, render, navigate, saveSession, shouldApplyLiveUpdate, createMenuBook, mixologyModule, ordersApi, accountsApi }) {
   const menuBook=createMenuBook({el,mixologyModule,ordersApi});
   const colors = { red:'#c85e59', blue:'#6485bc', green:'#629e86', yellow:'#ddba65', purple:'#997cb5', teal:'#66b5b0', orange:'#cf8858', pink:'#cd88a3' };
   const skins = { fair:'#f3d7b6', warm:'#dcb58a', tan:'#ba875f', brown:'#906044', deep:'#614437' };
@@ -1123,7 +1123,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
     ]);
     const hud=el('header',{class:'world-hud'},[
       el('div',{class:'world-brand'},[el('strong',{},'Las Vegas'),el('small',{},'A little place to be together')]),
-      el('div',{class:'hud-actions'},[online,standBtn,staminaButton,el('button',{class:'hud-button',onclick:()=>{path=[];chooseCharacter();}},'Your character'),el('button',{class:'hud-button',onclick:()=>openGames()},'Join by code')]),
+      el('div',{class:'hud-actions'},[online,standBtn,staminaButton,el('button',{class:'hud-button',onclick:()=>{path=[];chooseCharacter();}},'Your character'),el('button',{class:'hud-button',onclick:()=>openGuide()},'How to play')]),
     ]);
     const directions=el('div',{class:'world-dpad','aria-label':'Movement controls'});
     for(const [label,dx,dy] of [['↑',0,-1],['←',-1,0],['↓',0,1],['→',1,0]]) {
@@ -1494,12 +1494,16 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
       es.onopen=()=>{fetchAndApply();};
       eventSource=es;
     }
-    function openGames(){
-      path=[];
-      overlay.replaceChildren(el('section',{class:'world-dialog game-dialog',role:'dialog','aria-label':'Game rooms'},[
-        el('button',{class:'dialog-close','aria-label':'Close game rooms',onclick:()=>overlay.replaceChildren()},'×'),
-        el('p',{class:'eyebrow'},'PULL UP A CHAIR'),buildClassicPanel(),
-      ]));
+    function openGuide(){
+      path=[]; keys.clear();
+      const dialog=el('dialog',{class:'tavern-guide','aria-label':'How to play'});
+      const close=()=>dialog.close();
+      dialog.append(el('div',{class:'guide-toolbar'},[
+        el('strong',{},'How to play'),
+        el('button',{'aria-label':'Close instructions',onclick:close},'Close'),
+      ]),el('iframe',{src:'/guide.html',title:'Las Vegas player handbook'}));
+      dialog.addEventListener('close',()=>dialog.remove(),{once:true});
+      overlay.replaceChildren(dialog);dialog.showModal();
     }
     // Phase 2: each Vegas fixture is bound to its own independent room
     // (src/tables.ts), not a generic "create a room" form — this reads
@@ -1557,7 +1561,7 @@ export function createTavern({ el, render, navigate, buildClassicPanel, saveSess
               ? `This table already has its ${MAX_SEATS} players.${pendingNote}`
               : `Pick a colour to request a seat — the host approves or declines it.${pendingNote}`)
           : t.status==='in_progress'
-            ? "This table is already playing — ask to be invited, or wait for it to finish."
+            ? "This table is already playing. Wait for it to finish or choose another table."
             : "This round is over. Whoever's hosting can disband it to free the table.";
 
       const body=[

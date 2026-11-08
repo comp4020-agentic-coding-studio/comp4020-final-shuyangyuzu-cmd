@@ -245,33 +245,6 @@ button + button {
   margin-bottom: 1rem;
 }
 
-.invite-link {
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-  margin: 0.5rem 0 1rem;
-  flex-wrap: wrap;
-}
-
-.invite-link-field {
-  flex: 1;
-  min-width: 10rem;
-  font-size: 0.85rem;
-}
-
-.copy-status {
-  color: var(--muted);
-  font-size: 0.85rem;
-}
-
-.join-by-code {
-  flex-direction: row;
-}
-
-.join-by-code input {
-  flex: 1;
-}
-
 header + .players {
   margin-top: 0;
 }
@@ -314,12 +287,6 @@ header + .players {
   color: var(--muted);
   font-size: 0.85rem;
   min-height: 1.2em;
-}
-
-.classic-entry {
-  margin-top: 2rem;
-  padding-top: 1rem;
-  border-top: 1px solid var(--border);
 }
 
 /* Full-screen world: the viewport is a camera, never a scaled whole map. */
@@ -520,7 +487,6 @@ button.enter-world { background:#62506e; color:#fff6e6; border-radius:10px; padd
 .world-dpad button:nth-child(4) { grid-column:3; grid-row:2; }
 .world-mode .build-version { z-index:5; color:#eddfc9; font-size:9px; bottom:4px; right:8px; }
 .dialog-close { position:absolute; top:14px; right:14px; background:transparent; color:#756575; font-size:24px; }
-.game-dialog .classic-entry { margin:0; padding:0; border:0; }
 .game-dialog form,.game-dialog .return-banner { background:#eee5d8; border-color:#dac7ad; }
 .game-dialog input { background:#fffaf3; color:#453b3f; border-color:#d9cec0; }
 .game-dialog .note { color:#877568; }
@@ -1078,3 +1044,12 @@ body.table-mode { --bg:#50372a; --panel:#49372f; --fg:#f5e7ca; --muted:#d0b997; 
 .domino-edge.edge-top {bottom:calc(100% + 2px);left:calc(50% - 3.5px)}
 .domino-edge.edge-bottom {top:calc(100% + 2px);left:calc(50% - 3.5px)}
 .domino-played .domino-bone {left:50%;top:50%}
+
+/* Native dialog keeps the handbook keyboard-modal; the existing overlay pauses walking. */
+.tavern-guide{width:min(960px,94vw);height:min(820px,90dvh);max-width:94vw;max-height:90dvh;padding:0;border:2px solid #987044;border-radius:14px;background:#f7edd5;color:#493323;overflow:hidden}
+.tavern-guide::backdrop{background:#160e0bbd}
+.guide-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 16px;border-bottom:1px solid #bda47a}
+.guide-toolbar strong{margin-right:auto}
+.tavern-guide[open]{display:flex;flex-direction:column}
+.tavern-guide iframe{width:100%;flex:1;min-height:0;border:0;background:#f7edd5}
+@media(max-width:500px){.guide-toolbar{gap:6px;padding:10px}.guide-toolbar button{font-size:12px;padding:8px}.guide-toolbar strong{width:100%}}

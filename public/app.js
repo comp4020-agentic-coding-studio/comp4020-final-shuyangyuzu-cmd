@@ -34,7 +34,6 @@ const blackjackUI = createBlackjackUI({el,navigate,render});
 const { createDominoUI } = await import(`./domino.js?v=${assetVersion}`);
 const dominoUI = createDominoUI({el,navigate});
 const accountsApi = await import(`./accounts.js?v=${assetVersion}`);
-const COLORS = ["red", "blue", "green", "yellow", "purple"];
 const HEARTBEAT_MS = 5000; // comfortably under the server's default PRESENCE_STALE_MS (15s)
 let activeRoomCode = null;
 // Cheap insurance only, not the primary path (Crit 9: live updates come
@@ -57,7 +56,7 @@ function loadSession(code) {
     const raw = localStorage.getItem(roomSessionKey(code));
     return raw ? JSON.parse(raw) : null;
   } catch {
-    return null; // private window, cleared storage, etc. — fall through to join
+    return null; // private window, cleared storage, etc.
   }
 }
 
@@ -79,18 +78,6 @@ function clearSession(code) {
     }
   } catch {
     // nothing to do
-  }
-}
-
-/** For Home's "return to your room" offer — only returned if a session
- * for it still actually exists (not just a dangling pointer). */
-function lastActiveRoom() {
-  try {
-    const code = localStorage.getItem("vegas:lastRoom");
-    if (!code) return null;
-    return loadSession(code) ? code : null;
-  } catch {
-    return null;
   }
 }
 
@@ -209,7 +196,13 @@ function route() {
   voiceCall.leaveRoom();
 
   tavern.stop();
-  const code = codeFromUrl();
+  let code = codeFromUrl();
+  const session = code ? loadSession(code) : null;
+  if (code && !session) {
+    // A room URL reopens a saved seat. New players join from the tavern.
+    history.replaceState(null, "", "/");
+    code = null;
+  }
   if (activeRoomCode && !code) {
     try {
       const oldSession=loadSession(activeRoomCode);
@@ -231,257 +224,7 @@ function route() {
     tavern.mount();
     return;
   }
-  const upper = code.toUpperCase();
-  const session = loadSession(upper);
-  if (session) {
-    enterRoom(upper, session);
-  } else {
-    renderJoinOrClosed(upper);
-  }
-}
-
-// ---- Classic direct game entry (create/join by code) ---------------------
-//
-// This is exactly the old Home screen's content, extracted so it can sit
-// underneath the bar canvas rather than replace the whole page — bare
-// "/" is the bar now, but direct create/join-by-code access to a Vegas
-// game must keep working unmodified (PLAN.md: "existing entry point...
-// stays reachable"). It manages its own re-renders into `container`
-// rather than calling the global render(), so picking a color doesn't
-// wipe out the bar canvas sitting next to it.
-
-function buildClassicPanel() {
-  const container = el("div", { class: "classic-entry" });
-  let selectedColor = COLORS[0];
-  let nicknameValue = "";
-  try {
-    const patron = JSON.parse(localStorage.getItem('vegas:bar:session') || 'null');
-    nicknameValue = patron?.nickname || '';
-    if (COLORS.includes(patron?.color)) selectedColor = patron.color;
-  } catch { /* storage may be unavailable */ }
-  let joinCodeValue = "";
-
-  function build() {
-    const last = lastActiveRoom();
-
-    const nicknameInput = el("input", {
-      type: "text",
-      placeholder: "Your nickname",
-      maxlength: "20",
-      id: "nickname",
-      value: nicknameValue,
-      oninput: (e) => {
-        nicknameValue = e.target.value;
-      },
-    });
-    const swatchButtons = COLORS.map((c) =>
-      el("button", {
-        type: "button",
-        class: `color-swatch ${c}` + (c === selectedColor ? " selected" : ""),
-        "aria-label": c,
-        onclick: () => {
-          selectedColor = c;
-          swatchButtons.forEach((btn, i) => btn.classList.toggle("selected", COLORS[i] === selectedColor));
-        },
-      }),
-    );
-
-    const errorBox = el("p", { class: "error", id: "entry-error" });
-
-    const createForm = el(
-      "form",
-      {
-        onsubmit: async (e) => {
-          e.preventDefault();
-          const nickname = nicknameInput.value.trim();
-          if (!nickname) return;
-          try {
-            const session = await api("/rooms", { nickname, color: selectedColor });
-            saveSession(session.code, session);
-            navigate(`/?room=${session.code}`);
-          } catch (err) {
-            errorBox.textContent = err.message ?? "something went wrong";
-          }
-        },
-      },
-      [
-        el("h2", {}, "Start a table"),
-        nicknameInput,
-        el("div", { class: "colors" }, swatchButtons),
-        el("button", { type: "submit" }, "Create room"),
-      ],
-    );
-
-    const joinByCodeForm = el(
-      "form",
-      {
-        class: "join-by-code",
-        onsubmit: (e) => {
-          e.preventDefault();
-          const code = joinCodeValue.trim();
-          if (code) navigate(`/?room=${code.toUpperCase()}`);
-        },
-      },
-      [
-        el("input", {
-          type: "text",
-          placeholder: "Room code (6 characters)",
-          maxlength: "6",
-          oninput: (e) => {
-            joinCodeValue = e.target.value;
-          },
-        }),
-        el("button", { type: "submit" }, "Go"),
-      ],
-    );
-
-    container.replaceChildren(
-      ...[
-        el("h2", {}, "Play directly"),
-        el("p", { class: "note" }, "Create a new table, or jump straight into one you have a code for — without going through the bar floor below."),
-        last
-          ? el("div", { class: "return-banner" }, [
-              el("p", {}, `You still have a seat in room ${last}.`),
-              el(
-                "button",
-                { type: "button", onclick: () => navigate(`/?room=${last}`) },
-                "Return to that room",
-              ),
-            ])
-          : null,
-        createForm,
-        errorBox,
-        el("p", {}, "Have a room code?"),
-        joinByCodeForm,
-      ].filter(Boolean),
-    );
-  }
-
-  build();
-  return container;
-}
-
-// ---- Join (a code with no local session) --------------------------------
-
-async function renderJoinOrClosed(code) {
-  render(el("p", {}, "Loading…"));
-  let state;
-  try {
-    state = await getState(code);
-  } catch {
-    render(
-      el("div", { class: "entry" }, [
-        el("h1", {}, "Las Vegas"),
-        el("p", { class: "error" }, `No room found for code ${code}.`),
-        backToHomeButton(),
-      ]),
-    );
-    return;
-  }
-
-  if (state.closed) {
-    render(
-      el("div", { class: "entry" }, [
-        el("h1", {}, "Las Vegas"),
-        el("p", {}, `Room ${code} has closed.`),
-        backToHomeButton(),
-      ]),
-    );
-    return;
-  }
-
-  if (state.phase !== "lobby") {
-    render(
-      el("div", { class: "entry" }, [
-        el("h1", {}, "Las Vegas"),
-        el("p", {}, `Room ${code} has already started, and this browser doesn't hold a seat in it.`),
-        backToHomeButton(),
-      ]),
-    );
-    return;
-  }
-
-  renderJoinForm(code, state);
-}
-
-function renderJoinForm(code, initialState) {
-  const takenColors = new Set(initialState.players.map((p) => p.color));
-  const firstAvailable = COLORS.find((c) => !takenColors.has(c)) ?? COLORS[0];
-  let selectedColor = firstAvailable;
-  let nicknameValue = "";
-
-  function build(state) {
-    const stillTaken = new Set(state.players.map((p) => p.color));
-    if (stillTaken.has(selectedColor)) {
-      selectedColor = COLORS.find((c) => !stillTaken.has(c)) ?? selectedColor;
-    }
-
-    const nicknameInput = el("input", {
-      type: "text",
-      placeholder: "Your nickname",
-      maxlength: "20",
-      id: "nickname",
-      value: nicknameValue,
-      oninput: (e) => {
-        nicknameValue = e.target.value;
-      },
-    });
-
-    const swatchButtons = COLORS.map((c) => {
-      const takenByOther = stillTaken.has(c);
-      return el("button", {
-        type: "button",
-        class: `color-swatch ${c}` + (c === selectedColor ? " selected" : "") + (takenByOther ? " taken" : ""),
-        disabled: takenByOther,
-        "aria-label": takenByOther ? `${c} (taken)` : c,
-        onclick: () => {
-          selectedColor = c;
-          swatchButtons.forEach((btn, i) => btn.classList.toggle("selected", COLORS[i] === selectedColor));
-        },
-      });
-    });
-
-    const errorBox = el("p", { class: "error", id: "entry-error" });
-
-    const form = el(
-      "form",
-      {
-        onsubmit: async (e) => {
-          e.preventDefault();
-          const nickname = nicknameInput.value.trim();
-          if (!nickname) return;
-          try {
-            const session = await api(`/rooms/${code}/join`, { nickname, color: selectedColor });
-            saveSession(code, session);
-            enterRoom(code, session); // URL is already ?room=CODE — no history change needed
-          } catch (err) {
-            errorBox.textContent = err.message ?? "something went wrong";
-          }
-        },
-      },
-      [
-        el("h2", {}, `Join room ${code}`),
-        nicknameInput,
-        el("div", { class: "colors" }, swatchButtons),
-        el("button", { type: "submit" }, "Join"),
-      ],
-    );
-
-    render(
-      el("div", { class: "entry" }, [
-        el("h1", {}, "Las Vegas"),
-        el("p", { class: "note" }, [
-          "Built for a handful of friends sitting around one table, each on ",
-          "their own phone — not for matchmaking with strangers.",
-        ]),
-        form,
-        errorBox,
-        backToHomeButton(),
-      ]),
-    );
-  }
-
-  build(initialState);
+  enterRoom(code, session);
 }
 
 // ---- Table / lobby view ---------------------------------------------
@@ -755,35 +498,6 @@ function startLive(code, session, initialState) {
   fallbackPollHandle = setInterval(fetchAndApply, FALLBACK_POLL_MS);
 }
 
-function copyInviteLinkControl(shareLink) {
-  const status = el("span", { class: "copy-status" });
-  const copyBtn = el(
-    "button",
-    {
-      type: "button",
-      class: "secondary",
-      onclick: async () => {
-        try {
-          if (!navigator.clipboard) throw new Error("no Clipboard API");
-          await navigator.clipboard.writeText(shareLink);
-          status.textContent = "copied!";
-        } catch {
-          // No silent "copied!" lie (playtest round 1 root cause #1):
-          // if the automatic copy can't be confirmed, fall back to a
-          // selected, manually-copyable field instead of pretending it
-          // worked.
-          linkField.focus();
-          linkField.select();
-          status.textContent = "selected — press Ctrl/Cmd+C to copy";
-        }
-      },
-    },
-    "Copy",
-  );
-  const linkField = el("input", { type: "text", readonly: "", value: shareLink, class: "invite-link-field" });
-  return el("div", { class: "invite-link" }, [linkField, copyBtn, status]);
-}
-
 // Phase 3 (product-direction-update): shown instead of the normal lobby
 // while this browser's own request to join an online table hasn't been
 // approved yet — a pending request is never a player (CLAUDE.md: doesn't
@@ -850,7 +564,6 @@ function renderTable(code, session, state) {
   const me = state.players.find((p) => p.id === session.playerId);
   const isHost = state.hostPlayerId === session.playerId;
   const isMyTurn = state.currentPlayerId === session.playerId;
-  const shareLink = `${location.origin}/?room=${code}`;
 
   const header = el("header", {}, [
     el("h1", {}, "Las Vegas"),
@@ -867,8 +580,7 @@ function renderTable(code, session, state) {
     // directly — only the two UI entry points a real player could click
     // are removed, nothing server-side or in the client's own voice
     // module was touched.
-    el("p", {class:"table-subtitle"}, state.solo ? `OFFLINE MODE · ${state.players.length - 1} computer opponents` : ["Room ", el("strong", {}, code)]),
-    ...(state.solo ? [] : [copyInviteLinkControl(shareLink)]),
+    el("p", {class:"table-subtitle"}, state.solo ? `OFFLINE MODE · ${state.players.length - 1} computer opponents` : "ONLINE MODE"),
   ].filter(Boolean));
   if(state.phase!=='lobby')header.appendChild(el('p',{class:'round-marker'},`Round ${state.round} / ${state.totalRounds} · First player: ${state.players.find(p=>p.id===state.startingPlayerId)?.nickname??'—'}`));
 
@@ -1291,5 +1003,5 @@ function hexBoard(code, session, state, isMyTurn) {
 
 // ---- Boot -------------------------------------------------------------
 
-const tavern = createTavern({ el, render, navigate, buildClassicPanel, saveSession, shouldApplyLiveUpdate, createMenuBook, mixologyModule:communityMixologyModule, ordersApi, accountsApi });
+const tavern = createTavern({ el, render, navigate, saveSession, shouldApplyLiveUpdate, createMenuBook, mixologyModule:communityMixologyModule, ordersApi, accountsApi });
 route();
