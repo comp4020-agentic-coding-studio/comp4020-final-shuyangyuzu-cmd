@@ -1,5 +1,13 @@
 # Your harness
 
+## Blackjack's "Leave table" moved into the header, beside "Back to the bar" — 2026-11-08 (Claude)
+
+A small layout fix the user asked for directly after reviewing the leave/away unification round immediately below: Blackjack's own "Leave table" button sat in the bottom controls section, separate from "Back to the bar"/"I'm away" in the header — every other game that has both an away-toggle and a leave control (`public/poker.js`) already places them together in the header. `public/blackjack.js`'s header now reads "I'm away" → "Back to the bar" → "Leave table", in that order, matching `poker.js`'s own established layout exactly; no behavior changed, only where the existing button renders (it still calls the same `api('leave')` it always did). The explanatory note paragraph stays in the controls section — it's still accurate regardless of where the buttons themselves are drawn.
+
+Verified directly: `node --check`/`tsc --noEmit` clean, the three Blackjack spec files (26 tests) still pass, and a dedicated Playwright script against a freshly isolated server read the real rendered header DOM and confirmed the exact button order (`["I'm away","Back to the bar","Leave table"]`) with "Leave table" no longer present in the controls section.
+
+**Per the user's own explicit authorization ("修改完可以上线") — this round is deployed to production**, the first round in this project's history to ship rather than stay local-preview-only. See the deployment note immediately below this entry (or PLAN.md's matching entry) for what was actually pushed/verified live.
+
 ## Contents page entries re-centered, matching the left title page's own vertical span — 2026-11-08 (Claude)
 
 A follow-up from the round immediately below, with an annotated screenshot pinpointing exactly what still looked wrong: the three entries sat left-aligned and tightly clustered near the top of the right page, visually unbalanced against the left page's own title frame, which sits centered in the middle of its page.

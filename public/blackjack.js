@@ -126,10 +126,15 @@ export function createBlackjackUI({el,navigate,render}) {
         // throwing, so the player is never trapped here by a network
         // hiccup) makes Back to the bar an actual, visible "I've stepped
         // away" rather than a silent no-op on the seat's own state.
-        button('Back to the bar',async()=>{if(me&&!me.away)await command('away',{away:true});navigate('/');})]),
+        button('Back to the bar',async()=>{if(me&&!me.away)await command('away',{away:true});navigate('/');}),
+        // Moved into the header, immediately to the right of "Back to
+        // the bar" (the user's own explicit placement request) — matches
+        // poker.js's own identical header layout exactly, so the two
+        // exit controls sit side by side rather than one in the header
+        // and the other buried in the controls section below.
+        button('Leave table',async()=>{if(busy)return;busy=true;try{await api('leave');room=null;navigate('/')}catch(e){error=e.message;draw()}finally{busy=false}})]),
       felt,
       el('section',{class:'poker-controls','aria-label':'Blackjack actions'},[el('p',{role:'status'},status),el('p',{},moveName&&move?moveName+' · '+move.action:''),el('p',{role:'alert',class:'error'},error),el('div',{class:'bj-actions'},controls),
-        button('Leave table',async()=>{if(busy)return;busy=true;try{await api('leave');room=null;navigate('/')}catch(e){error=e.message;draw()}finally{busy=false}}),
         el('p',{class:'note'},'Back to the bar keeps your seat reserved until you return. Leave table releases it immediately. A 45-second turn timeout stands automatically.')]),
       el('details',{},[el('summary',{},'Table rules'),el('p',{},'Beat the dealer without exceeding 21. Dealer stands on all 17s. Natural blackjack pays 3:2; other wins pay 1:1. Double draws exactly one card. Split equal-value cards once; split aces receive one card each. Insurance costs half your wager and pays 2:1. Everyone starts with 500 play chips. A hand in progress refuses new arrivals until it ends — you are notified the moment a seat opens.')])
     ]));
