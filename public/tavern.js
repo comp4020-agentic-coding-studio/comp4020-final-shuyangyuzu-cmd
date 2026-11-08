@@ -2584,7 +2584,8 @@ export function createTavern({ el, render, navigate, saveSession, shouldApplyLiv
           if(occupant.barPlayerId)seatedPatrons.add(occupant.barPlayerId);
         }
         ctx.font='10px monospace';ctx.textAlign='center';ctx.fillStyle='#f5e7d2';
-        ctx.fillText(occupant.nickname+(occupant.controller==='npc'?' · NPC':occupant.present?'':' · away'),x,y-52);
+        const seatLabel=occupant.controller==='npc'?' · NPC':occupant.awayMode==='npc'?' · Away (NPC playing)':occupant.present?'':' · Away';
+        ctx.fillText(occupant.nickname+seatLabel,x,y-52);
         // A game-seated patron's speech still appears at their real,
         // actual on-screen position (part 2's "real chair position" rule,
         // carried over for part 3's own bubble) — cross-referenced from

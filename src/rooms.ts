@@ -143,8 +143,7 @@ function sweepStaleLobbyPlayers(db: Database.Database, row: RoomRow): void {
 
   const now = new Date();
   const seen = lastSeenTimes(db, row.id);
-  const explicitlyAway = (id:string) => !!db.prepare(`SELECT 1 FROM room_departures WHERE player_id = ?
-    UNION ALL SELECT 1 FROM table_departures d JOIN bar_players b ON b.id = d.bar_player_id WHERE b.current_game_player_id = ? LIMIT 1`).get(id,id);
+  const explicitlyAway = explicitDepartureLookup(db);
   const staleIds = Object.values(state.players)
     .filter((p) => !explicitlyAway(p.id) && isPastGrace(seen.get(p.id) ?? p.joinedAt, now))
     .map((p) => p.id);
@@ -1456,9 +1455,18 @@ export function ownWinnings(db:Database.Database,code:string,playerId:string,ses
   return {version:row.version,round:state.round,wonBills:[...wonBills],moneyTotal:wonBills.reduce((a,b)=>a+b,0)};
 }
 
+function explicitDepartureLookup(db: Database.Database): (playerId: string) => boolean {
+  const query = db.prepare(`SELECT 1 FROM room_departures WHERE player_id = ?
+    UNION ALL SELECT 1 FROM table_departures d
+    JOIN bar_players b ON b.id = d.bar_player_id AND b.current_table_id = d.table_id
+    WHERE b.current_game_player_id = ? LIMIT 1`);
+  return (playerId) => !!query.get(playerId, playerId);
+}
+
 function toPublicState(db: Database.Database, row: RoomRow, state: RoomState): PublicState {
   const now = new Date();
   const seen = lastSeenTimes(db, row.id);
+  const explicitlyAway = explicitDepartureLookup(db);
   return {
     code: row.code,
     solo: !!db.prepare("SELECT 1 FROM events WHERE room_id = ? AND type = 'solo_npc_room_created' LIMIT 1").get(row.id),
@@ -1485,6 +1493,7 @@ function toPublicState(db: Database.Database, row: RoomRow, state: RoomState): P
         moneyTotal: state.phase==='game_end'||state.phase==='lobby'?p.wonBills.reduce((sum, b) => sum + b, 0):null,
         ready: p.ready,
         connected: isConnected(seen.get(p.id) ?? p.joinedAt, now),
+        away: p.controller === "human" && (p.awayMode != null || explicitlyAway(p.id)),
         controller: p.controller,
         // ?? null: a room whose state_json was stored before this field
         // existed parses back with awayMode undefined, not null — the

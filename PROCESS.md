@@ -6,7 +6,7 @@
 
 I began with Las Vegas and gradually asked for a tavern around it: characters, chairs, games, meals and a recipe book. My central question became whether friends could understand what to do together without me explaining the interface. Gather supplied a spatial reference; Red Dead Redemption 2 and Stardew Valley supplied atmosphere. These references shaped the product, but did not establish that my version worked. I repeatedly used screenshots and playtests to reject results that looked acceptable to an agent. The project’s argument is now in README; the operational instructions belong in the handbook rather than an ever-growing front page.
 
-The scope grew further than the original single game. Poker, dominoes and Blackjack offer different shared activities, while recipes give the counter a practical purpose beyond the game. That expansion also made consistency expensive: “leave” and “away” had to mean the same thing across separate engines. The latest lifecycle corrections, rather than the number of games, are the better evidence of progress ([2e5f10a](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/commit/2e5f10a)).
+The scope grew further than the original single game. Texas Hold’em, All Fives and Blackjack offer different shared activities, while recipes give the counter a practical purpose beyond the game. That expansion also made consistency expensive: “leave” and “away” had to mean the same thing across separate engines. The latest lifecycle corrections, rather than the number of games, are the better evidence of progress ([2e5f10a](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/commit/2e5f10a)).
 
 ## Stack and agent workflow
 

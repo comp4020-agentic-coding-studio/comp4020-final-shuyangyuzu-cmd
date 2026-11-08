@@ -14,13 +14,15 @@ The alternative was a simpler list of rooms. That would be easier to build and n
 
 Choose Sign up, Log in, or Continue as guest. Accounts use unique usernames; character nicknames can repeat. Save the recovery codes shown at registration. No email recovery is provided. A second-device login replaces the earlier session. Guests remain tied to their browser.
 
-Walk with WASD, arrows, touch controls or a floor click. Vegas requires host approval; Hold’em, Blackjack and facing domino partners use open seating. Card-game arrivals wait until the current hand ends. Leave table gives up membership; Back to the bar marks a reserved seat Away while the character returns to the tavern. The handbook explains grace periods, rules and return controls. Offline tables mean computer opponents; internet is still required.
+Walk with WASD, arrows, touch controls or a floor click. Vegas requires host approval; Hold’em, Blackjack and All Fives use open seating. In All Fives, sit opposite your opponent. Card-game arrivals wait until the current hand ends. Leave table gives up membership; Back to the bar marks a reserved seat Away while the character returns to the tavern. The handbook explains grace periods, rules and return controls. Offline tables mean computer opponents; internet is still required.
 
 The counter offers meals and drinks, consumed at dining seats. The Recipe Book supports food and drink publishing, photographs, ingredient search, saved recipes and shopping plans. Accounts retain these across visits. Public recipes are separate from the fixed game menu. Recipe and image credits are in [the source notes](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/blob/main/docs/mixology-sources.md) and [menu image record](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/blob/main/docs/menu-image-sources.md).
 
 ## Promises and their limits
 
-Fairness belongs on the server: turns, membership, legal moves and payouts cannot depend on a browser’s claim. The [Las Vegas rulebook](https://www.ravensburger.org/spielanleitungen/ecm/Spielanleitungen/26938_Vegas_EN.pdf) anchors the four-round game; I deliberately randomise the first starter instead of choosing the oldest player. There is no real-money gambling.
+None of the four games (Las Vegas, Texas Hold’em, Blackjack and All Fives) involves real-money gambling. All chips, points and winnings are virtual and cannot be redeemed for money.
+
+Fairness belongs on the server: turns, membership, legal moves and payouts cannot depend on a browser’s claim. The [Las Vegas rulebook](https://www.ravensburger.org/spielanleitungen/ecm/Spielanleitungen/26938_Vegas_EN.pdf) anchors the four-round game; I deliberately randomise the first starter instead of choosing the oldest player.
 
 SQLite preserves durable state on the deployed volume. SSE and short polling target shared updates within about a second; neither guarantees every network. Tests protect access, game rules, migrations and duplicate actions. [CLAUDE.md](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/blob/main/CLAUDE.md) records constraints; [ACCEPTANCE.md](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/blob/main/ACCEPTANCE.md) distinguishes automated checks from human judgement. Readability, atmosphere and animation quality require actual viewing at desktop and phone sizes.
 

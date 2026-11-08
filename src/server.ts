@@ -74,7 +74,7 @@ function roomPresenceSignature(state: PublicState): string {
   return JSON.stringify({
     closed: state.closed,
     hostPlayerId: state.hostPlayerId,
-    players: state.players.map((p) => ({ id: p.id, connected: p.connected })),
+    players: state.players.map((p) => ({ id: p.id, connected: p.connected, away: p.away, awayMode: p.awayMode })),
     voiceCall: voice.getPublicCallSummary(db, state.code),
   });
 }

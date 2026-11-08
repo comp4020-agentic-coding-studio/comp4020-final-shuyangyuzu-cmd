@@ -1,4 +1,4 @@
-# Final acceptance — review candidate, 8 November 2026
+# Final acceptance — 9 November 2026
 
 Historical detail is preserved in [the pre-review record](docs/archive/ACCEPTANCE-before-final-review.md). That record contains overstatements corrected here. The student has played with friends and repeatedly inspected screenshots/animations; lack of final-version acceptance does **not** mean nobody ever played. edd791f was this feature branch's release, not the project's first authorised deployment.
 
@@ -8,9 +8,9 @@ Unit/HTTP checks exercise specified mechanisms, not all possible behaviour. Scri
 
 ## Current baseline
 
-Claude reported successful CI and deployment of edd791f. The recipe extension, image composition, independent page scrolling, away/leave changes and Blackjack header placement are included in its ancestry. Codex's present handbook/documentation candidate has not been deployed. No new human acceptance is claimed here.
+The student reviewed deployed build c613c65676 (ee37394) and reported that all other acceptance items passed. The sole functional issue reported was missing feedback for Vegas players stepping away and for NPC takeover. The individual steps of that human review were not specified. The table below preserves the earlier evidence and suggested checks. Only the Vegas status correction needs a fresh functional confirmation. Final review of written claims and the research argument is tracked separately.
 
-| Area | Existing evidence | Remaining final-candidate check |
+| Area | Existing evidence | Earlier suggested check |
 | --- | --- | --- |
 | Four games | Historical friend playtests and Claude's separate-browser scripted checks; user subsequently found leave/away defects | Two independent players: join, act, away, resume, exit; observe the other screen and seat release; test each game's waiting/substitution rules |
 | Eating | Human rejection of contact geometry and food returning; regression fixes in 2e5f10a | Watch meal, drink and combined endings; confirm empty plate and restored controls |
@@ -24,7 +24,7 @@ Claude reported successful CI and deployment of edd791f. The recipe extension, i
 
 ## Release gate
 
-- [ ] Student approves current functionality and written claims.
+- [ ] Student confirms the revised Vegas status indicators and approves the written claims.
 - [ ] Final pnpm check and check:evidence results recorded for the actual release candidate.
 - [ ] Main/CI/deployed build agree; /, /readme/ and /guide.html work publicly.
 - [ ] No test identities, passwords or recovery codes in tutorial/evidence.

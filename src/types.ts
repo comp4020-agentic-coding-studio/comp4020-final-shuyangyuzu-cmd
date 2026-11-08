@@ -120,6 +120,8 @@ export interface PublicPlayer {
   /** Derived at read time from how recently a heartbeat landed — never
    * stored, so it's never stale (CLAUDE.md). */
   connected: boolean;
+  /** The player has explicitly stepped away while keeping the seat. */
+  away: boolean;
   controller: "human" | "npc";
   awayMode: "npc" | "self" | null;
 }

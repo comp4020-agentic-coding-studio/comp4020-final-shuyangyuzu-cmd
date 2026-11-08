@@ -44,6 +44,7 @@ export interface TableSeatView {
   nickname: string;
   connected: boolean;
   controller: "human" | "npc";
+  awayMode?: "npc" | "self" | null;
   barPlayerId: string | null;
   skin: string;
   present: boolean;
@@ -225,13 +226,12 @@ export function getTablesStatus(db: Database.Database): TableStatusView[] {
     for (const p of players) {
       const chairIndex = COLORS.indexOf(p.color);
       if (chairIndex >= 0) {
-        const patron = db.prepare(`SELECT b.id, b.skin, d.left_at FROM bar_players b
-          LEFT JOIN table_departures d ON d.bar_player_id = b.id
-          WHERE b.current_game_player_id = ? AND b.current_table_id = ?`).get(p.id, t.id) as
-          { id: string; skin: string; left_at: string | null } | undefined;
+        const patron = db.prepare(`SELECT id, skin FROM bar_players
+          WHERE current_game_player_id = ? AND current_table_id = ?`).get(p.id, t.id) as
+          { id: string; skin: string } | undefined;
         seats[chairIndex] = { color: p.color, nickname: p.nickname, connected: p.connected, controller: p.controller,
           barPlayerId: patron?.id ?? null, skin: patron?.skin ?? "warm",
-          present: p.controller === "npc" || (p.connected && !patron?.left_at) };
+          awayMode: p.awayMode, present: p.controller === "npc" || (p.connected && !p.away) };
       }
     }
     return {

@@ -538,6 +538,15 @@ function renderPendingRequest(code, session, state) {
   );
 }
 
+function vegasSeatStatus(player) {
+  if (player.controller === "npc") return "NPC controlled";
+  if (player.awayMode === "npc") return "Away · NPC playing";
+  if (player.awayMode === "self") return "Away · player control";
+  if (player.away) return "Away";
+  if (!player.connected) return "Disconnected";
+  return "";
+}
+
 function renderTable(code, session, state) {
   lastRenderedState = state;
   // Voice-call membership is part of the same public state push, so this
@@ -591,7 +600,8 @@ function renderTable(code, session, state) {
       const tags = [];
       if (p.id === state.hostPlayerId) tags.push("host");
       if (state.phase === "lobby") tags.push(p.ready ? "ready" : "not ready");
-      if (!p.connected) tags.push("disconnected");
+      const seatStatus = vegasSeatStatus(p);
+      if (seatStatus) tags.push(seatStatus);
       return el("li", { class: p.id === state.currentPlayerId ? "current-turn" : "" }, [
         el("span", { class: `swatch ${p.color}` }),
         `${p.nickname}${tags.length ? ` (${tags.join(", ")})` : ""} — ${p.diceInHand} dice — ${p.moneyTotal==null?'Hidden':`$${p.moneyTotal.toLocaleString()}`}`,
@@ -973,7 +983,7 @@ function hexBoard(code, session, state, isMyTurn) {
   ]);
   const actionChildren=[el('div',{class:'turn-heading'},[
     el('span',{class:'eyebrow'},finished?'SETTLEMENT':isMyTurn?'YOUR TURN':'AT THE TABLE'),
-    el('strong',{},finished?'Round complete':isMyTurn?(state.phase==='awaiting_roll'?'Roll your remaining dice':'Choose one face to place'):`Waiting on ${current?.nickname??'…'}`),
+    el('strong',{},finished?'Round complete':isMyTurn?(state.phase==='awaiting_roll'?'Roll your remaining dice':'Choose one face to place'):`Waiting on ${current?.nickname??'…'}${current && vegasSeatStatus(current) ? ' ('+vegasSeatStatus(current)+')' : ''}`),
     el('span',{class:'turn-help'},finished?'Equal counts cancel. Remaining dice win the highest available bills.':isMyTurn?'All dice showing the chosen face go to its matching casino.':'The table updates automatically.'),
   ])];
   if(isMyTurn&&state.phase==='awaiting_roll')actionChildren.push(el('button',{class:'roll-action',onclick:async()=>{
@@ -991,7 +1001,7 @@ function hexBoard(code, session, state, isMyTurn) {
     class:`player-seat${p.id===state.currentPlayerId?' current-turn':''}`,style:`--player-color:var(--dice-${p.color})`,
   },[
     el('span',{class:'player-token','aria-hidden':'true'},'♟'),
-    el('div',{class:'player-identity'},[el('strong',{},p.controller==='npc'?p.nickname.replace(/\s*\(NPC\)$/,''):p.nickname),el('small',{},p.controller==='npc'?'NPC':p.id===session.playerId?'YOU':p.connected?'ONLINE':'AWAY')]),
+    el('div',{class:'player-identity'},[el('strong',{},p.controller==='npc'?p.nickname.replace(/\s*\(NPC\)$/,''):p.nickname),el('small',{},vegasSeatStatus(p) || (p.id===session.playerId?'YOU':'ONLINE'))]),
     el('div',{class:'player-totals'},[el('span',{},`${p.diceInHand} dice`),el('strong',{},p.moneyTotal==null?(p.id===session.playerId?'Your bank…':'Hidden'):`$${p.moneyTotal.toLocaleString()}`)]),
   ])));
   return el('div',{class:'hex-board-wrap'},[

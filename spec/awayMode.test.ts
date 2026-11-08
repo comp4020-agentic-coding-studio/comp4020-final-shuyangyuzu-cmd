@@ -15,8 +15,10 @@ import { openDb } from "../src/db.ts";
 import {
   createRoom,
   departChoice,
+  departGame,
   getPublicState,
   handoffToNpc,
+  heartbeat,
   joinRoom,
   npcPlace,
   npcRoll,
@@ -57,6 +59,7 @@ it("choosing NPC standby lets the scheduler's engine take this seat's turns, wit
   let state = getPublicState(db, code);
   const me = state.players.find((p) => p.id === host.playerId)!;
   expect(me.awayMode).toBe("npc");
+  expect(me.away).toBe(true);
   expect(me.controller).toBe("human"); // never flips controller — reversible
 
   expect(npcRoll(db, code)).toBe(true);
@@ -163,4 +166,17 @@ it("awayMode defaults to null for every freshly created or joined player", () =>
   const state = getPublicState(db, code);
   expect(state.players.find((p) => p.id === host.playerId)?.awayMode).toBeNull();
   expect(state.players.find((p) => p.id === guest.playerId)?.awayMode).toBeNull();
+});
+
+it("publishes an explicit departure immediately even while the player's browser is connected", () => {
+  const host = createRoom(db, "Host", "red");
+  const status = () => getPublicState(db, host.code).players.find((p) => p.id === host.playerId);
+  const originalVersion = getPublicState(db, host.code).version;
+  expect(status()).toMatchObject({ connected: true, away: false, awayMode: null });
+  departGame(db, host.code, host.playerId, host.sessionSecret);
+  heartbeat(db, host.code, host.playerId, host.sessionSecret);
+  expect(status()).toMatchObject({ connected: true, away: true, awayMode: null });
+  expect(getPublicState(db, host.code).version).toBe(originalVersion);
+  resumeGame(db, host.code, host.playerId, host.sessionSecret);
+  expect(status()).toMatchObject({ connected: true, away: false, awayMode: null });
 });

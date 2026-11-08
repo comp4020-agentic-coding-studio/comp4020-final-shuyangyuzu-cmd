@@ -5296,3 +5296,11 @@ Verification on 2026-11-09: 568/568 tests passed across 56 files against a separ
 ## 2026-11-09 — Retire direct room joining (Codex)
 
 The student opened a Vegas invite link and reached the old join form during manual review. Removed direct create/join UI, lobby invite sharing, and the handbook’s code button and instructions. New players join by choosing the same online table in the tavern and requesting the host’s approval. A legacy URL without a saved room session goes back to the tavern. Saved-seat URLs still reopen the game. Browser checks covered the old link and handbook at 1920×1080 and 390×844, plus a saved online host seat at desktop size. Local preview: http://127.0.0.1:18644/.
+
+## 2026-11-09 — Vegas away status visible to other players (Codex)
+
+The student reported that all other acceptance items passed on ee37394. In Vegas, heartbeat freshness could make a player who had stepped away still appear online, and the board ignored temporary NPC takeover. Room snapshots now distinguish explicit departure, disconnection, and NPC control. The lobby, board and tavern seats show the applicable status. A departure or resume updates presence without incrementing the game-action version. Two independent browser profiles verified lobby departure and return, self-control away, NPC standby, and resuming while the observer stayed on the same page. The new status display is pending student confirmation.
+
+TypeScript and evidence checks passed. In the full run, 567/569 tests passed. The two asset-version assertions read files changed after the test server computed its startup hash. On a fresh server with the final files, the caching and away-mode suites passed 18/18. Review preview: http://127.0.0.1:18647/.
+
+A final isolated run on the unchanged implementation passed TypeScript, evidence checks, and all 569 tests across 56 files. The student approved the documentation corrections before handoff. README now applies the no-real-money statement to all four games, and PROCESS uses the on-screen name All Fives.
