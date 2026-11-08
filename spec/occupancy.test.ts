@@ -13,7 +13,10 @@ import { BarError, findFreeTile, joinBar, moveBar, rejoinBar } from "../src/bar.
 import { defaultSpawn, isWalkable } from "../src/barLayout.ts";
 import { openDb } from "../src/db.ts";
 import { effectivePosition } from "../src/position.ts";
-import { createTableRoom } from "../src/tables.ts";
+import { createTableRoom, getTablesStatus } from "../src/tables.ts";
+import { openBlackjack, setBlackjackAway } from "../src/blackjack.ts";
+import { openDomino, setDominoAway } from "../src/domino.ts";
+import { openPoker, setPokerAway } from "../src/poker.ts";
 
 let dir: string;
 let db: Database.Database;
@@ -124,4 +127,80 @@ it("effectivePosition falls back to the raw bar coordinate for a departed (away)
   ).run(a.playerId, new Date().toISOString());
   const pos = effectivePosition(db, a.playerId);
   expect(pos).toEqual({ x: a.x, y: a.y });
+});
+
+// 2026-11-08 acceptance fix: marking yourself "away" at Blackjack,
+// Dominoes or Poker previously left `effectivePosition` still reporting
+// the real chair tile (the query only ever checked `active=1`, and an
+// away row is still active=1) — so a player who clicked "I'm away" and
+// then "Back to the bar" remained rendered seated at the game chair
+// forever instead of standing up and appearing at their own real,
+// walkable bar tile, exactly the "明确提示现有暂离规则，不要误导" gap the
+// user's own manual review found. Each of these three mirrors the
+// existing Vegas `departed` test immediately above, for the three games
+// that previously had no equivalent check at all.
+it("effectivePosition falls back to the raw bar coordinate for an away Blackjack occupant", () => {
+  const a = joinBar(db, "A", "red");
+  openBlackjack(db, a.playerId, a.sessionSecret, 0);
+  expect(effectivePosition(db, a.playerId)).not.toEqual({ x: a.x, y: a.y });
+  setBlackjackAway(db, a.playerId, a.sessionSecret, true);
+  expect(effectivePosition(db, a.playerId)).toEqual({ x: a.x, y: a.y });
+  // Clearing away restores the chair position — the player isn't stuck
+  // standing even though their seat/membership row was never released.
+  setBlackjackAway(db, a.playerId, a.sessionSecret, false);
+  expect(effectivePosition(db, a.playerId)).not.toEqual({ x: a.x, y: a.y });
+});
+
+it("effectivePosition falls back to the raw bar coordinate for an away Dominoes occupant", () => {
+  const a = joinBar(db, "A", "red");
+  openDomino(db, a.playerId, a.sessionSecret, "online", 0);
+  expect(effectivePosition(db, a.playerId)).not.toEqual({ x: a.x, y: a.y });
+  setDominoAway(db, a.playerId, a.sessionSecret, true);
+  expect(effectivePosition(db, a.playerId)).toEqual({ x: a.x, y: a.y });
+  setDominoAway(db, a.playerId, a.sessionSecret, false);
+  expect(effectivePosition(db, a.playerId)).not.toEqual({ x: a.x, y: a.y });
+});
+
+it("effectivePosition falls back to the raw bar coordinate for an away Poker occupant", () => {
+  const a = joinBar(db, "A", "red");
+  openPoker(db, a.playerId, a.sessionSecret, "online");
+  expect(effectivePosition(db, a.playerId)).not.toEqual({ x: a.x, y: a.y });
+  setPokerAway(db, a.playerId, a.sessionSecret, true);
+  expect(effectivePosition(db, a.playerId)).toEqual({ x: a.x, y: a.y });
+  setPokerAway(db, a.playerId, a.sessionSecret, false);
+  expect(effectivePosition(db, a.playerId)).not.toEqual({ x: a.x, y: a.y });
+});
+
+// The same fix, confirmed from the bar's own public-facing read path
+// (src/tables.ts's getTablesStatus, which public/tavern.js's seated-
+// figure rendering and "· away" nickname-tag suffix both depend on) —
+// not just the lower-level effectivePosition function in isolation.
+// Before this fix, `present` for these three games never considered
+// `away` at all, so a bystander's own screen kept drawing an away
+// player's sprite seated at the chair with no "away" label, identical to
+// an actively-playing occupant.
+it("getTablesStatus reports an away Blackjack/Dominoes/Poker occupant as not present, for the bar's own seated-figure rendering", () => {
+  const a = joinBar(db, "A", "red"), b = joinBar(db, "B", "blue"), c = joinBar(db, "C", "green");
+  openBlackjack(db, a.playerId, a.sessionSecret, 0);
+  openDomino(db, b.playerId, b.sessionSecret, "online", 0);
+  openPoker(db, c.playerId, c.sessionSecret, "online");
+  setBlackjackAway(db, a.playerId, a.sessionSecret, true);
+  setDominoAway(db, b.playerId, b.sessionSecret, true);
+  setPokerAway(db, c.playerId, c.sessionSecret, true);
+  const status = getTablesStatus(db);
+  const bjSeat = status.find(t => t.id === "blackjack-1")!.seats.find(s => s?.barPlayerId === a.playerId);
+  const dominoSeat = status.find(t => t.id === "dominoes-1")!.seats.find(s => s?.barPlayerId === b.playerId);
+  const pokerSeat = status.find(t => t.id === "texas-1")!.seats.find(s => s?.barPlayerId === c.playerId);
+  expect(bjSeat?.present).toBe(false);
+  expect(dominoSeat?.present).toBe(false);
+  expect(pokerSeat?.present).toBe(false);
+  // Clearing away restores present — confirms this is genuinely driven
+  // by the away flag, not some other side effect of marking it.
+  setBlackjackAway(db, a.playerId, a.sessionSecret, false);
+  setDominoAway(db, b.playerId, b.sessionSecret, false);
+  setPokerAway(db, c.playerId, c.sessionSecret, false);
+  const after = getTablesStatus(db);
+  expect(after.find(t => t.id === "blackjack-1")!.seats.find(s => s?.barPlayerId === a.playerId)?.present).toBe(true);
+  expect(after.find(t => t.id === "dominoes-1")!.seats.find(s => s?.barPlayerId === b.playerId)?.present).toBe(true);
+  expect(after.find(t => t.id === "texas-1")!.seats.find(s => s?.barPlayerId === c.playerId)?.present).toBe(true);
 });

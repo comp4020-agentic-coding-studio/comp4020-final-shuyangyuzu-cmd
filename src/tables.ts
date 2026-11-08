@@ -124,25 +124,37 @@ export function getTablesStatus(db: Database.Database): TableStatusView[] {
   return GAME_TABLES.map((t) => {
     const tableMode = t.tableMode ?? "online";
     if(t.gameType==='dominoes'){
-      const players=tableMode==='online'?db.prepare(`SELECT m.bar_id,m.seat,m.seen,r.lane,r.state_json,p.nickname,p.skin FROM domino_members m JOIN domino_rooms r ON r.id=m.room_id JOIN bar_players p ON p.id=m.bar_id WHERE m.active=1 AND r.closed=0 AND r.mode='online' AND m.seen>?`).all(Date.now()-180000) as {bar_id:string;seat:number;seen:number;lane:number;state_json:string|null;nickname:string;skin:string}[]:[];
+      // 2026-11-08 acceptance fix: `present` now also folds in this
+      // round's own `away` flag — an away player is reported exactly
+      // like an absent one for seated-figure rendering/display purposes
+      // (public/tavern.js's existing "· away" suffix, unchanged), closing
+      // a real gap where marking yourself away left you still drawn
+      // seated at the chair forever (every away row is also an active
+      // row, so `active=1` alone never changed once this flag shipped).
+      const players=tableMode==='online'?db.prepare(`SELECT m.bar_id,m.seat,m.seen,m.away,r.lane,r.state_json,p.nickname,p.skin FROM domino_members m JOIN domino_rooms r ON r.id=m.room_id JOIN bar_players p ON p.id=m.bar_id WHERE m.active=1 AND r.closed=0 AND r.mode='online' AND m.seen>?`).all(Date.now()-180000) as {bar_id:string;seat:number;seen:number;away:number;lane:number;state_json:string|null;nickname:string;skin:string}[]:[];
       const seats:Array<TableSeatView|null>=[null,null,null,null];
-      for(const p of players){const index=p.lane*2+p.seat;seats[index]={color:COLORS[index],nickname:p.nickname,connected:Date.now()-p.seen<15000,controller:'human',barPlayerId:p.bar_id,skin:p.skin,present:Date.now()-p.seen<15000};}
+      for(const p of players){const index=p.lane*2+p.seat;seats[index]={color:COLORS[index],nickname:p.nickname,connected:Date.now()-p.seen<15000,controller:'human',barPlayerId:p.bar_id,skin:p.skin,present:Date.now()-p.seen<15000&&!p.away};}
       return {id:t.id,gameType:'dominoes',available:true,label:t.label,tableMode,status:players.length?(players.some(p=>p.state_json)?'in_progress':'waiting'):'empty',roomCode:null,playerCount:players.length,takenColors:seats.filter(Boolean).map(p=>p!.color),seats,pendingCount:0};
     }
     if(t.gameType==='blackjack'){
-      const players=tableMode==='online'?db.prepare(`SELECT m.bar_id,m.seat,m.seen,p.nickname,p.skin,r.state_json FROM blackjack_members m JOIN blackjack_rooms r ON r.id=m.room_id JOIN bar_players p ON p.id=m.bar_id WHERE m.active=1 AND r.closed=0 AND m.seen>?`).all(Date.now()-180000) as {bar_id:string;seat:number;seen:number;nickname:string;skin:string;state_json:string}[]:[];
+      const players=tableMode==='online'?db.prepare(`SELECT m.bar_id,m.seat,m.seen,m.away,p.nickname,p.skin,r.state_json FROM blackjack_members m JOIN blackjack_rooms r ON r.id=m.room_id JOIN bar_players p ON p.id=m.bar_id WHERE m.active=1 AND r.closed=0 AND m.seen>?`).all(Date.now()-180000) as {bar_id:string;seat:number;seen:number;away:number;nickname:string;skin:string;state_json:string}[]:[];
       const seats:Array<TableSeatView|null>=[null,null,null,null];
-      for(const p of players)seats[p.seat]={color:COLORS[p.seat],nickname:p.nickname,connected:Date.now()-p.seen<15000,controller:'human',barPlayerId:p.bar_id,skin:p.skin,present:Date.now()-p.seen<15000};
+      for(const p of players)seats[p.seat]={color:COLORS[p.seat],nickname:p.nickname,connected:Date.now()-p.seen<15000,controller:'human',barPlayerId:p.bar_id,skin:p.skin,present:Date.now()-p.seen<15000&&!p.away};
       return {id:t.id,gameType:'blackjack',available:true,label:t.label,tableMode,status:players.length?(['betting','settled'].includes(JSON.parse(players[0].state_json).phase)?'waiting':'in_progress'):'empty',roomCode:null,playerCount:players.length,takenColors:seats.filter(Boolean).map(p=>p!.color),seats,pendingCount:0};
     }
     if(t.gameType==='texas'){
       const row=tableMode==='online'?db.prepare("SELECT id,state_json FROM poker_rooms WHERE table_id=? AND closed=0 AND mode='online'").get(t.id) as {id:string;state_json:string}|undefined:undefined;
       const state=row?JSON.parse(row.state_json):null;
       const players=state?.players.filter((p:{leaving:boolean})=>!p.leaving)??[];
+      // poker_members.away is checked directly here (never read off
+      // state_json, which has no away field of its own) — same reasoning
+      // as dominoes/blackjack above: present must be false for an away
+      // seat even though the underlying membership row is still active.
+      const awaySeats=row?new Set((db.prepare('SELECT bar_id FROM poker_members WHERE room_id=? AND active=1 AND away=1').all(row.id) as {bar_id:string}[]).map(x=>x.bar_id)):new Set<string>();
       const seats:Array<TableSeatView|null>=[null,null,null,null,null];
       for(const p of players){
         const profile=db.prepare('SELECT color,skin FROM bar_players WHERE id=?').get(p.id) as {color:string;skin:string}|undefined;
-        seats[p.seat]={color:['red','blue','green','yellow','purple'][p.seat],nickname:p.nickname,connected:true,controller:'human',barPlayerId:p.id,skin:profile?.skin??'warm',present:true};
+        seats[p.seat]={color:['red','blue','green','yellow','purple'][p.seat],nickname:p.nickname,connected:true,controller:'human',barPlayerId:p.id,skin:profile?.skin??'warm',present:!awaySeats.has(p.id)};
       }
       return {id:t.id,gameType:'texas',available:true,label:t.label,tableMode,status:row?(state.phase==='waiting'?'waiting':'in_progress'):'empty',roomCode:null,playerCount:players.length,takenColors:seats.filter(Boolean).map(p=>p!.color),seats,pendingCount:0};
     }

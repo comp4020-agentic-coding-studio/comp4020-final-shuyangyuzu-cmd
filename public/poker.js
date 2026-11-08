@@ -42,7 +42,7 @@ export function renderPokerTable(el,room,viewerId) {
 }
 
 export function createPokerUI({el,navigate}) {
-  let session=null,room=null,lastVersion=null,lastAwaySignature='',mounted=false,polling=false,error='',query='',results=[],raiseTo='',lastInvite='',generation=0,waitlist=[];
+  let session=null,room=null,lastVersion=null,lastAwaySignature='',mounted=false,polling=false,error='',raiseTo='',lastInvite='',generation=0,waitlist=[];
   // away (phase 7) is a display-only flag that deliberately never bumps
   // poker_rooms.version (src/poker.ts's own comment on setPokerAway
   // explains why: version is also actPoker's optimistic-concurrency
@@ -149,16 +149,13 @@ export function createPokerUI({el,navigate}) {
       }
     }
     if(between&&room.host===session.playerId)buttons.push(el('button',{disabled:room.players.filter(p=>!p.leaving&&(p.stack>0||p.npc)).length<2,onclick:()=>perform('deal')},room.hand?'Deal next hand':'Start game'));
-    const controls=el('section',{class:'poker-controls'},[el('p',{},turn?'Your turn':between?(room.hand?'Review the result. The host deals the next hand.':'Invite a friend, or wait for other patrons to sit down. At least two funded players are needed to start.'):`Waiting for ${room.players.find(p=>p.id===room.actor)?.nickname||'the table'}`),...buttons]);
-    const invitePanel=[];
-    if(room.mode==='online'){
-      const input=el('input',{'aria-label':'Search online players',placeholder:'Search online player nickname',value:query,oninput:e=>{query=e.target.value;}});
-      invitePanel.push(el('section',{class:'poker-search'},[
-        el('h2',{},'Invite friends'),input,
-        el('button',{onclick:async()=>{try{results=(await api('search',{query})).players;draw();}catch(e){notify(e);}}},'Search'),
-        el('ul',{},results.map(p=>el('li',{},[`${p.nickname} · ${p.id.slice(0,6)} `,el('button',{onclick:async()=>{try{await api('invite',{roomId:room.id,target:p.id});error=`Invitation sent to ${p.nickname}`;draw();}catch(e){notify(e);}}},'Invite')]))),
-      ]));
-    }
+    const controls=el('section',{class:'poker-controls'},[el('p',{},turn?'Your turn':between?(room.hand?'Review the result. The host deals the next hand.':'Sit down and ready up — at least two funded players are needed to start.'):`Waiting for ${room.players.find(p=>p.id===room.actor)?.nickname||'the table'}`),...buttons]);
+    // 2026-11-08 acceptance fix: every seat here is open (no invite/
+    // host-approval needed, unlike Vegas) — the search-and-invite panel
+    // was stale UI left over from before that change. src/pokerRoutes.ts's
+    // own search/invite/respond actions are untouched server-side (still
+    // reachable, just no longer surfaced from this screen), matching the
+    // user's own explicit "内部房间ID仍可用于同步和路由，不必删除底层标识".
     const rules=el('details',{class:'poker-rules'},[el('summary',{},'📜 How to play'),el('p',{},'No-limit Texas Hold’em · 2–5 players · 500 play chips · blinds 1/2. Two private cards, five community cards; make the best five-card hand. Fold, check, call, bet or raise. All-in players can win only pots they contributed to; equal hands split the pot. Dealer and blinds rotate each hand. A hand in progress refuses new arrivals until it ends — you are notified the moment a seat opens. Leaving folds your hand, except an all-in remains eligible. 45-second turn limit: check if free, otherwise fold on timeout. Disconnects reserve your seat for three minutes; Leave table exits immediately. If you have zero chips after settlement, you automatically leave the table. A popup explains the result; click Return to the bar to continue. An all-in is never removed before payouts. There is no in-place rebuy. No real-money stakes.'),el('a',{href:'https://www.pokerstars.com/poker/games/texas-holdem/',target:'_blank',rel:'noopener'},'Hold’em rules reference')]);
     root.replaceChildren(el('main',{class:'poker-page'},[
       el('header',{class:'poker-header'},[el('h1',{},'Texas Hold’em'),el('span',{},`${room.mode==='offline'?'Offline · NPC opponents':'Online'} · Hand ${room.hand}`),
@@ -166,14 +163,41 @@ export function createPokerUI({el,navigate}) {
         // where another seated human can actually see it; no automated
         // standby play exists underneath it, unlike Vegas's awayMode.
         ...(room.mode==='online'&&me?[el('button',{onclick:async()=>{try{await api('away',{away:!me.away});await poll();}catch(e){notify(e);}}},me.away?"I'm back":"I'm away")]:[]),
+        // 2026-11-08 acceptance fix: an active poker table previously had
+        // NO way back to the bar at all short of "Leave table" (which
+        // permanently folds/releases the seat) — the only prior exit was
+        // routeChanged's own eager `leave` call, fired whenever the URL's
+        // own `?poker=` param disappeared for ANY reason, including a
+        // genuine "I just want to step away" intent. This explicit button
+        // mirrors blackjack.js's/domino.js's own "Back to the bar" exactly:
+        // mark away (reserving the seat, visible to the other players —
+        // never released, never folding the hand) THEN navigate, same
+        // "do the departure action, then navigate" shape app.js's own
+        // Vegas backToHomeButton already established. A best-effort
+        // away-set (its own failure still navigates, matching every other
+        // game's identical "don't trap the player behind a failed
+        // network call" choice) — the player is never blocked from
+        // physically leaving just because this one display flag couldn't
+        // be set.
+        ...(room.mode==='online'&&me?[el('button',{onclick:async()=>{if(!me.away)await api('away',{away:true}).catch(()=>{});navigate('/');}},'Back to the bar')]:[el('button',{onclick:()=>navigate('/')},'Back to the bar')]),
         el('button',{onclick:async()=>{try{await api('leave');generation++;room=null;navigate('/');}catch(e){notify(e);}}},'Leave table')]),
       rules,el('p',{class:'error',role:'status'},error),
       renderPokerTable(el,room,session.playerId),
-      el('p',{class:'poker-result',role:'status'},room.result),controls,...invitePanel,
+      el('p',{class:'poker-result',role:'status'},room.result),controls,
     ]));
   }
   function mount(){document.body.classList.add('table-mode');mounted=true;error='';lastVersion=null;draw();poll();}
-  function routeChanged(){if(mounted&&!new URLSearchParams(location.search).has('poker')){generation++;document.body.classList.remove('table-mode');mounted=false;room=null;api('leave').catch(()=>{});}}
+  // 2026-11-08 acceptance fix: this used to call api('leave') — a real,
+  // permanent exit (fold the hand, release the seat) — on EVERY
+  // navigation away from the poker view for any reason, including the
+  // player's own "Back to the bar" click above, which defeated the
+  // whole away concept: poker.js was the only one of the three non-Vegas
+  // games that couldn't actually keep a reserved seat across a trip back
+  // to the bar. routeChanged now only resets this module's own local
+  // mounted/polling state — the server-side seat/away flag is left
+  // exactly as whatever the player's own explicit action (the away
+  // button above, or "Leave table") already set it to.
+  function routeChanged(){if(mounted&&!new URLSearchParams(location.search).has('poker')){generation++;document.body.classList.remove('table-mode');mounted=false;room=null;}}
   async function open(mode,seat){
     try{const data=await api('open',{mode,seat});navigate(`/?poker=${data.roomId}`);}
     catch(e){

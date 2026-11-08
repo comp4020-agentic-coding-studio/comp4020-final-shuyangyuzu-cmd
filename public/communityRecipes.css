@@ -82,8 +82,41 @@
    is constrained so a one-finger drag used to pan a zoomed photo doesn't
    also try to scroll the page underneath it or get mistaken for a form
    gesture elsewhere on this same page. */
-.cr-zoom-frame{position:relative;overflow:hidden;border-radius:10px;border:1px solid #ddcdb6;background:#eee2cd;aspect-ratio:4/3;touch-action:none}
+.cr-zoom-frame{position:relative;overflow:hidden;border-radius:10px;border:1px solid #ddcdb6;background:#eee2cd;aspect-ratio:4/3;touch-action:none;container-type:size}
 .cr-zoom-layer{width:100%;height:100%;transform-origin:center center;will-change:transform}
-.cr-zoom-layer img,.cr-zoom-layer .cr-placeholder{width:100%;height:100%;object-fit:cover;display:block}
+.cr-zoom-layer img{width:100%;height:100%;object-fit:cover;display:block}
+/* A house recipe with no uploaded photo falls back to .cr-placeholder —
+   a real player's own uploaded photo (the img rule above) already fills
+   and centres correctly via object-fit:cover, but the house illustration
+   inside it (.drink-art, a fixed 110×120px box built for the small
+   mixology-dialog cards, not this far larger zoom frame) does not scale
+   to its container at all on its own. A real bug the user's own manual
+   review found directly: `display:block` on .cr-placeholder (needed so
+   object-fit works on an <img> sharing this same selector) had
+   overridden the base .cr-placeholder rule's own `display:grid;
+   place-items:center`, which is what centred it everywhere else (cards,
+   the editor) — inside this one frame specifically, the illustration was
+   left pinned to the flex/grid default top-left corner at its own tiny
+   native size. Restoring centering here, and sizing .drink-art with
+   `cqh`/`cqb` units (relative to the .cr-zoom-frame's own measured
+   height, via container-type:size above) rather than its fixed pixel
+   box, is what makes it scale to roughly half the frame's height at any
+   frame size while preserving its own internal aspect ratio (every
+   .drink-* sub-part is positioned in % of .drink-art's own box, so
+   scaling the whole box uniformly never distorts it) — never affecting
+   the sibling <img> rule, a real uploaded photo's own saved crop, or the
+   drag/zoom handlers below (both already operate on .cr-zoom-layer as a
+   whole, never on an illustration's own internal layout). */
+.cr-zoom-layer .cr-placeholder{width:100%;height:100%;display:grid;place-items:center}
+/* Both dimensions scale from the SAME axis (cqh, the frame's own
+   container-query height) in the illustration's own real 110:120 ratio
+   (110/120 ≈ 0.917) — never one axis in cqh and the other in cqw/cqb,
+   which would silently distort the box the moment the frame's own
+   aspect ratio differs from the illustration's (cqb/cqh happen to
+   coincide in this standard horizontal writing mode, so that would have
+   been an easy, unnoticed mistake). 55cqh keeps the illustration within
+   the requested ~50-60% of the frame's own height while leaving headroom
+   on the sides at the frame's fixed 4:3 ratio. */
+.cr-zoom-layer .cr-placeholder .drink-art{width:50.4cqh;height:55cqh}
 .cr-zoom-controls{position:absolute;bottom:8px;right:8px;display:flex;gap:4px}
 .cr-zoom-controls button{padding:6px 10px;font-size:13px;box-shadow:0 2px 8px #38241330}

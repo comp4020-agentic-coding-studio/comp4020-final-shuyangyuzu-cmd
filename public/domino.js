@@ -89,7 +89,17 @@ export function createDominoUI({el,navigate}) {
       // below: away keeps the seat reserved (nobody else can take it)
       // and is visible to the opponent, but never ends the match.
       ...(room&&myOwnPlayer?[el('button',{onclick:()=>perform('away',{away:!myOwnPlayer.away})},myOwnPlayer.away?"I'm back":"I'm away")]:[]),
-      el('button',{onclick:()=>navigate('/')},'Back to the bar')]);
+      // 2026-11-08 acceptance fix: this used to just navigate while
+      // genuinely seated — the match stayed fully active with no away
+      // flag ever set, so the opponent's own screen kept showing a
+      // normal in-progress seat rather than "Away". Setting away first
+      // (perform() itself already swallows a failed request into `error`
+      // rather than throwing, so the player is never trapped here by a
+      // network hiccup — same "don't block leaving" choice poker.js/
+      // blackjack.js make explicitly) makes Back to the bar an actual,
+      // visible departure signal rather than a silent no-op on the
+      // match's own state.
+      el('button',{onclick:async()=>{if(room&&myOwnPlayer&&!myOwnPlayer.away)await perform('away',{away:true});navigate('/');}},'Back to the bar')]);
     if(!room){
       // 2026-11-07: no more host-approval step, so a session with no room
       // can only mean either a waitlist entry for a currently-occupied

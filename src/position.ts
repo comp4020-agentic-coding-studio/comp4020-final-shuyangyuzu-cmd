@@ -38,12 +38,25 @@ export function effectivePosition(db: Database.Database, barPlayerId: string): P
     .get(barPlayerId) as BarPlayerLinkage | undefined;
   if (!bp) return null;
 
-  const blackjack=db.prepare('SELECT seat FROM blackjack_members WHERE bar_id=? AND active=1').get(barPlayerId) as {seat:number}|undefined;
+  // 2026-11-08 acceptance fix: "away" at one of these three games must
+  // behave exactly like Vegas's own `departed` check just below — an away
+  // patron is NOT effectively at their chair, so their real bar.x/y (the
+  // walkable tile they stood on before sitting, never overwritten by
+  // sitting itself) is what's reported, which is what lets the existing
+  // "stand up and show at a free tile" behaviour this file's own header
+  // comment already documents for Vegas apply to these three games too,
+  // with no separate "move to a free tile" code needed anywhere — the
+  // seat simply stops being this identity's effective position the
+  // moment `away=1`, exactly like a game-chair occupant who's no longer
+  // `present`. Previously these three queries only checked `active=1`,
+  // so marking yourself away left you still rendered seated at the chair
+  // forever (an active row IS an away row too), confirmed as a real bug.
+  const blackjack=db.prepare('SELECT seat FROM blackjack_members WHERE bar_id=? AND active=1 AND away=0').get(barPlayerId) as {seat:number}|undefined;
   if(blackjack){const chair=GAME_CHAIRS.filter(c=>c.tableId==='blackjack-1')[blackjack.seat];if(chair)return {x:chair.x,y:chair.y};}
-  const domino=db.prepare(`SELECT r.lane,m.seat FROM domino_members m JOIN domino_rooms r ON r.id=m.room_id WHERE m.bar_id=? AND m.active=1 AND r.closed=0 AND r.mode='online'`).get(barPlayerId) as {lane:number;seat:number}|undefined;
+  const domino=db.prepare(`SELECT r.lane,m.seat FROM domino_members m JOIN domino_rooms r ON r.id=m.room_id WHERE m.bar_id=? AND m.active=1 AND m.away=0 AND r.closed=0 AND r.mode='online'`).get(barPlayerId) as {lane:number;seat:number}|undefined;
   if(domino){const chair=GAME_CHAIRS.filter(c=>c.tableId==='dominoes-1')[domino.lane*2+domino.seat];if(chair)return {x:chair.x,y:chair.y};}
 
-  const poker = db.prepare(`SELECT m.seat,r.table_id FROM poker_members m JOIN poker_rooms r ON r.id=m.room_id WHERE m.bar_id=? AND m.active=1 AND r.closed=0 AND r.mode='online'`).get(barPlayerId) as {seat:number;table_id:string}|undefined;
+  const poker = db.prepare(`SELECT m.seat,r.table_id FROM poker_members m JOIN poker_rooms r ON r.id=m.room_id WHERE m.bar_id=? AND m.active=1 AND m.away=0 AND r.closed=0 AND r.mode='online'`).get(barPlayerId) as {seat:number;table_id:string}|undefined;
   if(poker){const chair=GAME_CHAIRS.filter(c=>c.tableId===poker.table_id)[poker.seat];if(chair)return {x:chair.x,y:chair.y};}
 
   if (bp.current_table_id && bp.current_game_player_id) {

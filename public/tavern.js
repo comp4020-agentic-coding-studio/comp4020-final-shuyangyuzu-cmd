@@ -281,8 +281,14 @@ function ease(t) {
 /** All the derived sub-phase values drawEatingScene needs for a 'meal'
  * kind, purely a function of localProgress — kept as one pure helper so
  * the actual drawing code below just reads named fields instead of
- * re-deriving thresholds inline. */
-function mealBeats(local) {
+ * re-deriving thresholds inline. Exported so spec/eatingAnimation.test.ts
+ * can pin down plateLift/plateConsumed's own relationship directly — the
+ * real 2026-11 bug ("盘子又变满") was a drawEatingScene call site
+ * ignoring this already-correct plateConsumed value and hardcoding a
+ * full plate instead, so the regression test for it asserts the exact
+ * invariant that call site depends on: whenever the plate is at rest
+ * (plateLift === 0) past the first bite, plateConsumed must be 1. */
+export function mealBeats(local) {
   const forkRaise = ease(Math.min(1, local / (MEAL_FORK_END * 0.5)));
   const forkLower = local > MEAL_FORK_END * 0.5 ? ease(Math.min(1, (local - MEAL_FORK_END * 0.5) / (MEAL_FORK_END * 0.5))) : 0;
   const forkHeight = local <= MEAL_FORK_END ? forkRaise - forkLower : 0; // 0..1..0 bite arc
@@ -705,9 +711,23 @@ function drawEatingScene(ctx, vw, vh, { color, skin, phase, seatKind, reduceMoti
       ctx.beginPath(); ctx.moveTo(HAND_L_REST.x, HAND_L_REST.y + s * 0.15); ctx.lineTo(center.x - rx * 0.85, center.y); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(HAND_R_REST.x, HAND_R_REST.y + s * 0.15); ctx.lineTo(center.x + rx * 0.85, center.y); ctx.stroke();
     } else {
-      // Beats 1/2: plate flat on the table — drawn at TABLE itself, tilt
-      // 0, so its centre and its rim coincide with no lift applied yet.
-      drawPlate(ctx, TABLE.x, TABLE.y, PLATE_W, 0, 1, biteEaten);
+      // Flat-on-the-table pose, reached at BOTH ends of the cycle: beats
+      // 1/2 before the plate ever lifts (plateLift still 0, plateConsumed
+      // still 0 — a genuinely full plate), and again after beat 5 lands
+      // it back down (plateLift returns to 0, but plateConsumed is
+      // already 1 by then — see mealBeats' own comment: it reaches 1 at
+      // MEAL_PLATE_LOWER_START, strictly before landing). A real bug,
+      // caught by the user's own manual playtest ("吃完后盘子又变满"):
+      // this call used to hardcode food=1 unconditionally, so the empty,
+      // already-landed plate visibly refilled the instant plateLift hit
+      // 0 again at the end of the window — the plate's own lift/tilt
+      // motion and its food-remaining amount must be read from two
+      // independent mealBeats fields, never conflated into "resting
+      // therefore full." Passing 1 - plateConsumed here (exactly the
+      // same expression the lifted branch above already uses) makes
+      // this one draw call correct at both ends: full before the first
+      // bite, empty for the entire remainder of the window once eaten.
+      drawPlate(ctx, TABLE.x, TABLE.y, PLATE_W, 0, 1 - plateConsumed, biteEaten);
     }
   } else {
     const { lift, consumed } = drinkBeats(local);

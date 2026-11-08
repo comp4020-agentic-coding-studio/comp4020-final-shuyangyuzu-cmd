@@ -109,7 +109,6 @@ export function createBlackjackUI({el,navigate,render}) {
     const actor=r.players.find(p=>p.id===r.turn);
     const status=between?'Choose your wager and ready up. The host deals when everyone is ready.':r.phase==='insurance'?'Dealer shows an ace. Choose insurance or decline.':r.phase==='dealer'?'Dealer’s turn':actor?.id===owner?'Your turn':(actor?.nickname??'Player')+'’s turn';
     const move=r.lastMove;const moveName=move?.seat==='dealer'?'Dealer':r.players.find(p=>p.seat===move?.seat)?.nickname;
-    const link=location.origin+'/?blackjackOnline='+r.id;
     render(el('main',{class:'poker-page bj-room','aria-label':'Blackjack Online'},[
       el('header',{class:'poker-header bj-header'},[el('h1',{},'Blackjack'),el('strong',{},'Online · Hand '+r.hand),
         // Explicit, display-only away toggle (2026-11-08, mirrors
@@ -118,11 +117,20 @@ export function createBlackjackUI({el,navigate,render}) {
         // can take it) and is visible to every other seated player, but
         // never releases the seat or affects turn-taking/timeouts.
         ...(me?[button(me.away?"I'm back":"I'm away",()=>command('away',{away:!me.away}))]:[]),
-        button('Back to the bar',()=>navigate('/'))]),
-      el('div',{class:'bj-actions'},[el('input',{readonly:true,value:link,'aria-label':'Invite link'}),button('Copy invite',async()=>{try{await navigator.clipboard.writeText(link)}catch{error='Copy the link from the field above.';draw()}})]),felt,
+        // 2026-11-08 acceptance fix: this used to just navigate — the
+        // seat stayed active with no away flag ever set, so every other
+        // seated player's own view kept showing "Choosing wager"/etc. as
+        // if this player were still right there. Setting away first via
+        // the same command() helper the "I'm away" button above already
+        // uses (which swallows a failed request into `error` rather than
+        // throwing, so the player is never trapped here by a network
+        // hiccup) makes Back to the bar an actual, visible "I've stepped
+        // away" rather than a silent no-op on the seat's own state.
+        button('Back to the bar',async()=>{if(me&&!me.away)await command('away',{away:true});navigate('/');})]),
+      felt,
       el('section',{class:'poker-controls','aria-label':'Blackjack actions'},[el('p',{role:'status'},status),el('p',{},moveName&&move?moveName+' · '+move.action:''),el('p',{role:'alert',class:'error'},error),el('div',{class:'bj-actions'},controls),
         button('Leave table',async()=>{if(busy)return;busy=true;try{await api('leave');room=null;navigate('/')}catch(e){error=e.message;draw()}finally{busy=false}}),
-        el('p',{class:'note'},'Back to the bar keeps your seat for 3 minutes. Leave table releases it immediately. A 45-second turn timeout stands automatically.')]),
+        el('p',{class:'note'},'Back to the bar keeps your seat reserved until you return. Leave table releases it immediately. A 45-second turn timeout stands automatically.')]),
       el('details',{},[el('summary',{},'Table rules'),el('p',{},'Beat the dealer without exceeding 21. Dealer stands on all 17s. Natural blackjack pays 3:2; other wins pay 1:1. Double draws exactly one card. Split equal-value cards once; split aces receive one card each. Insurance costs half your wager and pays 2:1. Everyone starts with 500 play chips. A hand in progress refuses new arrivals until it ends — you are notified the moment a seat opens.')])
     ]));
   }

@@ -16,7 +16,7 @@
 // test can't see rendered pixels.
 
 import { expect, it } from "vitest";
-import { eatingPhaseAt } from "../public/tavern.js";
+import { eatingPhaseAt, mealBeats } from "../public/tavern.js";
 
 it("splits a solo kind's own window evenly into lift/active/down stages, with continuous localProgress throughout", () => {
   const atStart = eatingPhaseAt(["meal"], 0);
@@ -150,4 +150,56 @@ it("at full lift, the meal plate's and the drink glass's own rim contact points 
   const glassRimReconstructed = { x: origin.x + (0 * cos - -bowlH * sin), y: origin.y + (0 * sin + -bowlH * cos) };
   expect(glassRimReconstructed.x).toBeCloseTo(mouth.x, 8);
   expect(glassRimReconstructed.y).toBeCloseTo(mouth.y, 8);
+});
+
+// ---- Real-manual-acceptance regression: "吃饭动画结束时食物重新出现" ----
+//
+// The user's own manual playtest observed the plate visibly refilling
+// after a meal finished. drawEatingScene's own "plate resting on the
+// table" draw call (reached both BEFORE the first bite and again AFTER
+// the plate has fully lowered back down, since plateLift returns to 0 at
+// both ends) used to hardcode a full plate (food=1) instead of reading
+// mealBeats' own already-correct `plateConsumed` field — so the instant
+// plateLift hit 0 again at the end of the window, the empty plate
+// visibly became full again. mealBeats itself was never wrong; the bug
+// was a drawing call site ignoring a value it already had. These tests
+// pin down the exact invariant that call site must honor: once eating
+// has begun, plateConsumed must reach and then HOLD at 1 (never dip back
+// toward 0) for the entire remainder of the window, specifically
+// including every point where plateLift has already returned to 0.
+it("keeps plateConsumed at a genuine 1 (never refilling) for the entire post-landing rest span, independent of plateLift returning to 0", () => {
+  // Sample densely across the whole back half of the window — the exact
+  // span where the bug was observed (plate lowering, landing, and the
+  // remaining rest-on-table time before the window actually ends).
+  for (let local = 0.86; local <= 1; local += 0.01) {
+    const { plateLift, plateConsumed } = mealBeats(local);
+    // By MEAL_PLATE_LOWER_START (0.86) the plate is already fully empty —
+    // this is mealBeats' own existing, correct contract (plateConsumed
+    // reaches 1 at MEAL_PLATE_LIFT_END's own emptying span, well before
+    // the lowering phase even starts) — asserted here directly rather
+    // than assumed, since the whole point of this test is to not trust
+    // a restated comment over the actual returned value.
+    expect(plateConsumed).toBeCloseTo(1, 5);
+    // The real bug's own symptom, reproduced as a precondition: plateLift
+    // genuinely does return all the way to 0 well before local reaches 1
+    // (MEAL_PLATE_LANDED_BY = 0.96) — confirming this test is actually
+    // exercising the "plate is back at rest, but must still be empty"
+    // case the drawing bug got wrong, not a case that never arises.
+    if (local >= 0.97) expect(plateLift).toBeCloseTo(0, 5);
+  }
+});
+
+it("never reports a fuller plate than the previous frame once eating has begun (plateConsumed only ever rises)", () => {
+  // A direct monotonicity check across the ENTIRE meal window — the
+  // precise shape of "food reappeared" is a frame where this value went
+  // backward. Sampling the whole [0,1] range (not just the tail above)
+  // guards the same invariant everywhere, not only at the one spot this
+  // round's bug happened to be found.
+  let previous = 0;
+  for (let local = 0; local <= 1; local += 0.005) {
+    const { plateConsumed } = mealBeats(local);
+    expect(plateConsumed).toBeGreaterThanOrEqual(previous - 1e-9);
+    previous = plateConsumed;
+  }
+  expect(previous).toBeCloseTo(1, 5);
 });
