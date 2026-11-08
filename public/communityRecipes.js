@@ -97,18 +97,77 @@ export function createCommunityBook({ house, model }) {
         const copy = n('div', { class: 'cr-hero-copy' }, n('small', {}, editing ? 'YOUR RECIPE' : r.source === 'house' ? 'HOUSE RECIPE' : 'COMMUNITY RECIPE'), n('h2', {}, r.name || 'Your recipe name'), n('p', {}, r.description || 'A recipe worth sharing.'), n('p', { class: 'cr-muted' }, r.equipment ? 'You’ll need: ' + r.equipment : ''), !editing ? n('small', {}, 'By ' + (r.author || account?.username || 'you')) : null);
         const h = n('div', { class: 'cr-hero'+(editing?' cr-hero-edit':''), style: `--photo-width:${r.imageWidth}%;--hero-height:${r.heroHeight??260}px` }, pic, copy);
         if (editing) {
+            // Clicking the photo enters an explicit "adjust composition"
+            // mode (the user's own request: a clear affordance, not a
+            // silent drag-anywhere) — a visible hint overlay names the
+            // gestures, and dragging pans r.imageX/imageY (the actual
+            // saved crop centre, read by object-position everywhere this
+            // photo is shown) while +/-/Reset still drive r.imageZoom.
+            // This replaces the old "upload only sets X/Y/Zoom once, then
+            // they're frozen" shape — composing a photo already in place
+            // (an existing recipe's existing image, not just a fresh
+            // upload) was previously impossible from this editor at all.
+            //
+            // A real bug found by mobile browser verification: every
+            // button (Change/Remove/Adjust/+/−/Reset) used to live inside
+            // `pic` itself, absolutely positioned over the photo. At a
+            // narrow width that whole row wraps onto 3+ lines and covers
+            // the large majority of the frame's height, leaving only a
+            // sliver of the actual image draggable — confirmed directly:
+            // a drag centred on the frame landed on a button and silently
+            // did nothing, while only the top few pixels still worked.
+            // Fixed by moving every button into `controlsRow`, a normal
+            // in-flow element rendered BELOW the whole hero (never
+            // overlapping the photo at any width) — only the non-
+            // interactive hint text (pointer-events:none) still overlays
+            // the image itself, so the entire photo surface stays
+            // draggable regardless of how many buttons are showing.
+            let adjusting = false;
+            const controlsRow = n('div', { class: 'cr-photo-controls-row' });
             const paintPhoto=()=>{
-                const controls=n('div',{class:'cr-photo-actions'});
+                const controls=controlsRow;
+                controls.replaceChildren(); // repainting the row on every call, same as pic.replaceChildren below
                 const upload=n('input',{type:'file',hidden:true,accept:'image/jpeg,image/png,image/webp','aria-label':'Choose drink photo',onchange:e=>run(async()=>{
                     const file=e.target.files[0];if(!file)return;
                     if(file.size>5*1024*1024)throw Error('Choose a photo up to 5 MB.');
                     const thisDraft=draft;say('Preparing photo…');
                     const result=await api('images',file,true);if(draft!==thisDraft)return;
-                    r.imageId=result.id;r.imageX=50;r.imageY=50;r.imageZoom=1;changed();paintPhoto();
+                    r.imageId=result.id;r.imageX=50;r.imageY=50;r.imageZoom=1;adjusting=false;changed();paintPhoto();
                 })});
-                controls.append(button(r.imageId?'Change photo':'+ Add photo',()=>upload.click()));
-                if(r.imageId)controls.append(button('Remove',()=>{r.imageId=null;changed();paintPhoto();}));
-                pic.replaceChildren(image(r),controls,upload);
+                controls.append(button(r.imageId?'Change photo':'+ Add photo',()=>upload.click()),upload);
+                if(r.imageId){
+                    controls.append(button('Remove',()=>{r.imageId=null;adjusting=false;changed();paintPhoto();}));
+                    controls.append(button(adjusting?'Done adjusting':'Adjust photo',()=>{adjusting=!adjusting;paintPhoto();}));
+                }
+                const imgEl=image(r);
+                let hint=null;
+                if(adjusting&&r.imageId){
+                    // The explicit "you're now adjusting" affordance the
+                    // user asked for — named gestures, not a silent
+                    // drag-anywhere mode a reader would have to guess at.
+                    // pointer-events:none (CSS) is what keeps this purely
+                    // informational text from ever intercepting the drag
+                    // it describes.
+                    hint=n('p',{class:'cr-photo-hint'},'Drag to reposition · scroll, pinch or +/− to zoom');
+                    const zoom=delta=>{r.imageZoom=Math.max(1,Math.min(3,Math.round((r.imageZoom+delta)*100)/100));imgEl.style.transform=`scale(${r.imageZoom})`;changed();};
+                    controls.append(
+                        button('+',()=>zoom(0.2)),
+                        button('−',()=>zoom(-0.2)),
+                        button('Reset position/zoom',()=>{r.imageX=50;r.imageY=50;r.imageZoom=1;changed();paintPhoto();}),
+                    );
+                }
+                else {
+                    // Clicking the photo itself also enters adjust mode
+                    // (the user's own "点击图片进入调整状态") — the
+                    // "Adjust photo" button above does the identical
+                    // thing and stays as the discoverable/keyboard-
+                    // reachable path; this is purely an added shortcut,
+                    // never the only way in.
+                    if(r.imageId){imgEl.classList.add('cr-photo-clickable');imgEl.onclick=()=>{adjusting=true;paintPhoto();};}
+                }
+                pic.replaceChildren(imgEl,...(hint?[hint]:[]));
+                pic.classList.toggle('cr-photo-adjusting',adjusting&&!!r.imageId);
+                if(adjusting&&r.imageId)setupComposer(pic,imgEl,r,()=>changed());
             };
             paintPhoto();
             const grip = n('button', { type: 'button', class: 'cr-divider', 'aria-label': 'Resize photo area', 'aria-valuemin': '20', 'aria-valuemax': '60', 'aria-valuenow': r.imageWidth, role: 'slider', style: `left:${r.imageWidth}%` }, '⋮');
@@ -134,6 +193,11 @@ export function createCommunityBook({ house, model }) {
             bottom.onpointerup=()=>resizing=false;bottom.onpointercancel=()=>resizing=false;
             bottom.onkeydown=e=>{if(['ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();resize((r.heroHeight??260)+(e.key==='ArrowDown'?10:-10));}};
             h.append(bottom);
+            // controlsRow renders AFTER the whole hero (frame+copy), not
+            // inside it, so it is never absolutely positioned over the
+            // photo at any viewport width — see this function's own
+            // earlier comment for the real mobile bug this closes.
+            return n('div', { class: 'cr-hero-wrap' }, [h, controlsRow]);
         }
         return h;
     }
@@ -314,6 +378,74 @@ export function createCommunityBook({ house, model }) {
         frame.addEventListener('pointerup', endPointer);
         frame.addEventListener('pointercancel', endPointer);
         apply();
+    }
+    // The editor's own persisted drag/zoom composer — distinct from
+    // setupZoom above (which is a temporary, reading-only view-time
+    // overlay that never touches saved data). This one directly edits
+    // r.imageX/imageY (the real object-position crop, read by `image()`
+    // everywhere a photo is shown) and r.imageZoom (the real CSS scale),
+    // so a position/zoom chosen here survives Save draft, Publish/update,
+    // and a later re-edit — the user's own explicit "保存到配方，发布及
+    // 再次编辑后保持一致" requirement. Drag pans; wheel/+/−/Reset zoom.
+    //
+    // The pixel math: object-position's crop is computed from the
+    // image's own natural size and the frame's object-fit:cover scale —
+    // never from the zoom factor, since a CSS `transform:scale` on an
+    // already object-fit-cropped element only magnifies that fixed crop
+    // around the frame's centre, it doesn't reveal new source pixels on
+    // its own. Panning while zoomed in therefore needs the SAME
+    // object-position percentage range as unzoomed, divided by the
+    // current zoom (since the same percentage change now produces
+    // `zoom`× more visible on-screen movement) — this is what makes a
+    // drag track the pointer 1:1 at any zoom level instead of flying
+    // past it or crawling.
+    function setupComposer(frame, imgEl, r, onChange) {
+        let dragging = false, start = null, startX = r.imageX, startY = r.imageY;
+        const panFromDelta = (dxPx, dyPx) => {
+            const w = frame.clientWidth, h = frame.clientHeight, nw = imgEl.naturalWidth, nh = imgEl.naturalHeight;
+            if (!w || !h || !nw || !nh)
+                return { dX: 0, dY: 0 }; // image not yet decoded — no-op rather than a divide-by-zero or NaN crop
+            const coverScale = Math.max(w / nw, h / nh);
+            const overflowX = nw * coverScale - w, overflowY = nh * coverScale - h;
+            const zoom = r.imageZoom || 1;
+            return {
+                dX: overflowX > 0 ? (-100 * dxPx) / (zoom * overflowX) : 0,
+                dY: overflowY > 0 ? (-100 * dyPx) / (zoom * overflowY) : 0,
+            };
+        };
+        frame.addEventListener('pointerdown', e => {
+            // Same "a real click on a descendant control must win" guard
+            // the zoom-button bug fix above established — the +/−/Reset
+            // buttons sit inside this same frame.
+            if (e.target.closest('button'))
+                return;
+            dragging = true;
+            start = { x: e.clientX, y: e.clientY };
+            startX = r.imageX;
+            startY = r.imageY;
+            frame.setPointerCapture(e.pointerId);
+        });
+        frame.addEventListener('pointermove', e => {
+            if (!dragging)
+                return;
+            const { dX, dY } = panFromDelta(e.clientX - start.x, e.clientY - start.y);
+            r.imageX = Math.max(0, Math.min(100, startX + dX));
+            r.imageY = Math.max(0, Math.min(100, startY + dY));
+            imgEl.style.objectPosition = `${r.imageX}% ${r.imageY}%`;
+            onChange();
+        });
+        const endDrag = () => { dragging = false; start = null; };
+        frame.addEventListener('pointerup', endDrag);
+        frame.addEventListener('pointercancel', endDrag);
+        // A plain wheel notch moves zoom by the same 0.2 step as the +/−
+        // buttons; Ctrl+wheel (trackpad pinch on most browsers) scales
+        // proportionally to the continuous gesture instead.
+        frame.addEventListener('wheel', e => {
+            e.preventDefault();
+            r.imageZoom = Math.max(1, Math.min(3, Math.round((r.imageZoom - e.deltaY * 0.002) * 100) / 100));
+            imgEl.style.transform = `scale(${r.imageZoom})`;
+            onChange();
+        }, { passive: false });
     }
     // Where "Back to the list" returns to from a detail page reached via
     // Discover or Party list's Saved Recipes — that screen's own search/

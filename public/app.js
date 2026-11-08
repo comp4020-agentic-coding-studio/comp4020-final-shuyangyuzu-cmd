@@ -855,7 +855,18 @@ function renderTable(code, session, state) {
   const header = el("header", {}, [
     el("h1", {}, "Las Vegas"),
     gameRulesButton(),
-    voiceCall.widget(state, me),
+    // Voice calls are a reliability experiment that never reached the
+    // bar for a real feature (CLAUDE.md's own record of this, and
+    // PLAN.md's full accounting of what was/wasn't fixed): the call
+    // widget and incoming-invite prompt are intentionally never rendered
+    // in the real UI below. voiceCall itself (createVoiceCall, imported
+    // above) is left fully intact — its own module-level lifecycle
+    // (entering/leaving a room, mesh reconciliation) keeps running
+    // exactly as it always has, and spec/voiceClient.test.ts, spec/
+    // voice.test.ts and spec/voiceDepartures.test.ts keep exercising it
+    // directly — only the two UI entry points a real player could click
+    // are removed, nothing server-side or in the client's own voice
+    // module was touched.
     el("p", {class:"table-subtitle"}, state.solo ? `OFFLINE MODE · ${state.players.length - 1} computer opponents` : ["Room ", el("strong", {}, code)]),
     ...(state.solo ? [] : [copyInviteLinkControl(shareLink)]),
   ].filter(Boolean));
@@ -994,10 +1005,9 @@ function renderTable(code, session, state) {
         state.phase !== 'lobby' && !state.solo && me && me.controller !== 'npc' ? awayChoiceButton(code,session,me) : null,
         state.phase !== 'lobby' ? exitGameButton(code,session,state.solo) : null,
         el('p',{class:'note'},'Back to the bar keeps your seat for 3 minutes. Exit game leaves immediately.'),backToHomeButton(),
-        // Floats above everything else but is a small corner toast, not a
-        // full-screen overlay — CLAUDE.md: must never cover key game
-        // controls (roll/place/rules/exit stay fully clickable underneath).
-        voiceCall.incomingInviteModal()].filter(
+        // Voice calls' incoming-invite toast is intentionally never
+        // rendered — see the header's own comment above for why.
+      ].filter(
         Boolean,
       ),
     ),

@@ -3,7 +3,32 @@
 .book-pages--wide .book-page.book-wide:has(.cr-book){padding:0;overflow:hidden}
 .cr-book .cr-tools>input[type=search]{flex:1 0 200px;min-width:180px}.cr-book .cr-tools>select{flex:0 1 auto;min-width:155px}
 @media(max-width:600px){.cr-book .cr-tools>input[type=search],.cr-book .cr-tools>select{flex:1 0 100%;width:100%;min-width:0}.cr-tools>.cr-field{max-width:100%}}
-.cr-hero{height:var(--hero-height,260px)}.cr-photo{position:relative;height:100%}.cr-photo-actions{position:absolute;bottom:18px;left:8px;right:8px;display:flex;justify-content:center;gap:6px;flex-wrap:wrap}.cr-photo-actions button{font-size:12px;padding:8px 10px;box-shadow:0 2px 8px #38241320}.cr-hero-edit .cr-placeholder{padding-bottom:35px}.cr-book .cr-divider{top:0;height:100%;width:14px;border:0;border-radius:0;background:transparent;color:transparent}.cr-divider::after{content:'';position:absolute;top:40%;bottom:40%;left:5px;width:4px;border-radius:3px;background:#92704480}.cr-book .cr-divider:hover,.cr-book .cr-divider:focus-visible{background:#af885b30;outline:none}.cr-book .cr-bottom-edge{position:absolute;bottom:0;left:0;right:0;width:100%;height:14px;padding:0;border:0;border-radius:0;background:transparent;cursor:ns-resize;touch-action:none}.cr-bottom-edge::after{content:'';display:block;width:42px;height:4px;border-radius:3px;background:#92704480;margin:auto}.cr-book .cr-bottom-edge:hover,.cr-book .cr-bottom-edge:focus-visible{background:#af885b30;outline:none}
+.cr-hero{height:var(--hero-height,260px)}.cr-photo{position:relative;height:100%}.cr-book .cr-divider{top:0;height:100%;width:14px;border:0;border-radius:0;background:transparent;color:transparent}.cr-divider::after{content:'';position:absolute;top:40%;bottom:40%;left:5px;width:4px;border-radius:3px;background:#92704480}.cr-book .cr-divider:hover,.cr-book .cr-divider:focus-visible{background:#af885b30;outline:none}.cr-book .cr-bottom-edge{position:absolute;bottom:0;left:0;right:0;width:100%;height:14px;padding:0;border:0;border-radius:0;background:transparent;cursor:ns-resize;touch-action:none}.cr-bottom-edge::after{content:'';display:block;width:42px;height:4px;border-radius:3px;background:#92704480;margin:auto}.cr-book .cr-bottom-edge:hover,.cr-book .cr-bottom-edge:focus-visible{background:#af885b30;outline:none}
+
+/* The editor's own persisted photo composer (drag-to-reposition,
+   scroll/pinch/+−-to-zoom) — distinct from .cr-zoom-frame below, which
+   is the reading-only VIEW-time overlay that never saves anything. A
+   clickable (non-adjusting) photo gets a zoom-in cursor as its own
+   affordance; once adjusting, the image itself becomes the drag surface
+   (grab cursor, touch-action:none so a one-finger drag pans the photo
+   instead of scrolling the surrounding form) and a visible hint names
+   the gestures, per the user's own explicit "显示清晰的操作提示".
+   `.cr-hero-wrap` holds the hero frame AND `.cr-photo-controls-row`
+   stacked vertically — a real mobile bug (found by browser verification)
+   had every button absolutely positioned over the photo itself, where a
+   narrow width's wrapped multi-line button row covered the large
+   majority of the frame, leaving only a sliver of the image actually
+   draggable. The controls row is now a normal in-flow sibling rendered
+   BELOW the whole hero at every viewport width, so it can never overlap
+   the photo regardless of how many buttons are showing or how they wrap;
+   only the non-interactive hint text (pointer-events:none, still
+   overlaid on the photo) names the gesture in context. */
+.cr-hero-wrap{display:flex;flex-direction:column;gap:8px}
+.cr-photo-controls-row{display:flex;justify-content:center;gap:6px;flex-wrap:wrap}
+.cr-photo-clickable{cursor:zoom-in}
+.cr-photo-adjusting img{cursor:grab;touch-action:none;user-select:none}
+.cr-photo-adjusting img:active{cursor:grabbing}
+.cr-photo-hint{position:absolute;top:8px;left:8px;right:8px;margin:0!important;padding:6px 10px;background:#2e2016cc;color:#fff3dc;font-size:11px;border-radius:6px;text-align:center;pointer-events:none}
 
 /* The recipe detail page (View recipe), redesigned per the user's own
    reference image onto the counter book's existing Meals/Drinks two-page
@@ -18,14 +43,36 @@
    no spine/page-turn here at all (the whole community module mounts as
    one .book-wide page, exempted from the book's own edge-click page-turn
    zones), so a long page simply scrolls, never mis-triggering a turn. */
-.cr-recipe-spread{display:flex;gap:0;align-items:flex-start;min-height:100%}
-.cr-recipe-slot{flex:1 1 0;min-width:0;padding:4px 22px}
+/* Desktop two-page mode: the book frame/nav/spine stay put, and each
+   page scrolls on its own — the left photo+intro page never moves when
+   the right page's ingredients/steps are scrolled, and vice versa.
+   .cr-main's own single shared scroll is disabled ONLY while it has a
+   .cr-recipe-spread child — a real View recipe (the spread is .cr-main's
+   only child) or the editor's own Preview (status buttons and a notice
+   paragraph sit above the spread, from editor()'s own `preview` branch,
+   so this must share the remaining height with real siblings rather
+   than assume it is alone) — every other screen (Discover, My pantry,
+   Party list, My Recipes, the editor's own non-preview form) keeps
+   .cr-main's ordinary scroll exactly as before. :has() scopes this
+   without a second class to keep in sync by hand at every screen-switch
+   call site. Switching .cr-main to a flex column lets the spread take
+   "the rest of the available height" via flex:1/min-height:0 regardless
+   of how many sibling elements precede it, instead of a height:100%
+   that would only be correct when the spread is .cr-main's sole child. */
+.cr-main:has(>.cr-recipe-spread){overflow:hidden;display:flex;flex-direction:column}
+.cr-recipe-spread{display:flex;gap:0;align-items:stretch;flex:1 1 auto;min-height:0}
+.cr-recipe-slot{flex:1 1 0;min-width:0;padding:4px 22px 24px;overflow-y:auto;overscroll-behavior:contain}
 .cr-recipe-spine{flex:none;width:2px;align-self:stretch;background:linear-gradient(180deg,transparent,#c7ac7f80 15%,#c7ac7f80 85%,transparent);margin:10px 0}
 .cr-recipe-left,.cr-recipe-right{gap:12px}
 @media(max-width:820px){
+  /* Mobile single-page mode keeps the book's own ordinary whole-page
+     scroll and pagination — with only one page visible at a time, two
+     independent scroll panes would be meaningless, so this switches back
+     to a single stacked, outer-scrolled column instead. */
+  .cr-main:has(>.cr-recipe-spread){overflow:auto;display:block}
   .cr-recipe-spread{flex-direction:column}
+  .cr-recipe-slot{overflow-y:visible;padding:4px 4px 24px}
   .cr-recipe-spine{display:none}
-  .cr-recipe-slot{padding:4px 4px 24px}
 }
 
 /* Temporary, reading-only zoom on the recipe photo — pinch/scroll/+−
