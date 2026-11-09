@@ -1,6 +1,6 @@
 # Process overview
 
-> Review draft: condensed with Codex assistance from the existing record. The student must check the first-person account before final submission. Detailed earlier entries are preserved in [the archive](docs/archive/PROCESS-before-final-review.md); they describe historical states, not current guarantees.
+> Condensed from the project record with Codex assistance and reviewed by the student. [Earlier process entries](docs/archive/PROCESS-before-final-review.md) document the project at those stages.
 
 ## From a dice game to a shared place
 
@@ -34,4 +34,4 @@ I withdrew voice calling after my friend and I still could not reliably hear one
 
 ## What remains mine to judge
 
-The final release base is [edd791f](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/commit/edd791f). Earlier reports document automated suites and deployments; they are not a substitute for my review of this final candidate. ACCEPTANCE separates historical human feedback, current scripted evidence, and outstanding checks, including production persistence and physical-phone behaviour. I will review this condensed account and research argument before shipping. The standard I take forward is to make disagreement useful: a rejection should change a constraint, an executable check, or the scope of the promise, rather than disappear beneath the next confident completion report.
+The final release base is [edd791f](https://github.com/comp4020-agentic-coding-studio/comp4020-final-shuyangyuzu-cmd/commit/edd791f). Earlier reports document automated suites and deployments; they are not a substitute for my review of this final candidate. ACCEPTANCE separates historical human feedback, current scripted evidence, and outstanding checks, including production persistence and physical-phone behaviour. The standard I take forward is to make disagreement useful: a rejection should change a constraint, an executable check, or the scope of the promise, rather than disappear beneath the next confident completion report.

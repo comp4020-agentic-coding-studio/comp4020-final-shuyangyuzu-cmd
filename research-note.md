@@ -1,6 +1,6 @@
 # Evidence-bounded autonomy in agentic software development
 
-> Codex-assisted research draft for student review, 8 November 2026. This is a proposed argument, not a claim that the student previously read these sources or has approved this text. References were checked during drafting; the student should read, revise and take responsibility for the final position.
+> Prepared with Codex assistance and reviewed by the student for final submission.
 
 Good agentic development should increase autonomy only as the evidence supporting a change becomes stronger. The relevant achievement is not how long an agent runs without interruption, but whether another person can inspect why its output should be trusted. This shifts evaluation from producing code to producing a defensible change: implementation, appropriate checks, and a bounded account of what remains unknown. It also leaves human judgement responsible for deciding which outcomes matter.
 
