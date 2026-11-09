@@ -13,7 +13,11 @@ export function createBlackjackUI({el,navigate,render}) {
   // state was already correct) — mirrors poker.js's identical
   // awaySignature fix exactly.
   const awaySignature=r=>r?r.players.map(p=>`${p.id}:${p.away?1:0}`).join(','):'';
-  const resume=el('aside',{class:'domino-resume',hidden:true});document.body.append(resume);
+  // .game-resume: the one shared bottom-left "Return to [game] / Leave
+  // table" panel class every online game's client reuses identically
+  // (public/styles.css) — the user's own explicit request to unify a
+  // layout that used to differ per game.
+  const resume=el('aside',{class:'game-resume',hidden:true});document.body.append(resume);
   const identity=()=>{try{return JSON.parse(localStorage.getItem('vegas:bar:session')||'null')}catch{return null}};
   let noticeDialog=null,noticeOwner='';
   function closeNotice(){noticeDialog?.close();noticeDialog?.remove();noticeDialog=null;noticeOwner='';}
@@ -47,7 +51,7 @@ export function createBlackjackUI({el,navigate,render}) {
       room=data.room;waitlist=data.waitlist||[];
       if(data.notice){showNotice(data.notice,who.playerId);if(mounted){room=null;error=data.notice;}}
       resume.hidden=mounted||!room||location.search!=='';
-      if(!resume.hidden)resume.replaceChildren(button('Return to Blackjack',()=>navigate('/?blackjackOnline='+room.id)),button('Leave table',()=>command('leave')));
+      if(!resume.hidden)resume.replaceChildren(button('Return to Blackjack',async()=>{const id=room.id;try{await api('away',{away:false});navigate('/?blackjackOnline='+id);}catch(e){alert(e.message);}}),button('Leave table',()=>command('leave')));
       const nextAwaySignature=awaySignature(room);
       if(mounted&&(lastVersion!==room?.version||nextAwaySignature!==lastAwaySignature||!room||error)){
         const key=room?JSON.stringify([room.hand,room.lastMove]):'';animate=!!lastMove&&lastMove!==key;lastMove=key;
@@ -126,7 +130,7 @@ export function createBlackjackUI({el,navigate,render}) {
         // throwing, so the player is never trapped here by a network
         // hiccup) makes Back to the bar an actual, visible "I've stepped
         // away" rather than a silent no-op on the seat's own state.
-        button('Back to the bar',async()=>{if(me&&!me.away)await command('away',{away:true});navigate('/');}),
+        button('Back to the bar',async()=>{try{if(me&&!me.away)await api('away',{away:true});navigate('/');}catch(e){error=e.message;draw();}}),
         // Moved into the header, immediately to the right of "Back to
         // the bar" (the user's own explicit placement request) — matches
         // poker.js's own identical header layout exactly, so the two

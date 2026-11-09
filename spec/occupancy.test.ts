@@ -9,8 +9,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
-import { BarError, findFreeTile, joinBar, moveBar, rejoinBar } from "../src/bar.ts";
-import { defaultSpawn, isWalkable } from "../src/barLayout.ts";
+import { BarError, findFreeTile, joinBar, moveBar, rejoinBar, sitAtSeat } from "../src/bar.ts";
+import { BAR_SEATS, defaultSpawn, isValidStep, isWalkable } from "../src/barLayout.ts";
 import { openDb } from "../src/db.ts";
 import { effectivePosition } from "../src/position.ts";
 import { createTableRoom, getTablesStatus } from "../src/tables.ts";
@@ -203,4 +203,78 @@ it("getTablesStatus reports an away Blackjack/Dominoes/Poker occupant as not pre
   expect(after.find(t => t.id === "blackjack-1")!.seats.find(s => s?.barPlayerId === a.playerId)?.present).toBe(true);
   expect(after.find(t => t.id === "dominoes-1")!.seats.find(s => s?.barPlayerId === b.playerId)?.present).toBe(true);
   expect(after.find(t => t.id === "texas-1")!.seats.find(s => s?.barPlayerId === c.playerId)?.present).toBe(true);
+});
+
+// 2026-11-09 acceptance fix: moveBar/sitAtSeat's own "leave your table
+// first" refusals only ever checked `blackjack_members`/`domino_members`/
+// `poker_members`'s `active=1` column — but marking yourself away
+// (setBlackjackAway/setDominoAway/setPokerAway) never clears `active`,
+// by design (the seat stays reserved). A player who clicked "Back to
+// the bar" (which sets away=true first, exactly like Vegas's own
+// departChoice) therefore still hit this same refusal on every single
+// step afterward — "Back to the bar" never actually let them walk, the
+// real bug a manual acceptance pass found. Each of these three mirrors
+// an existing, still-passing "seated and NOT away still blocks
+// movement" test (spec/blackjackOnline.test.ts's "blocks occupying
+// blackjack and other games/dining movement simultaneously",
+// spec/domino.test.ts's "requires identity and blocks leaving the
+// table by walking", spec/poker.test.ts's own moveBar assertion) —
+// confirming the fix adds an exemption for away specifically, rather
+// than weakening the refusal in general.
+function adjacentWalkableStep(x: number, y: number): [number, number] {
+  const candidates: Array<[number, number]> = [[x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]];
+  const next = candidates.find(([nx, ny]) => isValidStep(x, y, nx, ny));
+  if (!next) throw new Error("expected at least one walkable neighbor");
+  return next;
+}
+
+it("marking away at Blackjack lets the player walk again; un-marking away blocks it again", () => {
+  const a = joinBar(db, "A", "red");
+  openBlackjack(db, a.playerId, a.sessionSecret, 0);
+  expect(() => moveBar(db, a.playerId, a.sessionSecret, 1, 1)).toThrow(/blackjack/);
+  setBlackjackAway(db, a.playerId, a.sessionSecret, true);
+  const [x, y] = adjacentWalkableStep(a.x, a.y);
+  expect(() => moveBar(db, a.playerId, a.sessionSecret, x, y)).not.toThrow();
+  setBlackjackAway(db, a.playerId, a.sessionSecret, false);
+  const [x2, y2] = adjacentWalkableStep(x, y);
+  expect(() => moveBar(db, a.playerId, a.sessionSecret, x2, y2)).toThrow(/blackjack/);
+});
+
+it("marking away at Dominoes lets the player walk again; un-marking away blocks it again", () => {
+  const a = joinBar(db, "A", "red");
+  openDomino(db, a.playerId, a.sessionSecret, "online", 0);
+  expect(() => moveBar(db, a.playerId, a.sessionSecret, 1, 1)).toThrow(/domino/);
+  setDominoAway(db, a.playerId, a.sessionSecret, true);
+  const [x, y] = adjacentWalkableStep(a.x, a.y);
+  expect(() => moveBar(db, a.playerId, a.sessionSecret, x, y)).not.toThrow();
+  setDominoAway(db, a.playerId, a.sessionSecret, false);
+  const [x2, y2] = adjacentWalkableStep(x, y);
+  expect(() => moveBar(db, a.playerId, a.sessionSecret, x2, y2)).toThrow(/domino/);
+});
+
+it("marking away at Poker lets the player walk again; un-marking away blocks it again", () => {
+  const a = joinBar(db, "A", "red");
+  openPoker(db, a.playerId, a.sessionSecret, "online");
+  expect(() => moveBar(db, a.playerId, a.sessionSecret, 1, 1)).toThrow(/poker/);
+  setPokerAway(db, a.playerId, a.sessionSecret, true);
+  const [x, y] = adjacentWalkableStep(a.x, a.y);
+  expect(() => moveBar(db, a.playerId, a.sessionSecret, x, y)).not.toThrow();
+  setPokerAway(db, a.playerId, a.sessionSecret, false);
+  const [x2, y2] = adjacentWalkableStep(x, y);
+  expect(() => moveBar(db, a.playerId, a.sessionSecret, x2, y2)).toThrow(/poker/);
+});
+
+// The identical away=0 exemption applies to sitAtSeat too (a player who
+// stepped away from Blackjack/Dominoes/Poker must be able to sit at a
+// real dining/stool seat while away, exactly like Vegas's own awayMode
+// already lets a departed Vegas player do) — confirmed directly against
+// a real BAR_SEATS fixture, not just moveBar's own check in isolation.
+it("marking away at any of the three non-Vegas games lets the player sit at a real bar seat; a non-away seat still blocks it", () => {
+  const seat = BAR_SEATS[0];
+  const a = joinBar(db, "A", "red");
+  db.prepare(`UPDATE bar_players SET x = ?, y = ? WHERE id = ?`).run(seat.x, seat.y, a.playerId);
+  openBlackjack(db, a.playerId, a.sessionSecret, 0);
+  expect(() => sitAtSeat(db, a.playerId, a.sessionSecret, seat.id)).toThrow(/blackjack/);
+  setBlackjackAway(db, a.playerId, a.sessionSecret, true);
+  expect(() => sitAtSeat(db, a.playerId, a.sessionSecret, seat.id)).not.toThrow();
 });

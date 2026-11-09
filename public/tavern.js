@@ -984,7 +984,44 @@ export function createTavern({ el, render, navigate, saveSession, shouldApplyLiv
     // single global vegas:lastRoom key did (PLAN.md's
     // product-direction-update entry — the actual reported bug).
     let activeSeat=null;
-    let returnGameButton=null;
+    // One shared bottom-left "Return to [game] / Leave table" panel
+    // (.game-resume, public/styles.css) — the same class and position
+    // public/blackjack.js, public/domino.js and public/poker.js each
+    // already use for their own online table, so all four games' return
+    // controls now sit in the identical spot with the identical layout
+    // (the user's own explicit request). Supersedes the old header
+    // button ("Return to your game", top-right, inside .hud-actions) —
+    // removed entirely, never left behind as a second, redundant entry
+    // point into the same game.
+    const gameResume=el('aside',{class:'game-resume',hidden:true});
+    function updateGameResume(){
+      gameResume.hidden=!activeSeat;
+      if(!activeSeat)return;
+      gameResume.replaceChildren(
+        el('button',{onclick:async()=>{
+          // Clicking this is exactly "I'm deliberately going back to my
+          // table" — clears any pending away-from-table departure (see
+          // src/tables.ts's resumeActiveTable: only an explicit action
+          // like this one may do so, never a passive heartbeat).
+          try{
+            const response=await post('/resume',session);activeSeat=response.activeSeat??null;
+            if(!activeSeat){updateGameResume();toast.textContent='Your previous game has ended.';return;}
+            navigate(`/?room=${activeSeat.roomCode}`);
+          }catch(error){toast.textContent=error.message||'Could not return to the game';}
+        }},'Return to Las Vegas'),
+        // No confirm dialog here, matching blackjack.js/domino.js/
+        // poker.js's own identical bottom-left "Leave table" button
+        // exactly (none of the three confirms either) — this reuses
+        // src/tables.ts's exitActiveGame, the same bar-authenticated
+        // exit app.js's own error-recovery "Exit game" button already
+        // calls, so a lost/forged browser room secret can never block
+        // leaving from here.
+        el('button',{onclick:async()=>{
+          try{await post('/exit-game',{...session,roomCode:activeSeat.roomCode});}catch(error){toast.textContent=error.message||'Could not leave the table';return;}
+          activeSeat=null;updateGameResume();toast.textContent='You left the table.';
+        }},'Leave table'),
+      );
+    }
     let keys=new Set(), lastTime=0, destination=null, cameraInitialized=false, movementEpoch=0, heldDirection=null;
     // Crit 9: live updates arrive over SSE, not a fixed poll interval —
     // see CLAUDE.md. `liveCursor` is this channel's staleness-gate
@@ -1085,7 +1122,7 @@ export function createTavern({ el, render, navigate, saveSession, shouldApplyLiv
     const storageHandler=e=>{
       if(e.key!==sessionKey||e.newValue!==null||!active)return;
       session=null;mine=null;staminaFill.style.width='0%';staminaLabel.textContent='—';
-      activeSeat=null;if(returnGameButton){returnGameButton.remove();returnGameButton=null;}
+      activeSeat=null;updateGameResume();
       overlay.replaceChildren();openAuthOverlay();
     };
     window.addEventListener('storage',storageHandler);
@@ -1164,7 +1201,7 @@ export function createTavern({ el, render, navigate, saveSession, shouldApplyLiv
     const eatCanvas=el('canvas',{class:'eating-cutscene','aria-hidden':'true'});
     const eatCtx=eatCanvas.getContext('2d');
     const eatReduceMotion=typeof matchMedia==='function'?matchMedia('(prefers-reduced-motion: reduce)'):{matches:false};
-    const scene=el('div',{class:'tavern-world'},[canvas,seatLayer,hud,toast,directions,eatCanvas]); render(scene);
+    const scene=el('div',{class:'tavern-world'},[canvas,seatLayer,hud,toast,directions,gameResume,eatCanvas]); render(scene);
     const overlay=el('div',{class:'world-overlay'});scene.appendChild(overlay);
     // The counter's own physical menu book (public/menuBook.js) — one
     // in-scene entry point replacing the old "Mixology book"/"Meals/
@@ -1736,7 +1773,7 @@ export function createTavern({ el, render, navigate, saveSession, shouldApplyLiv
       session=null;
       try{localStorage.removeItem(sessionKey);}catch{}
       activeSeat=null;
-      if(returnGameButton){returnGameButton.remove();returnGameButton=null;}
+      updateGameResume();
       // This browser no longer controls any identity at all — clear the
       // just-logged-out character's own cached view (nickname tag,
       // sprite, stamina chip) rather than leaving it rendered stale
@@ -1921,7 +1958,7 @@ export function createTavern({ el, render, navigate, saveSession, shouldApplyLiv
             }
             const afterAuth=async()=>{
               if(session){
-                try{const resp=await post('/rejoin',session);applyIncoming(resp);activeSeat=resp.activeSeat??null;}catch{}
+                try{const resp=await post('/rejoin',session);applyIncoming(resp);activeSeat=resp.activeSeat??null;updateGameResume();}catch{}
               }
               chooseCharacter();
             };
@@ -1985,7 +2022,7 @@ export function createTavern({ el, render, navigate, saveSession, shouldApplyLiv
             }
             const afterReset=async()=>{
               if(session){
-                try{const resp=await post('/rejoin',session);applyIncoming(resp);activeSeat=resp.activeSeat??null;}catch{}
+                try{const resp=await post('/rejoin',session);applyIncoming(resp);activeSeat=resp.activeSeat??null;updateGameResume();}catch{}
               }
               chooseCharacter();
             };
@@ -2016,7 +2053,7 @@ export function createTavern({ el, render, navigate, saveSession, shouldApplyLiv
       const enter=el('button',{type:'submit',class:'enter-world'},'Step inside  →');
       const form=el('form',{class:'world-dialog avatar-dialog',role:'dialog','aria-label':'Create your character',onsubmit:async e=>{
         e.preventDefault();enter.disabled=true;error.textContent='';
-        try{const appearance={nickname:input.value.trim(),color,skin};let resp;if(session){resp=await post('/appearance',{...session,...appearance});applyIncoming(resp);session={...session,...appearance};}else{resp=await post('/join',appearance);session={...resp,...appearance};}activeSeat=resp.activeSeat??null;try{localStorage.setItem(sessionKey,JSON.stringify(session));}catch{}overlay.replaceChildren();applyIncoming(await read('/state'));begin();}
+        try{const appearance={nickname:input.value.trim(),color,skin};let resp;if(session){resp=await post('/appearance',{...session,...appearance});applyIncoming(resp);session={...session,...appearance};}else{resp=await post('/join',appearance);session={...resp,...appearance};}activeSeat=resp.activeSeat??null;updateGameResume();try{localStorage.setItem(sessionKey,JSON.stringify(session));}catch{}overlay.replaceChildren();applyIncoming(await read('/state'));begin();}
         catch(err){error.textContent=err.message||'Could not enter';enter.disabled=false;}
       }},[
         el('p',{class:'eyebrow'},'Las Vegas · OPEN ALL EVENING'),el('h1',{},'Come as you are.'),el('p',{class:'dialog-subtitle'},'Make yourself a little character. Your friends are inside.'),
@@ -2087,7 +2124,7 @@ export function createTavern({ el, render, navigate, saveSession, shouldApplyLiv
       // its job.
       timers.push(setInterval(()=>post('/heartbeat',session).then(resp=>{
         activeSeat=resp.activeSeat??null;
-        if(!activeSeat&&returnGameButton){returnGameButton.remove();returnGameButton=null;}
+        updateGameResume();
       }).catch(async e=>{
         // A 403 here is this identity's bar secret itself being revoked —
         // the heartbeat's own natural ~5s cadence is what makes this the
@@ -2102,7 +2139,7 @@ export function createTavern({ el, render, navigate, saveSession, shouldApplyLiv
           loggedOutElsewhereShown=true;
           session=null;try{localStorage.removeItem(sessionKey);}catch{}
           mine=null;staminaFill.style.width='0%';staminaLabel.textContent='—';
-          activeSeat=null;if(returnGameButton){returnGameButton.remove();returnGameButton=null;}
+          activeSeat=null;updateGameResume();
           const wasLoggedIn=!!account;
           await refreshAccount();
           toast.textContent=wasLoggedIn
@@ -2124,17 +2161,7 @@ export function createTavern({ el, render, navigate, saveSession, shouldApplyLiv
       // Driven by the server's own re-validated activeSeat, never a
       // locally-cached room code — a closed, left, or expired room, or a
       // different character's game entirely, is never offered here.
-      if(activeSeat){returnGameButton=el('button',{class:'hud-button',onclick:async()=>{
-        // Clicking this is exactly "I'm deliberately going back to my
-        // table" — clears any pending away-from-table departure (see
-        // src/tables.ts's resumeActiveTable: only an explicit action like
-        // this one may do so, never a passive heartbeat).
-        try{
-          const response=await post('/resume',session);activeSeat=response.activeSeat??null;
-          if(!activeSeat){returnGameButton?.remove();returnGameButton=null;toast.textContent='Your previous game has ended.';return;}
-          navigate(`/?room=${activeSeat.roomCode}`);
-        }catch(error){toast.textContent=error.message||'Could not return to the game';}
-      }},'Return to your game');hud.querySelector('.hud-actions').appendChild(returnGameButton);}
+      updateGameResume();
       toast.textContent='Welcome in. WASD / arrows to walk · click a destination';canvas.focus();
     }
     const keyDown=e=>{if(['INPUT','TEXTAREA'].includes(e.target.tagName)||overlay.childElementCount||eatingUI)return;const key=e.key.toLowerCase();if(['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright'].includes(key)){e.preventDefault();keys.add(key);path=[];pendingSitSeat=null;approachTarget=null;}if(e.key==='Escape'){path=[];destination=null;pendingSitSeat=null;approachTarget=null;}};
@@ -2725,7 +2752,7 @@ export function createTavern({ el, render, navigate, saveSession, shouldApplyLiv
     try{session=JSON.parse(localStorage.getItem(sessionKey)||'null');}catch{}
     if(session){
       try{
-        const resp=await post('/rejoin',session);applyIncoming(resp);activeSeat=resp.activeSeat??null;
+        const resp=await post('/rejoin',session);applyIncoming(resp);activeSeat=resp.activeSeat??null;updateGameResume();
         if(active){if(enteredThisPage)begin();else chooseCharacter();}
       }catch(e){
         if(e.status===403){

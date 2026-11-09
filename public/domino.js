@@ -26,7 +26,11 @@ export function layoutBones(board) {
 export function createDominoUI({el,navigate}) {
   let mounted=false,busy=false,fetching=false,room=null,selected=null,error='',generation=0,lastSignature='',waitlist=[];
   const saved=()=>{try{return JSON.parse(localStorage.getItem('vegas:bar:session')||'null');}catch{return null;}};
-  const resume=el('aside',{class:'domino-resume',hidden:true});document.body.append(resume);
+  // .game-resume: one shared bottom-left "Return to [game] / Leave
+  // table" panel class, reused identically by all four online games
+  // (public/styles.css) — the user's own explicit request to unify a
+  // layout that used to differ per game.
+  const resume=el('aside',{class:'game-resume',hidden:true});document.body.append(resume);
   async function api(action,body={}){
     const identity=saved();if(!identity)throw Error('Enter the tavern first.');
     const response=await fetch(`/api/domino/${action}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...body,playerId:identity.playerId,sessionSecret:identity.sessionSecret})});
@@ -83,7 +87,7 @@ export function createDominoUI({el,navigate}) {
     if(!mounted)return;document.body.classList.add('table-mode');
     const root=document.getElementById('app');
     const myOwnPlayer=room?.players?.find(p=>p.id===saved()?.playerId);
-    const header=el('header',{class:'domino-header'},[el('div',{},[el('small',{},'LAS VEGAS · THE DOMINO TABLE'),el('h1',{},'All Fives')]),el('button',{onclick:rules,'aria-label':'Game rules'},'▤ Rules'),
+    const header=el('header',{class:'domino-header'},[el('div',{},[el('small',{},'LAS VEGAS · ALL FIVES'),el('h1',{},'All Fives')]),el('button',{onclick:rules,'aria-label':'Game rules'},'▤ Rules'),
       // Explicit, display-only away toggle (2026-11-08, mirrors
       // poker.js's own identical button) — distinct from "Leave match"
       // below: away keeps the seat reserved (nobody else can take it)
@@ -99,7 +103,7 @@ export function createDominoUI({el,navigate}) {
       // blackjack.js make explicitly) makes Back to the bar an actual,
       // visible departure signal rather than a silent no-op on the
       // match's own state.
-      el('button',{onclick:async()=>{if(room&&myOwnPlayer&&!myOwnPlayer.away)await perform('away',{away:true});navigate('/');}},'Back to the bar')]);
+      el('button',{onclick:async()=>{try{if(room&&myOwnPlayer&&!myOwnPlayer.away)await api('away',{away:true});navigate('/');}catch(e){error=e.message;draw();}}},'Back to the bar')]);
     if(!room){
       // 2026-11-07: no more host-approval step, so a session with no room
       // can only mean either a waitlist entry for a currently-occupied
@@ -133,14 +137,26 @@ export function createDominoUI({el,navigate}) {
     }},'Leave match')]));
   }
   async function poll(){
-    const identity=saved();if(fetching||!identity)return;fetching=true;const g=generation,id=identity.playerId;
+    const identity=saved();if(!identity){resume.hidden=true;return;}if(fetching)return;fetching=true;const g=generation,id=identity.playerId;
     try{
       const data=await api('me',{active:mounted});if(g!==generation||saved()?.playerId!==id)return;
       room=data.room;waitlist=data.waitlist;
       const signature=JSON.stringify(data);
       if(mounted&&signature!==lastSignature){lastSignature=signature;draw();}
-      resume.hidden=mounted||!room;
-      if(room&&!mounted)resume.replaceChildren(el('button',{onclick:()=>navigate(`/?domino=${room.id}`)},'Return to dominoes'),el('button',{onclick:()=>perform('leave')},'Leave match'));
+      resume.hidden=mounted||!room||location.search!=='';
+      // "Return to All Fives" (not "Return to dominoes") and "Leave
+      // table" (not "Leave match") — the user's own explicit naming
+      // unification: the player-visible name for this game is All
+      // Fives everywhere, and the panel's own button wording matches
+      // the other three games exactly (poker.js/blackjack.js use the
+      // identical "Leave table" label here; the in-page "Leave match"
+      // button elsewhere in this file, with its own confirmation
+      // dialog, is unrelated and untouched — only this bottom-left
+      // panel's wording changes). Internal routing (`?domino=`,
+      // `perform('leave')`'s own `/api/domino/leave` call) keeps using
+      // "domino" throughout, per the user's own explicit instruction
+      // that internal identifiers don't need renaming.
+      if(!resume.hidden)resume.replaceChildren(el('button',{onclick:async()=>{const id=room.id;try{await api('away',{away:false});navigate(`/?domino=${id}`);}catch(e){alert(e.message);}}},'Return to All Fives'),el('button',{onclick:()=>perform('leave')},'Leave table'));
     }catch(e){if(mounted){error=e.message;draw();}}finally{fetching=false;}
   }
   async function open(mode,seat){

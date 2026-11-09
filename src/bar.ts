@@ -305,10 +305,25 @@ const lastLoggedMoveAt = new Map<string, number>();
 
 export function moveBar(db: Database.Database, playerId: string, sessionSecret: string, x: number, y: number): void {
   requireBarSession(db, playerId, sessionSecret);
-  if(db.prepare('SELECT 1 FROM blackjack_members WHERE bar_id=? AND active=1').get(playerId))throw new BarError('Leave your blackjack table first','already_seated',409);
-  if(db.prepare('SELECT 1 FROM domino_members WHERE bar_id=? AND active=1').get(playerId))throw new BarError('Leave your domino match first','already_seated',409);
+  // 2026-11-09 acceptance fix: these three blanket "leave your table
+  // first" refusals only ever checked `active=1` — but marking yourself
+  // away (setBlackjackAway/setDominoAway/setPokerAway) never clears
+  // `active`, by design (the seat stays reserved; CLAUDE.md's away
+  // sections). So a player who clicked "Back to the bar" (which sets
+  // away=1 first, exactly like Vegas's own departChoice) still hit this
+  // same refusal on every single step afterward — "Back to the bar"
+  // never actually let them walk, the one real bug a manual acceptance
+  // pass found. `effectivePosition` (src/position.ts) already excludes
+  // an away seat from counting as this identity's position; this is the
+  // same `away=0` exemption applied to the movement gate itself, so the
+  // two agree about who's "really" still at the table. A seated-and-
+  // NOT-away player (still actively at the table in another tab) is
+  // still correctly refused — away is the one and only thing that lifts
+  // this block, never a bare navigation away from the game view.
+  if(db.prepare('SELECT 1 FROM blackjack_members WHERE bar_id=? AND active=1 AND away=0').get(playerId))throw new BarError('Leave your blackjack table first','already_seated',409);
+  if(db.prepare('SELECT 1 FROM domino_members WHERE bar_id=? AND active=1 AND away=0').get(playerId))throw new BarError('Leave your domino match first','already_seated',409);
 
-  if(db.prepare('SELECT 1 FROM poker_members WHERE bar_id=? AND active=1').get(playerId))throw new BarError('Leave your poker table before walking in the bar','already_seated',409);
+  if(db.prepare('SELECT 1 FROM poker_members WHERE bar_id=? AND active=1 AND away=0').get(playerId))throw new BarError('Leave your poker table before walking in the bar','already_seated',409);
   // Mid an eating/drinking animation (CLAUDE.md's seated-eating section):
   // no moving until it naturally expires — the same server-checked lock
   // every other gated action (ordering, standing, joining a game) shares
@@ -385,10 +400,16 @@ export function getSeatLayout(): PublicSeat[] {
  * chair shouldn't surface a confusing refusal). */
 export function sitAtSeat(db: Database.Database, playerId: string, sessionSecret: string, seatId: string): void {
   requireBarSession(db, playerId, sessionSecret);
-  if(db.prepare('SELECT 1 FROM blackjack_members WHERE bar_id=? AND active=1').get(playerId))throw new BarError('Leave your blackjack table first','already_seated',409);
-  if(db.prepare('SELECT 1 FROM domino_members WHERE bar_id=? AND active=1').get(playerId))throw new BarError('Leave your domino match first','already_seated',409);
+  // Same `away=0` exemption as moveBar above, and for the identical
+  // reason — an away seat is reserved, not "still there": this identity
+  // is genuinely standing at the bar and must be able to sit at a real
+  // dining/stool seat exactly like Vegas's own awayMode already lets a
+  // departed Vegas player do (Vegas never gated sitAtSeat on its own
+  // table binding at all, only these three blanket checks did).
+  if(db.prepare('SELECT 1 FROM blackjack_members WHERE bar_id=? AND active=1 AND away=0').get(playerId))throw new BarError('Leave your blackjack table first','already_seated',409);
+  if(db.prepare('SELECT 1 FROM domino_members WHERE bar_id=? AND active=1 AND away=0').get(playerId))throw new BarError('Leave your domino match first','already_seated',409);
 
-  if(db.prepare('SELECT 1 FROM poker_members WHERE bar_id=? AND active=1').get(playerId))throw new BarError('Leave your poker table before sitting elsewhere','already_seated',409);
+  if(db.prepare('SELECT 1 FROM poker_members WHERE bar_id=? AND active=1 AND away=0').get(playerId))throw new BarError('Leave your poker table before sitting elsewhere','already_seated',409);
   if (isEating(db, playerId)) throw new BarError("finish eating or drinking first", "eating_active", 409);
   const seat = BAR_SEATS.find((s) => s.id === seatId);
   if (!seat) throw new BarError("no such seat", "seat_not_found", 404);

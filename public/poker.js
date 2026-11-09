@@ -52,7 +52,12 @@ export function createPokerUI({el,navigate}) {
   // exactly that one field, parallel to version for everything else.
   const awaySignature=r=>r?r.players.map(p=>`${p.id}:${p.away?1:0}`).join(','):'';
   const banner=el('aside',{class:'poker-invite',hidden:true});document.body.append(banner);
-  const resume=el('aside',{class:'poker-resume',hidden:true});document.body.append(resume);
+  // .game-resume: the one shared bottom-left "Return to [game] / Leave
+  // table" panel class every online game's client reuses identically
+  // (public/styles.css, superseding this file's own former bottom-right
+  // .poker-resume position) — the user's own explicit request to unify
+  // a layout that used to differ per game.
+  const resume=el('aside',{class:'game-resume',hidden:true});document.body.append(resume);
   let bankruptcyDialog=null,bankruptcyId='',bankruptcyOwner='';
   function dismissBankruptcy(){bankruptcyDialog?.close();bankruptcyDialog?.remove();bankruptcyDialog=null;bankruptcyId='';bankruptcyOwner='';}
   function showBankruptcy(notice,owner){
@@ -92,7 +97,7 @@ export function createPokerUI({el,navigate}) {
   async function poll(){
     if(polling)return;session=saved();
     if(bankruptcyDialog&&session?.playerId!==bankruptcyOwner)dismissBankruptcy();
-    if(!session)return;
+    if(!session){resume.hidden=true;return;}
     const id=session.playerId,current=generation;polling=true;
     try{
       const data=await api('me');if(saved()?.playerId!==id||current!==generation)return;
@@ -117,8 +122,12 @@ export function createPokerUI({el,navigate}) {
           el('button',{class:'secondary',onclick:async()=>{try{await api('respond',{inviteId:invite.id,join:false});banner.hidden=true;lastInvite='';}catch(e){notify(e);}}},'Decline'),
         ]));
       }else if(!invite&&lastInvite){banner.hidden=true;lastInvite='';}
-      resume.hidden=mounted||!room;
-      if(room&&!mounted)resume.replaceChildren(el('button',{onclick:()=>navigate(`/?poker=${room.id}`)},'Return to poker'),el('button',{onclick:async()=>{try{await api('leave');resume.hidden=true;}catch(e){notify(e);}}},'Leave table'));
+      resume.hidden=mounted||!room||location.search!=='';
+      // "Return to Texas Hold'em" (not "Return to poker") and "Leave
+      // table" — matches the other three games' own full game-name
+      // wording and shared button order exactly (the user's own
+      // explicit naming unification for this panel).
+      if(!resume.hidden)resume.replaceChildren(el('button',{onclick:async()=>{const id=room.id;try{await api('away',{away:false});navigate(`/?poker=${id}`);}catch(e){alert(e.message);}}},'Return to Texas Hold’em'),el('button',{onclick:async()=>{try{await api('leave');resume.hidden=true;}catch(e){notify(e);}}},'Leave table'));
     }catch(e){if(mounted)notify(e);}finally{polling=false;}
   }
   function draw(){
@@ -179,7 +188,7 @@ export function createPokerUI({el,navigate}) {
         // network call" choice) — the player is never blocked from
         // physically leaving just because this one display flag couldn't
         // be set.
-        ...(room.mode==='online'&&me?[el('button',{onclick:async()=>{if(!me.away)await api('away',{away:true}).catch(()=>{});navigate('/');}},'Back to the bar')]:[el('button',{onclick:()=>navigate('/')},'Back to the bar')]),
+        ...(room.mode==='online'&&me?[el('button',{onclick:async()=>{try{if(!me.away)await api('away',{away:true});navigate('/');}catch(e){notify(e);}}},'Back to the bar')]:[el('button',{onclick:()=>navigate('/')},'Back to the bar')]),
         el('button',{onclick:async()=>{try{await api('leave');generation++;room=null;navigate('/');}catch(e){notify(e);}}},'Leave table')]),
       rules,el('p',{class:'error',role:'status'},error),
       renderPokerTable(el,room,session.playerId),
